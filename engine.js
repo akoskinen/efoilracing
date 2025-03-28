@@ -765,7 +765,7 @@ function completeLap() {
     // Only store ghost data if it's a valid lap
     if (!collidedThisLap && currentLapTime > 10 && distanceTraveled > 100) {
         const newGhostData = {
-            trackKey: currentTrackKey,
+    trackKey: currentTrackKey,
             frames: recordedGhost.map(frame => ({
                 ...frame,
                 avgSpeedKmh: avgSpeedKmh,
@@ -799,19 +799,45 @@ function completeLap() {
         if (ghostCheckbox) {
             ghostCheckbox.checked = true;
         }
-    }
+  }
 }
 
 // --- Input Handling ---
 const keys = {};
 
-document.addEventListener('keydown', e => {
+document.addEventListener('keydown', function(e) {
   // Don't process keyboard shortcuts if game is paused or if typing in an input
   if (gamePaused || (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
     return;
   }
   
-  keys[e.key] = true;
+  switch(e.key) {
+    case 'ArrowUp':
+    case 'i':
+    case 'I':
+      e.preventDefault();
+      keys['ArrowUp'] = true;
+      break;
+    case 'ArrowDown':
+    case 'k':
+    case 'K':
+      e.preventDefault();
+      keys['ArrowDown'] = true;
+      break;
+    case 'ArrowLeft':
+    case 'j':
+    case 'J':
+      e.preventDefault();
+      keys['ArrowLeft'] = true;
+      break;
+    case 'ArrowRight':
+    case 'l':
+    case 'L':
+      e.preventDefault();
+      keys['ArrowRight'] = true;
+      break;
+    // Keep your other cases
+  }
 
   // Toggle 'P' to show/hide the ideal line
   if (e.key === 'p' || e.key === 'P') {
@@ -827,8 +853,33 @@ document.addEventListener('keydown', e => {
   }
 });
 
-document.addEventListener('keyup', e => {
-  keys[e.key] = false;
+document.addEventListener('keyup', function(e) {
+  switch(e.key) {
+    case 'ArrowUp':
+    case 'i':
+    case 'I':
+      keys['ArrowUp'] = false;
+      break;
+    case 'ArrowDown':
+    case 'k':
+    case 'K':
+      keys['ArrowDown'] = false;
+      break;
+    case 'ArrowLeft':
+    case 'j':
+    case 'J':
+      keys['ArrowLeft'] = false;
+      break;
+    case 'ArrowRight':
+    case 'l':
+    case 'L':
+      keys['ArrowRight'] = false;
+      break;
+    // Keep your other cases
+  }
+
+  // Keep your other existing key handlers
+  // ...
 });
 
 // Update cycleToNextTrack to handle track-specific telemetry
