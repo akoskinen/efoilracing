@@ -29,7 +29,7 @@ export class HighScoreManager {
         align-items: center;
         z-index: 1000;
         font-family: monospace;
-        transition: background 2s ease, backdrop-filter 2s ease;
+        transition: background 0.7s ease, backdrop-filter 0.7s ease;
       }
       
       .highscore-overlay-visible {
@@ -46,7 +46,7 @@ export class HighScoreManager {
         color: #fff;
         opacity: 0;
         transform: translateY(-10px);
-        transition: opacity 2s ease, transform 2s ease;
+        transition: opacity 0.7s ease, transform 0.7s ease;
       }
       
       .highscore-content-visible {
@@ -140,9 +140,11 @@ export class HighScoreManager {
       <div class="highscore-input">
         <h2>New High Score!</h2>
         <p class="lap-time"></p>
-        <input type="text" maxlength="4" pattern="[A-Z]*" placeholder="NAME">
-        <p>Press ENTER to save</p>
-        <p>Press ESC to cancel</p>
+        <input type="text" id="nickname-input" maxlength="4" placeholder="NAME" autocomplete="off">
+        <div style="margin-top: 15px;">
+          <button type="button" id="save-btn" onclick="window._tempSaveScore()" style="background: #007bff; color: white; border: none; padding: 8px 16px; font-size: 16px; cursor: pointer; margin-right: 10px; border-radius: 4px;">SAVE</button>
+          <button type="button" id="cancel-btn" onclick="window._tempHideOverlay()" style="background: #555; color: white; border: none; padding: 8px 16px; font-size: 16px; cursor: pointer; border-radius: 4px;">CANCEL</button>
+        </div>
       </div>
     `;
     return form;
@@ -181,25 +183,6 @@ export class HighScoreManager {
         this.hideOverlay();
       }
     });
-
-    // Handle input form submission
-    const inputField = this.inputForm.querySelector('input');
-    inputField.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        e.stopPropagation();
-        const nickname = inputField.value.trim().toUpperCase();
-        if (nickname) {
-          this.handleScoreSubmission(nickname);
-          // Don't clear the input field - user prefers to keep it
-        }
-      }
-      
-      // Also allow ESC key to close the form when focused on input
-      if (e.key === 'Escape') {
-        this.hideOverlay();
-      }
-    });
   }
 
   getScores(trackKey) {
@@ -208,11 +191,86 @@ export class HighScoreManager {
   }
 
   saveScore(trackKey, entry) {
-    let scores = this.getScores(trackKey);
-    scores.push(entry);
-    scores.sort((a, b) => a.time - b.time);
-    scores = scores.slice(0, 15); // Keep top 15
-    localStorage.setItem(`highscores_${trackKey}`, JSON.stringify(scores));
+    try {
+      // Make a copy with optimized ghost data
+      const optimizedEntry = {
+        nickname: entry.nickname,
+        time: entry.time,
+        distance: entry.distance,
+        date: entry.date
+      };
+      
+      // Optimize ghost data by reducing precision and sampling
+      if (entry.ghostData && Array.isArray(entry.ghostData)) {
+        // Only store a reduced subset of frames - no need for 60fps recording
+        // Take roughly 5 frames per second 
+        const sampledFrames = [];
+        const interval = Math.max(1, Math.floor(entry.ghostData.length / 200)); // Max 200 frames
+        
+        for (let i = 0; i < entry.ghostData.length; i += interval) {
+          if (sampledFrames.length >= 200) break; // Hard limit
+          
+          const frame = entry.ghostData[i];
+          sampledFrames.push({
+            time: Number(frame.time.toFixed(2)),
+            x: Number(frame.x.toFixed(2)),
+            y: Number(frame.y.toFixed(2)),
+            heading: Number(frame.heading.toFixed(2))
+          });
+        }
+        
+        // Ensure we always include the last frame
+        if (entry.ghostData.length > 0 && sampledFrames.length > 0) {
+          const lastFrame = entry.ghostData[entry.ghostData.length - 1];
+          sampledFrames.push({
+            time: Number(lastFrame.time.toFixed(2)),
+            x: Number(lastFrame.x.toFixed(2)),
+            y: Number(lastFrame.y.toFixed(2)),
+            heading: Number(lastFrame.heading.toFixed(2))
+          });
+        }
+        
+        optimizedEntry.ghostData = sampledFrames;
+      }
+      
+      // Get existing scores and add the new one
+      let scores = this.getScores(trackKey);
+      scores.push(optimizedEntry);
+      scores.sort((a, b) => a.time - b.time);
+      scores = scores.slice(0, 15); // Keep top 15
+      
+      // Calculate storage needs and potentially prune ghost data from older entries
+      const serialized = JSON.stringify(scores);
+      if (serialized.length > 2000000) { // If approaching 2MB
+        // Keep ghost data only for top 3 scores
+        for (let i = 3; i < scores.length; i++) {
+          delete scores[i].ghostData; // Remove ghost data from older entries
+        }
+      }
+      
+      localStorage.setItem(`highscores_${trackKey}`, JSON.stringify(scores));
+      return true;
+    } catch (err) {
+      console.error("Error saving score:", err);
+      
+      // Last resort - try saving without any ghost data
+      try {
+        let scores = this.getScores(trackKey);
+        const bareEntry = {
+          nickname: entry.nickname,
+          time: entry.time,
+          date: entry.date
+        };
+        scores.push(bareEntry);
+        scores.sort((a, b) => a.time - b.time);
+        scores = scores.slice(0, 15);
+        localStorage.setItem(`highscores_${trackKey}`, JSON.stringify(scores));
+        return true;
+      } catch (fallbackErr) {
+        console.error("Complete failure to save score:", fallbackErr);
+        return false;
+      }
+    }
   }
 
   showInputForm(lapTime, ghostData) {
@@ -238,32 +296,96 @@ export class HighScoreManager {
     // Clear any existing timers
     this.cancelPendingTransitions();
     
-    // Delay showing the overlay to allow telemetry to update
+    // Wait for 2 seconds after lap completion before showing the form
     setTimeout(() => {
+      // Store instance reference in window for inline onclick handlers
+      window._highScoreManager = this;
+      
+      // Global functions for inline handlers
+      window._tempSaveScore = function() {
+        const input = document.getElementById('nickname-input');
+        const nickname = input ? input.value.trim().toUpperCase() : "UNKNOWN";
+        
+        setTimeout(() => {
+          if (window._highScoreManager && window._highScoreManager.pendingScore) {
+            try {
+              window._highScoreManager.pendingScore.nickname = nickname;
+              window._highScoreManager.saveScore(window.currentTrackKey, window._highScoreManager.pendingScore);
+              window._highScoreManager.pendingScore = null;
+              
+              // Call hideOverlay to use the fade transition
+              window._highScoreManager.hideOverlay();
+            } catch (err) {
+              console.error("Error saving score:", err);
+            }
+          } else {
+            console.error("Missing highScoreManager or pendingScore");
+          }
+        }, 100);
+      };
+      
+      window._tempHideOverlay = function() {
+        // Use the hideOverlay method for the fade transition
+        if (window._highScoreManager) {
+          window._highScoreManager.hideOverlay();
+        } else {
+          // Fallback to direct hide
+          const overlay = document.getElementById('highscore-overlay');
+          if (overlay) overlay.style.display = 'none';
+          
+          // Resume game
+          if (typeof resumeGame === 'function') {
+            resumeGame();
+          }
+        }
+      };
+      
+      // Show the overlay immediately with a fresh DOM
       this.overlay.innerHTML = '';
-      this.overlay.appendChild(this.inputForm);
+      this.overlay.appendChild(this.inputForm.cloneNode(true));
       this.overlay.style.display = 'flex';
       
       // Update the form to show the lap time
-      this.inputForm.querySelector('.lap-time').textContent = 
+      this.overlay.querySelector('.lap-time').textContent = 
         `Lap Time: ${lapTime.toFixed(2)}s`;
       
-      // Trigger the fade-in effect
-      setTimeout(() => {
-        this.overlay.classList.add('highscore-overlay-visible');
-        this.inputForm.querySelector('.highscore-input').classList.add('highscore-content-visible');
+      // Pause the game immediately
+      pauseGame();
+      this.gamePaused = true;
+      
+      // Setup input element for Enter key handling
+      const inputField = this.overlay.querySelector('#nickname-input');
+      if (inputField) {
+        // Reset
+        inputField.value = '';
         
-        // Pause the game immediately instead of waiting for animation
-        pauseGame();
-        this.gamePaused = true;
+        // Auto uppercase
+        inputField.addEventListener('input', function() {
+          this.value = this.value.toUpperCase();
+        });
         
-        // Focus on the input field
-        const inputField = this.inputForm.querySelector('input');
-        if (inputField) {
+        // Add simple Enter key handler
+        inputField.addEventListener('keypress', function(e) {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
+            window._tempSaveScore();
+          }
+        });
+        
+        // Focus after DOM is ready
+        setTimeout(() => {
           inputField.focus();
-        }
+        }, 200);
+      }
+      
+      // Add a small delay before starting the transition for better visual effect
+      setTimeout(() => {
+        // Make the overlay content visible with transition
+        this.overlay.classList.add('highscore-overlay-visible');
+        this.overlay.querySelector('.highscore-input').classList.add('highscore-content-visible');
       }, 50);
-    }, 1000); // Allow 1 second for telemetry to update
+    }, 2000); // Wait 2 seconds after lap completion
   }
 
   calculateDistance(ghostData) {
@@ -352,14 +474,19 @@ export class HighScoreManager {
         // Format ghost data properly
         try {
           // First, ensure each frame has required fields
-          const ghostFrames = score.ghostData.map(frame => ({
+          const ghostFrames = score.ghostData ? score.ghostData.map(frame => ({
             time: frame.time || 0,
             x: frame.x || 0,
             y: frame.y || 0,
             heading: frame.heading || 0,
             avgSpeedKmh: score.time > 0 ? (score.distance / score.time) * 3.6 : 0,
             finalLapTime: score.time
-          }));
+          })) : [];
+          
+          if (ghostFrames.length === 0) {
+            console.warn("No ghost data available for this score");
+            return;
+          }
           
           // Sort frames by time to ensure proper sequence
           ghostFrames.sort((a, b) => a.time - b.time);
@@ -422,12 +549,13 @@ export class HighScoreManager {
       });
     });
     
-    // Trigger the fade-in effect
+    // Add a small delay before starting transition
     setTimeout(() => {
+      // Make the overlay content visible with transition
       this.overlay.classList.add('highscore-overlay-visible');
       this.scoreList.querySelector('.highscore-list').classList.add('highscore-content-visible');
       
-      // Pause the game immediately instead of waiting for animation
+      // Pause the game immediately instead of waiting for animation to complete
       pauseGame();
       this.gamePaused = true;
     }, 50);
@@ -443,19 +571,18 @@ export class HighScoreManager {
       this.gamePaused = false;
     }
     
-    // Fade out the overlay
+    // Fade out the overlay instead of hiding immediately
     this.overlay.classList.remove('highscore-overlay-visible');
     const content = this.overlay.querySelector('.highscore-input') || this.overlay.querySelector('.highscore-list');
     if (content) {
       content.classList.remove('highscore-content-visible');
     }
     
-    // Don't wait for animation to complete to hide the overlay
-    // Just set a shorter timeout
+    // Set a timer to fully hide after animation completes
     this.transitionTimer = setTimeout(() => {
       this.overlay.style.display = 'none';
       this.overlay.innerHTML = '';
-    }, 500); // Much shorter timeout (500ms instead of 2000ms)
+    }, 700); // Shorter than original 2s but enough to see the transition
   }
 
   cancelPendingTransitions() {
