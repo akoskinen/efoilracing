@@ -1,6 +1,10 @@
 ////////////////////////////////////////////////////////////
 // engine.js
 ////////////////////////////////////////////////////////////
+// This simulator and the code of the referenced modules is/are 
+// the property of Antti Koskinen (anttikoskinen@mac.com)
+// All Rights reserved, contact by email for any inquiries.
+////////////////////////////////////////////////////////////
 
 import { trackConfigs } from "./trackConfigs.js";
 import { commentaryClips, playCommentary } from "./commentary.js";
