@@ -290,7 +290,7 @@ trackRadios.forEach(radio => {
       wakeTrail = [];
       
       // Position player centered horizontally, higher above the lap time display
-      pos.x = canvas.width / 2;
+      pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
       pos.y = canvas.height - 150; // Changed from 100 to 150 pixels up from bottom
       heading = -Math.PI / 2; // Point upward (-90 degrees)
       
@@ -298,9 +298,74 @@ trackRadios.forEach(radio => {
       idealLineData = null;
       showIdealLine = false;
       ghostWakeTrail = [];
+      
+      // Update URL to reflect track change (without reloading page)
+      const url = new URL(window.location);
+      url.searchParams.set('track', currentTrackKey);
+      window.history.replaceState({}, '', url);
     }
   });
 });
+
+// --- URL Parameter Handling ---
+function parseURLParams() {
+  const params = new URLSearchParams(window.location.search);
+  
+  // Check for track parameter
+  if (params.has('track')) {
+    const trackFromURL = params.get('track');
+    
+    // Check if this is a valid track key
+    if (availableTrackKeys.includes(trackFromURL)) {
+      // Update current track
+      currentTrackKey = trackFromURL;
+      currentTrack = trackConfigs[currentTrackKey];
+      
+      // Update radio button
+      const radioToSelect = document.querySelector(`input[name="track"][value="${currentTrackKey}"]`);
+      if (radioToSelect) {
+        radioToSelect.checked = true;
+      }
+      
+      // Compute buoys for the new track
+      computeBuoys();
+    }
+  }
+  
+  // Check for fullscreen parameter
+  if (params.has('fullscreen') && params.get('fullscreen') === 'true') {
+    // Small delay to ensure everything is loaded
+    setTimeout(() => {
+      toggleFullScreen();
+    }, 500);
+  }
+}
+
+// --- Fullscreen Toggle ---
+function toggleFullScreen() {
+  if (!document.fullscreenElement) {
+    // Enter fullscreen
+    if (document.documentElement.requestFullscreen) {
+      document.documentElement.requestFullscreen();
+    } else if (document.documentElement.webkitRequestFullscreen) { /* Safari */
+      document.documentElement.webkitRequestFullscreen();
+    } else if (document.documentElement.msRequestFullscreen) { /* IE11 */
+      document.documentElement.msRequestFullscreen();
+    }
+  } else {
+    // Exit fullscreen
+    if (document.exitFullscreen) {
+      document.exitFullscreen();
+    } else if (document.webkitExitFullscreen) { /* Safari */
+      document.webkitExitFullscreen();
+    } else if (document.msExitFullscreen) { /* IE11 */
+      document.msExitFullscreen();
+    }
+  }
+}
+
+// Add this to window's global scope so it can be called from buttons or links
+window.toggleFullScreen = toggleFullScreen;
 
 // --- Game Physics and Control Variables ---
 const maxSpeed       = 100;
@@ -793,7 +858,7 @@ function cycleToNextTrack() {
   computeBuoys();
     
   // Position player centered horizontally (minus 1m), higher above the lap time display
-  pos.x = (canvas.width / 2) - (1 * currentTrack.scale); // Offset by 1m to the left
+  pos.x = (canvas.width / 2) - (1 * currentTrack.scale) - 4; // Add 4px shift to the left
   pos.y = canvas.height - 150;
   heading = -Math.PI / 2; // Point upward (-90 degrees)
   
@@ -1465,8 +1530,11 @@ updateGhostStats();
 // --- Initialization ---
 resizeCanvas();
 
+// Parse URL parameters before initializing player position
+parseURLParams();
+
 // Initialize player position centered horizontally, higher above the lap time display
-pos.x = canvas.width / 2;
+pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
 pos.y = canvas.height - 150; // Changed from 100 to 150 pixels up from bottom
 heading = -Math.PI / 2; // Point upward (-90 degrees)
 
@@ -1805,7 +1873,7 @@ function resetTrack() {
     bankAngleDeg = 0;
     wakeTrail = [];
     
-    pos.x = canvas.width / 2;
+    pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
     pos.y = canvas.height - 150;
     prevPos.x = pos.x;
     prevPos.y = pos.y;
