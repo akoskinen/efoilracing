@@ -8,6 +8,8 @@ export class HighScoreManager {
     this.scoreList = this.createScoreList();
     this.isVisible = false;
     this.setupListeners();
+    this.transitionTimer = null; // Add a timer to track transitions
+    this.gamePaused = false; // Track pause state
   }
   
   injectStyles() {
@@ -233,6 +235,9 @@ export class HighScoreManager {
       ghostData: ghostData
     };
     
+    // Clear any existing timers
+    this.cancelPendingTransitions();
+    
     // Delay showing the overlay to allow telemetry to update
     setTimeout(() => {
       this.overlay.innerHTML = '';
@@ -248,15 +253,15 @@ export class HighScoreManager {
         this.overlay.classList.add('highscore-overlay-visible');
         this.inputForm.querySelector('.highscore-input').classList.add('highscore-content-visible');
         
-        // Only pause the game after the animation finishes
-        setTimeout(() => {
-          pauseGame();
-          // Focus on the input field
-          const inputField = this.inputForm.querySelector('input');
-          if (inputField) {
-            inputField.focus();
-          }
-        }, 2000);
+        // Pause the game immediately instead of waiting for animation
+        pauseGame();
+        this.gamePaused = true;
+        
+        // Focus on the input field
+        const inputField = this.inputForm.querySelector('input');
+        if (inputField) {
+          inputField.focus();
+        }
       }, 50);
     }, 1000); // Allow 1 second for telemetry to update
   }
@@ -300,6 +305,9 @@ export class HighScoreManager {
     // Use provided trackKey or get from global
     const currentTrackKey = trackKey || window.currentTrackKey;
     const trackConfigs = window.trackConfigs;
+    
+    // Clear any existing timers
+    this.cancelPendingTransitions();
     
     this.overlay.innerHTML = '';
     this.overlay.appendChild(this.scoreList);
@@ -419,16 +427,21 @@ export class HighScoreManager {
       this.overlay.classList.add('highscore-overlay-visible');
       this.scoreList.querySelector('.highscore-list').classList.add('highscore-content-visible');
       
-      // Pause the game when showing score list, but only after animation completes
-      setTimeout(() => {
-        pauseGame();
-      }, 2000);
+      // Pause the game immediately instead of waiting for animation
+      pauseGame();
+      this.gamePaused = true;
     }, 50);
   }
 
   hideOverlay() {
-    // Resume the game immediately - don't make the user wait
-    resumeGame();
+    // Cancel any pending transitions
+    this.cancelPendingTransitions();
+    
+    // Resume the game immediately if it was paused
+    if (this.gamePaused) {
+      resumeGame();
+      this.gamePaused = false;
+    }
     
     // Fade out the overlay
     this.overlay.classList.remove('highscore-overlay-visible');
@@ -437,11 +450,20 @@ export class HighScoreManager {
       content.classList.remove('highscore-content-visible');
     }
     
-    // After fade-out completes, hide the overlay
-    setTimeout(() => {
+    // Don't wait for animation to complete to hide the overlay
+    // Just set a shorter timeout
+    this.transitionTimer = setTimeout(() => {
       this.overlay.style.display = 'none';
       this.overlay.innerHTML = '';
-    }, 2000);
+    }, 500); // Much shorter timeout (500ms instead of 2000ms)
+  }
+
+  cancelPendingTransitions() {
+    // Clear any transition timers
+    if (this.transitionTimer) {
+      clearTimeout(this.transitionTimer);
+      this.transitionTimer = null;
+    }
   }
 
   toggleScoreList() {
