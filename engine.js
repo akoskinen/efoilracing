@@ -362,10 +362,76 @@ function toggleFullScreen() {
       document.msExitFullscreen();
     }
   }
+  
+  // Update fullscreen button state
+  updateFullscreenButtonState();
 }
 
 // Add this to window's global scope so it can be called from buttons or links
 window.toggleFullScreen = toggleFullScreen;
+
+// --- Fullscreen Button ---
+function createFullscreenButton() {
+  const button = document.createElement('div');
+  button.id = 'fullscreen-button';
+  button.innerHTML = '[ ]';
+  button.title = 'Toggle Fullscreen';
+  
+  // Add CSS for the button
+  const style = document.createElement('style');
+  style.textContent = `
+    #fullscreen-button {
+      position: fixed;
+      top: 15px;
+      right: 15px;
+      color: rgba(255, 255, 255, 0.5);
+      font-family: monospace;
+      font-size: 16px;
+      padding: 5px 8px;
+      cursor: pointer;
+      z-index: 1000;
+      border-radius: 4px;
+      user-select: none;
+      transition: all 0.2s ease;
+    }
+    
+    #fullscreen-button:hover {
+      color: rgba(255, 255, 255, 0.9);
+      transform: scale(1.1);
+    }
+  `;
+  document.head.appendChild(style);
+  
+  // Add click handler
+  button.addEventListener('click', () => {
+    toggleFullScreen();
+  });
+  
+  // Add to document
+  document.body.appendChild(button);
+  
+  // Set initial state
+  updateFullscreenButtonState();
+  
+  // Add fullscreen change listener
+  document.addEventListener('fullscreenchange', updateFullscreenButtonState);
+  document.addEventListener('webkitfullscreenchange', updateFullscreenButtonState);
+  document.addEventListener('mozfullscreenchange', updateFullscreenButtonState);
+  document.addEventListener('MSFullscreenChange', updateFullscreenButtonState);
+}
+
+function updateFullscreenButtonState() {
+  const button = document.getElementById('fullscreen-button');
+  if (!button) return;
+  
+  if (document.fullscreenElement) {
+    button.innerHTML = '[ x ]';
+    button.title = 'Exit Fullscreen (Esc)';
+  } else {
+    button.innerHTML = '[ ]';
+    button.title = 'Enter Fullscreen';
+  }
+}
 
 // --- Game Physics and Control Variables ---
 const maxSpeed       = 100;
@@ -2028,3 +2094,6 @@ function debugDirectionalCrossing() {
         }
     }
 }
+
+// Create fullscreen button
+createFullscreenButton();
