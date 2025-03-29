@@ -1634,10 +1634,18 @@ document.getElementById('keepGhost').addEventListener('change', function(e) {
 // Update the clear button handler
 clearGhostBtn.addEventListener('click', () => {
   ghostDataMap.clear();
-    ghostWakeTrail = [];
-    document.getElementById('keepGhost').checked = false;
-    keepCurrentGhost = false;
-    updateGhostStats();
+  ghostWakeTrail = [];
+  document.getElementById('keepGhost').checked = false;
+  keepCurrentGhost = false;
+  // Set currentGhost to null to fully clear it
+  currentGhost = null; 
+  showGhost = false;
+  // Update checkbox
+  const showGhostCheckbox = document.getElementById('showGhost');
+  if (showGhostCheckbox) {
+    showGhostCheckbox.checked = false;
+  }
+  updateGhostStats();
   alert('Ghost data cleared.');
 });
 
