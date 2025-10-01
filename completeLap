@@ -1,0 +1,29 @@
+function recalculateGhostAvgSpeed(ghost) {
+  if (!ghost || !ghost.frames || ghost.frames.length < 2) {
+    return 0;
+  }
+  
+  // Get time from the last frame
+  const time = ghost.frames[ghost.frames.length - 1].finalLapTime;
+  if (!time || time <= 0) {
+    return 0;
+  }
+  
+  // Calculate total distance from ghost frames
+  let totalDist = 0;
+  for (let i = 1; i < ghost.frames.length; i++) {
+    const prevFrame = ghost.frames[i-1];
+    const currFrame = ghost.frames[i];
+    const dx = currFrame.x - prevFrame.x;
+    const dy = currFrame.y - prevFrame.y;
+    totalDist += Math.hypot(dx, dy);
+  }
+  
+  // Calculate correct average speed
+  const avgSpeed = (totalDist / time) * 3.6; // Convert m/s to km/h
+  
+  // Store the correct average speed on the ghost object
+  ghost.correctAvgSpeed = avgSpeed;
+  
+  return avgSpeed;
+} 

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>eFoil Racing Prototype</title>
+  <style>
+	html, body {
+	  margin: 0;
+	  padding: 0;
+	  height: 100%;
+	  width: 100%;
+	  background: #333;
+	  font-family: sans-serif;
+	  color: #fff;
+	  overflow: hidden;
+	}
+	#gameCanvas {
+	  display: block;
+	  background: #222;
+	}
+	/* Lap time & telemetry display */
+	#lapTimeDisplay, #speedDisplay, #bankAngleDisplay {
+	  position: absolute;
+	  left: 50%;
+	  transform: translateX(-50%);
+	  color: #fff;
+	  text-shadow: 2px 2px 2px #000;
+	}
+	#lapTimeDisplay { bottom: 80px; font-size: 28px; font-weight: 300; }
+	#speedDisplay { bottom: 50px; font-size: 14px; font-family: Helvetica, sans-serif; font-weight: 300; }
+	#bankAngleDisplay { bottom: 20px; font-size: 14px; font-family: Helvetica, sans-serif; font-weight: 300; }
+
+	/* Lap history */
+	#lapHistory {
+	  position: absolute;
+	  top: 80px;
+	  right: 20px;
+	  background: rgba(0, 0, 0, 0.7);
+	  padding: 10px;
+	  border-radius: 8px;
+	  max-height: 300px;
+	  overflow-y: auto;
+	  font-size: 14px;
+	  width: 220px;
+	  visibility: hidden;
+	}
+	
+	/* Ghost Import/Export Controls */
+	#ghostControls {
+	  position: absolute;
+	  bottom: 20px;
+	  left: 20px;
+	  background: rgba(0, 0, 0, 0.7);
+	  padding: 10px;
+	  border-radius: 8px;
+	  font-size: 14px;
+	}
+	#ghostControls button,
+	#ghostControls input[type="file"] {
+	  display: block;
+	  margin: 6px 0;
+	}
+	
+	/* Track Selector */
+	#trackSelector {
+	  position: absolute;
+	  bottom: 20px;
+	  right: 20px;
+	  background: rgba(0, 0, 0, 0.7);
+	  padding: 10px;
+	  border-radius: 8px;
+	  font-size: 14px;
+	}
+  </style>
+</head>
+<body>
+  <!-- Audio elements -->
+  <audio id="windAudio" src="wind.mp3" loop preload="auto"></audio>
+  <audio id="musicAudio" src="game_music.mp3" preload="auto"></audio>
+  <audio id="boomStopAudio" src="boom_stop.mp3" preload="auto"></audio>
+  <audio id="collisionAudio" src="collision.wav" preload="auto"></audio>
+
+  <canvas id="gameCanvas"></canvas>
+
+  <!-- Lap time & telemetry -->
+  <div id="lapTimeDisplay">Laptime: 0.00</div>
+  <div id="speedDisplay">Speed: 0.0 km/h</div>
+  <div id="bankAngleDisplay">Bank: 0°</div>
+
+  <!-- Lap history -->
+  <div id="lapHistory"></div>
+
+  <!-- Ghost Info -->
+  <div id="ghostInfo" style="position: absolute; bottom: 20px; left: 160px; color: white; font-family: monospace;">
+    <label>
+      <input type="checkbox" id="keepGhost"> keep racing against this ghost:
+    </label>
+    <br>
+    <span id="ghostStats" style="margin-left: 0px;">No ghost loaded</span>
+  </div>
+
+  <!-- Ghost controls -->
+  <div id="ghostControls" style="position: absolute; bottom: 20px; left: 20px; padding: 10px; background-color: rgba(0,0,0,0.5); border: 1px dashed rgba(255,255,255,0.3); transition: background-color 0.2s;">
+	<button id="exportGhostBtn">Export Ghost</button><br>
+	<input type="file" id="importGhostFile" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
+	<button id="chooseFileBtn">Choose File</button> <span id="fileLabel">no file selected</span><br>
+	<button id="clearGhostBtn">Clear Ghost</button>
+  </div>
+
+  <!-- Track Selector -->
+  <div id="trackSelector">
+	<label>
+	  <input type="radio" name="track" value="speedTrack" checked>
+	  Speed Track
+	</label>
+	<br>
+	<label>
+	  <input type="radio" name="track" value="dubaiTrack">
+	  Dubai Track
+	</label>
+	<br>
+	<label>
+	  <input type="radio" name="track" value="sicily">
+	  Sicily Track
+	</label>
+	<br>
+	<label>
+	  <input type="radio" name="track" value="belgium">
+	  Belgium Track
+	</label>
+  </div>
+
+  <!-- Load configuration and engine files -->
+  <script type="module" src="engine.js"></script>
+</body>
+</html>
