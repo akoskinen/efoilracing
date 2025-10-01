@@ -1416,7 +1416,9 @@ function drawTelemetry() {
         ctx.fillText('No laps recorded', x, y);
     } else {
         trackLaps.forEach((lap, idx) => {
-    ctx.fillText(`Lap ${idx+1}:`, x, y);
+    // Calculate correct lap number: newest lap (idx 0) should have highest number
+    const lapNumber = trackLaps.length - idx;
+    ctx.fillText(`Lap ${lapNumber}:`, x, y);
     y += 18;
             if (lap.collided) {
                 ctx.fillText(`  Time:   ${lap.finalTime.toFixed(2)} s  (+${penaltySeconds}s penalty!)`, x, y);
