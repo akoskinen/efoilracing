@@ -130,13 +130,12 @@ export const trackConfigs = {
 	]
   },
 
+  // Declarative format (see trackSchema.js) — gates defined in track meters.
   sicily: {
 	name: "Sicily",
 	scale: 4,
-	useGates: true,
 	parallelTrack: true,
 	trackSeparation: 80,
-	directionalFinishGate: true,
 	buoys: [
 	  // Bottom track buoys
 	  {
@@ -172,64 +171,19 @@ export const trackConfigs = {
 		optimalSpeed: 30
 	  }
 	],
-	gates: {
+	gate: {
 	  sameStartFinish: false,
-	  computeGates: function(trackMetersToPixel) {
-		// Main track start gate (15m tall instead of 20m)
-		const mainStartPos1 = trackMetersToPixel(75, 50);
-		const mainStartPos2 = trackMetersToPixel(75, 65);  // Was 70
-		const mainStart = {
-		  x1: mainStartPos1.x,
-		  y1: mainStartPos1.y,
-		  x2: mainStartPos2.x,
-		  y2: mainStartPos2.y
-		};
-
-		// Main track finish gate (15m tall)
-		const mainFinishPos1 = trackMetersToPixel(75, -10);
-		const mainFinishPos2 = trackMetersToPixel(75, 5);   // Was 10
-		const mainFinish = {
-		  x1: mainFinishPos1.x,
-		  y1: mainFinishPos1.y,
-		  x2: mainFinishPos2.x,
-		  y2: mainFinishPos2.y
-		};
-
-		// Parallel track start gate (15m tall)
-		const parallelStartPos1 = trackMetersToPixel(75, this.parent.trackSeparation + 50);
-		const parallelStartPos2 = trackMetersToPixel(75, this.parent.trackSeparation + 65);  // Was +70
-		const parallelStart = {
-		  x1: parallelStartPos1.x,
-		  y1: parallelStartPos1.y,
-		  x2: parallelStartPos2.x,
-		  y2: parallelStartPos2.y
-		};
-
-		// Parallel track finish gate (15m tall)
-		const parallelFinishPos1 = trackMetersToPixel(75, this.parent.trackSeparation - 10);
-		const parallelFinishPos2 = trackMetersToPixel(75, this.parent.trackSeparation + 5);  // Was +10
-		const parallelFinish = {
-		  x1: parallelFinishPos1.x,
-		  y1: parallelFinishPos1.y,
-		  x2: parallelFinishPos2.x,
-		  y2: parallelFinishPos2.y
-		};
-
-		return {
-		  start: mainStart,
-		  finish: mainFinish,
-		  parallelStart: parallelStart,
-		  parallelFinish: parallelFinish
-		};
-	  }
+	  directional: false,
+	  directionalFinish: true,
+	  direction: { x: 1, y: 0 },
+	  start:  { x1: 75, y1: 50,  x2: 75, y2: 65 },
+	  finish: { x1: 75, y1: -10, x2: 75, y2: 5 }
 	}
   },
 
   belgium: {
     name: "Belgium",
     scale: 4,
-    useGates: true,
-    requiresDirectionalGates: true,
     buoys: [
       {
         x: 191,  // Starting from buoy 1
@@ -264,22 +218,11 @@ export const trackConfigs = {
         optimalSpeed: 30
       }
     ],
-    gates: {
+    gate: {
       sameStartFinish: true,
-      computeGates: function(trackMetersToPixel) {
-        // Place the gate at the bottom of the track, vertically oriented
-        const startFinish = {
-          x1: trackMetersToPixel(191, -20).x,
-          y1: trackMetersToPixel(191, -20).y,
-          x2: trackMetersToPixel(191, 0).x,
-          y2: trackMetersToPixel(191, 0).y
-        };
-
-        return {
-          start: startFinish,
-          finish: startFinish
-        };
-      }
+      directional: true,
+      direction: { x: 1, y: 0 },
+      start: { x1: 191, y1: -20, x2: 191, y2: 0 }
     }
   }
 };

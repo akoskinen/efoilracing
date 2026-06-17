@@ -9,6 +9,15 @@
 import { trackConfigs } from "./trackConfigs.js";
 import { commentaryClips, playCommentary } from "./commentary.js";
 import { HighScoreManager } from './highscores.js';
+import {
+  normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
+  hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
+  haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
+  RACING_LINE_COLORS
+} from './trackSchema.js';
+
+// Convert declarative track configs into the runtime shape the engine uses.
+Object.keys(trackConfigs).forEach(k => normalizeTrack(trackConfigs[k]));
 
 // --- Canvas and Context ---
 const canvas = document.getElementById('gameCanvas');
@@ -67,15 +76,94 @@ function lineIntersection(x1, y1, x2, y2, x3, y3, x4, y4) {
 // Make sure computedGates is declared at the top level
 let computedGates = null;
 
+// Geo-anchored tracks: mercator world pixels -> canvas pixels (rotation-aware).
+let geoCanvasTransform = null; // { zoom, scale, offsetX, offsetY }
+
+function computeGeoCanvasTransform() {
+  geoCanvasTransform = null;
+  if (!hasGeo(currentTrack)) return;
+
+  const geo = currentTrack.geo;
+  const latRad = geo.origin.lat * Math.PI / 180;
+  let zoom = Math.round(Math.log2(156543.03392 * Math.cos(latRad) / 0.25));
+  zoom = Math.max(12, Math.min(19, zoom));
+
+  const toMerc = (mx, my) => {
+    const ll = metersToLatLng(geo, mx, my);
+    return latLngToWorldPx(ll.lat, ll.lng, zoom);
+  };
+
+  const mercPts = [];
+  currentTrack.buoys.forEach(b => mercPts.push(toMerc(b.x, b.y)));
+  if (currentTrack.gate) {
+    const addSeg = s => {
+      if (s && [s.x1, s.y1, s.x2, s.y2].every(Number.isFinite)) {
+        mercPts.push(toMerc(s.x1, s.y1), toMerc(s.x2, s.y2));
+      }
+    };
+    addSeg(currentTrack.gate.start);
+    addSeg(currentTrack.gate.finish);
+  }
+  if (currentTrack.startPosition && Number.isFinite(currentTrack.startPosition.x)) {
+    mercPts.push(toMerc(currentTrack.startPosition.x, currentTrack.startPosition.y));
+  }
+  if (currentTrack.parallelTrack) {
+    currentTrack.buoys.forEach(b => {
+      mercPts.push(toMerc(b.x, b.y + (currentTrack.trackSeparation || 0)));
+    });
+  }
+
+  const xs = mercPts.map(p => p.x), ys = mercPts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const mercW = Math.max(maxX - minX, 40 / 0.25);
+  const mercH = Math.max(maxY - minY, 40 / 0.25);
+  const pad = 1.3;
+  const scale = Math.min(canvas.width / (mercW * pad), canvas.height / (mercH * pad));
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  geoCanvasTransform = {
+    zoom,
+    scale,
+    offsetX: canvas.width / 2 - cx * scale,
+    offsetY: canvas.height / 2 - cy * scale
+  };
+
+  // Calibrate pixels-per-meter for physics from geographic ground truth.
+  const p0 = mercatorToCanvas(toMerc(0, 0));
+  const p1 = mercatorToCanvas(toMerc(100, 0));
+  const pxDist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+  const ll0 = metersToLatLng(geo, 0, 0);
+  const ll1 = metersToLatLng(geo, 100, 0);
+  const groundDist = haversineMeters(ll0, ll1);
+  if (groundDist > 0) {
+    currentTrack._geoPxPerMeter = pxDist / groundDist;
+  }
+}
+
+function mercatorToCanvas(wx, wy) {
+  const t = geoCanvasTransform;
+  return { x: wx * t.scale + t.offsetX, y: wy * t.scale + t.offsetY };
+}
+
+function canvasToMercator(px, py) {
+  const t = geoCanvasTransform;
+  return { x: (px - t.offsetX) / t.scale, y: (py - t.offsetY) / t.scale };
+}
+
 // --- Compute Buoys Function ---
 function computeBuoys() {
-  // 1) Build an intermediate array "rawBuoyData" that scales the coordinates
+  // Geo tracks: build rotation-aware mercator transform before placing anything.
+  computeGeoCanvasTransform();
+
+  // 1) Build intermediate buoy positions in LOCAL canvas pixels (no trackOffset).
+  // trackOffset is applied only after centroid centering for non-geo tracks.
   const rawBuoyData = currentTrack.buoys.map(b => {
-    const px = b.x * currentTrack.scale;
-    const py = canvas.height - (b.y * currentTrack.scale);
+    const p = trackMetersToLocalPixel(b.x, b.y);
     return {
-      px,
-      py,
+      px: p.x,
+      py: p.y,
       turnIndex: b.turnIndex ?? null,
       aliases: b.aliases ?? [],
       apexRadius: b.apexRadius ?? 20,
@@ -86,24 +174,28 @@ function computeBuoys() {
   // 2) If there's a parallel track, add its buoys to centroid calculation
   let totalPoints = [...rawBuoyData];
   if (currentTrack.parallelTrack) {
-    const parallelBuoys = rawBuoyData.map(b => ({
-      ...b,
-      py: b.py - (currentTrack.trackSeparation * currentTrack.scale)
-    }));
+    const sep = currentTrack.trackSeparation || 0;
+    const parallelBuoys = currentTrack.buoys.map((b, i) => {
+      const p = trackMetersToLocalPixel(b.x, b.y + sep);
+      return { ...rawBuoyData[i], px: p.x, py: p.y };
+    });
     totalPoints = [...totalPoints, ...parallelBuoys];
   }
 
-  // 3) Find the centroid including both tracks if present
-  const centroid = totalPoints.reduce((acc, b) => ({
-    x: acc.x + b.px,
-    y: acc.y + b.py
-  }), { x: 0, y: 0 });
-  centroid.x /= totalPoints.length;
-  centroid.y /= totalPoints.length;
-
-  // 4) Compute offset to center the track on the canvas
-  trackOffset.x = canvas.width / 2 - centroid.x;
-  trackOffset.y = canvas.height / 2 - centroid.y;
+  // 3-4) Center non-geo tracks on canvas; geo tracks are already centered via transform.
+  if (geoCanvasTransform) {
+    trackOffset.x = 0;
+    trackOffset.y = 0;
+  } else {
+    const centroid = totalPoints.reduce((acc, b) => ({
+      x: acc.x + b.px,
+      y: acc.y + b.py
+    }), { x: 0, y: 0 });
+    centroid.x /= totalPoints.length;
+    centroid.y /= totalPoints.length;
+    trackOffset.x = canvas.width / 2 - centroid.x;
+    trackOffset.y = canvas.height / 2 - centroid.y;
+  }
 
   // 5) Create the final buoys array, applying offset
   buoys = rawBuoyData.map(b => ({
@@ -150,6 +242,90 @@ function computeBuoys() {
 
   // 7) Initialize apex states for these buoys
   initTurnStates();
+
+  // 8) Rebuild the satellite background for geo-anchored tracks
+  buildGeoBackground();
+}
+
+// --- Satellite Background (geo-anchored tracks) ---
+let geoBackground = null;
+let geoBgToken = 0;
+
+function updateGeoAttribution(show) {
+  let div = document.getElementById('geoAttribution');
+  if (!div) {
+    div = document.createElement('div');
+    div.id = 'geoAttribution';
+    div.style.cssText = `
+      position: fixed; bottom: 4px; right: 6px; z-index: 999;
+      color: rgba(255,255,255,0.65); font: 10px sans-serif;
+      text-shadow: 0 0 3px #000; pointer-events: none; display: none;
+    `;
+    div.textContent = 'Imagery \u00A9 Esri \u2014 Maxar, Earthstar Geographics';
+    document.body.appendChild(div);
+  }
+  div.style.display = show ? 'block' : 'none';
+}
+
+function buildGeoBackground() {
+  geoBgToken++;
+  geoBackground = null;
+  updateGeoAttribution(false);
+  if (!geoCanvasTransform) return;
+
+  const token = geoBgToken;
+  const t = geoCanvasTransform;
+  const zoom = t.zoom;
+
+  const off = document.createElement('canvas');
+  off.width = canvas.width;
+  off.height = canvas.height;
+  const octx = off.getContext('2d');
+  octx.fillStyle = '#10222c';
+  octx.fillRect(0, 0, off.width, off.height);
+
+  // Visible mercator bounds from the shared geo transform
+  const corners = [
+    canvasToMercator(0, 0),
+    canvasToMercator(off.width, 0),
+    canvasToMercator(0, off.height),
+    canvasToMercator(off.width, off.height)
+  ];
+  const txMin = Math.floor(Math.min(...corners.map(p => p.x)) / 256);
+  const txMax = Math.floor(Math.max(...corners.map(p => p.x)) / 256);
+  const tyMin = Math.floor(Math.min(...corners.map(p => p.y)) / 256);
+  const tyMax = Math.floor(Math.max(...corners.map(p => p.y)) / 256);
+  const tileCount = (txMax - txMin + 1) * (tyMax - tyMin + 1);
+  if (tileCount > 180) return;
+
+  const maxTileIndex = Math.pow(2, zoom) - 1;
+
+  function loadTile(z, x, y, depth) {
+    if (x < 0 || y < 0 || x > Math.pow(2, z) - 1 || y > Math.pow(2, z) - 1) return;
+    const img = new Image();
+    img.onload = () => {
+      if (token !== geoBgToken) return;
+      const s = Math.pow(2, zoom - z);
+      octx.setTransform(t.scale, 0, 0, t.scale, t.offsetX, t.offsetY);
+      octx.drawImage(img, x * 256 * s, y * 256 * s, 256 * s, 256 * s);
+      octx.setTransform(1, 0, 0, 1, 0, 0);
+      geoBackground = off;
+      updateGeoAttribution(true);
+    };
+    img.onerror = () => {
+      if (token !== geoBgToken || depth >= 2) return;
+      loadTile(z - 1, x >> 1, y >> 1, depth + 1);
+    };
+    img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+  }
+
+  for (let ty = tyMin; ty <= tyMax; ty++) {
+    for (let tx = txMin; tx <= txMax; tx++) {
+      if (tx >= 0 && ty >= 0 && tx <= maxTileIndex && ty <= maxTileIndex) {
+        loadTile(zoom, tx, ty, 0);
+      }
+    }
+  }
 }
 
 // --- Audio Manager ---
@@ -276,68 +452,275 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 
 // --- Track Selector Handling (Radio Buttons) ---
-const trackRadios = document.querySelectorAll('input[name="track"]');
-trackRadios.forEach(radio => {
-  radio.addEventListener('change', function(){
-    if (this.checked) {
-      currentTrackKey = this.value;
-      currentTrack    = trackConfigs[currentTrackKey];
-      computeBuoys();
-      
-      // Reset player state
-      speed = 0;
-      bankAngleDeg = 0;
-      wakeTrail = [];
-      
-      // Position player centered horizontally, higher above the lap time display
-      pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
-      pos.y = canvas.height - 150; // Changed from 100 to 150 pixels up from bottom
-      heading = -Math.PI / 2; // Point upward (-90 degrees)
-      
-      // Reset or clear the ideal line
-      idealLineData = null;
-      showIdealLine = false;
-      ghostWakeTrail = [];
-      
-      // Update URL to reflect track change (without reloading page)
-      const url = new URL(window.location);
-      url.searchParams.set('track', currentTrackKey);
-      window.history.replaceState({}, '', url);
+function onTrackRadioChange() {
+  if (this.checked) {
+    currentTrackKey = this.value;
+    currentTrack    = trackConfigs[currentTrackKey];
+    window.currentTrackKey = currentTrackKey;
+    computeBuoys();
+
+    // Reset player state
+    speed = 0;
+    bankAngleDeg = 0;
+    wakeTrail = [];
+    lapActive = false;
+    validCrossing = false;
+
+    placePlayerAtStart();
+
+    // Reset or clear the ideal line
+    idealLineData = null;
+    showIdealLine = false;
+    ghostWakeTrail = [];
+
+    // Update current ghost for the new track
+    currentGhost = ghostDataMap.get(currentTrackKey) || null;
+    updateGhostStats();
+    updateRacingLineToggleVisibility();
+
+    // Update URL to reflect track change (without reloading page)
+    const url = new URL(window.location);
+    url.searchParams.set('track', currentTrackKey);
+    url.searchParams.delete('data');
+    window.history.replaceState({}, '', url);
+  }
+}
+document.querySelectorAll('input[name="track"]')
+  .forEach(radio => radio.addEventListener('change', onTrackRadioChange));
+
+// --- Custom Track Registration (from designer / share links) ---
+function registerCustomTrack(key, track) {
+  normalizeTrack(track);
+  if (!track.name || !String(track.name).trim()) track.name = 'Custom Track';
+  trackConfigs[key] = track;
+  installTrackRacingGhosts(key, track);
+  if (!availableTrackKeys.includes(key)) availableTrackKeys.push(key);
+
+  // Add a radio button for the custom track
+  const selector = document.getElementById('trackSelector');
+  if (selector && !document.querySelector(`input[name="track"][value="${key}"]`)) {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'track';
+    input.value = key;
+    input.addEventListener('change', onTrackRadioChange);
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(' ' + track.name));
+    selector.appendChild(document.createElement('br'));
+    selector.appendChild(label);
+  }
+}
+
+function selectTrack(key) {
+  currentTrackKey = key;
+  currentTrack = trackConfigs[key];
+  window.currentTrackKey = key;
+  const radio = document.querySelector(`input[name="track"][value="${key}"]`);
+  if (radio) radio.checked = true;
+  computeBuoys();
+  if (currentTrack?.racingLines?.some(l => l.ghost?.frames?.length)) {
+    if (!keepCurrentGhost || !currentGhost) {
+      applyChaseGhostFromTrack(currentTrack);
+    }
+  } else {
+    currentGhost = ghostDataMap.get(currentTrackKey) || null;
+    activeChaseLineId = null;
+    updateLineGhostSelector(currentTrack);
+  }
+  updateGhostStats();
+  updateRacingLineToggleVisibility();
+}
+
+function trackHasRacingLines(track) {
+  return (track?.racingLines || []).some(l => l.visible !== false && l.points?.length >= 2);
+}
+
+function setShowRacingLines(on) {
+  showRacingLines = !!on;
+  const cb = document.getElementById('showRacingLines');
+  if (cb) cb.checked = showRacingLines;
+}
+
+function setKeepCurrentGhost(on) {
+  keepCurrentGhost = !!on;
+  window.keepCurrentGhost = keepCurrentGhost;
+  const cb = document.getElementById('keepGhost');
+  if (cb) cb.checked = keepCurrentGhost;
+}
+
+function updateRacingLineToggleVisibility() {
+  const row = document.getElementById('racingLineToggleRow');
+  if (row) row.style.display = trackHasRacingLines(currentTrack) ? '' : 'none';
+}
+
+function installTrackRacingGhosts(trackKey, track) {
+  if (!track?.racingLines) return;
+  track.racingLines.forEach(line => {
+    const ghost = ghostFromRacingLine(line);
+    if (ghost) {
+      ghost.trackKey = trackKey;
+      ghostDataMap.set(`${trackKey}_${line.id}`, ghost);
     }
   });
-});
+  updateLineGhostSelector(track);
+}
+
+function applyChaseGhostFromTrack(track) {
+  const line = chaseRacingLine(track);
+  if (!line) return;
+  const ghost = ghostFromRacingLine(line);
+  if (!ghost) return;
+  ghost.trackKey = currentTrackKey;
+  currentGhost = ghost;
+  activeChaseLineId = line.id;
+  showGhost = true;
+  const showGhostCheckbox = document.getElementById('showGhost');
+  if (showGhostCheckbox) showGhostCheckbox.checked = true;
+  updateLineGhostSelector(track);
+}
+
+function updateLineGhostSelector(track) {
+  let sel = document.getElementById('lineGhostSelect');
+  const linesWithGhost = (track?.racingLines || []).filter(l => l.ghost?.frames?.length);
+  if (linesWithGhost.length <= 1) {
+    if (sel) sel.remove();
+    return;
+  }
+  const host = document.getElementById('ghostInfo');
+  if (!host) return;
+  if (!sel) {
+    sel = document.createElement('select');
+    sel.id = 'lineGhostSelect';
+    sel.style.cssText = 'display:block; margin-top:4px; font-size:12px; max-width:220px;';
+    host.appendChild(sel);
+    sel.addEventListener('change', () => {
+      const line = currentTrack.racingLines.find(l => l.id === sel.value);
+      if (!line) return;
+      const ghost = ghostFromRacingLine(line);
+      if (!ghost) return;
+      ghost.trackKey = currentTrackKey;
+      currentGhost = ghost;
+      activeChaseLineId = line.id;
+      showGhost = true;
+      updateGhostStats();
+    });
+  }
+  sel.innerHTML = '';
+  linesWithGhost.forEach(line => {
+    const opt = document.createElement('option');
+    opt.value = line.id;
+    opt.textContent = line.name || line.id;
+    if (line.id === activeChaseLineId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function showRecordLineBanner() {
+  const line = currentTrack?.racingLines?.find(l => l.id === recordLineId);
+  const name = line?.name || 'racing line';
+  const banner = document.createElement('div');
+  banner.id = 'recordLineBanner';
+  banner.style.cssText = `
+    position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 1000;
+    background: rgba(124,252,0,0.92); color: #10300a; padding: 10px 18px;
+    border-radius: 8px; font-family: sans-serif; font-size: 14px; font-weight: 600;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35); text-align: center; max-width: 92vw;
+  `;
+  banner.textContent = `Recording "${name}" — complete one clean lap (no buoy hits)`;
+  document.body.appendChild(banner);
+}
+
+function showLineCaptureOverlay(lapTime, capture) {
+  const overlay = document.createElement('div');
+  overlay.id = 'lineCaptureOverlay';
+  overlay.style.cssText = `
+    position: fixed; inset: 0; z-index: 2000; background: rgba(0,0,0,0.72);
+    display: flex; align-items: center; justify-content: center; font-family: sans-serif;
+  `;
+  const box = document.createElement('div');
+  box.style.cssText = `
+    background: #1d242b; color: #e8eef3; border: 1px solid #303b46; border-radius: 12px;
+    padding: 24px 28px; max-width: 420px; text-align: center;
+  `;
+  const pts = capture.points?.length || 0;
+  box.innerHTML = `
+    <h2 style="margin:0 0 8px; color:#7cfc00; font-size:20px;">Racing line captured</h2>
+    <p style="margin:0 0 16px; color:#8fa3b3; font-size:14px; line-height:1.5;">
+      Lap ${lapTime.toFixed(2)}s saved as <b>${capture.lineName || 'racing line'}</b>
+      (${pts} path points + chase ghost).
+    </p>
+    <a href="designer.html" style="
+      display:inline-block; background:#7cfc00; color:#10300a; font-weight:700;
+      padding:10px 18px; border-radius:8px; text-decoration:none; font-size:14px;
+    ">Return to Designer</a>
+  `;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
+function addDesignerLink(text, href) {
+  const link = document.createElement('a');
+  link.href = href;
+  link.textContent = text;
+  link.style.cssText = `
+    position: fixed; top: 15px; left: 15px; z-index: 1000;
+    color: #7fd4ff; background: rgba(0,0,0,0.6); padding: 8px 12px;
+    border-radius: 6px; font-family: sans-serif; font-size: 14px;
+    text-decoration: none;
+  `;
+  document.body.appendChild(link);
+}
 
 // --- URL Parameter Handling ---
 function parseURLParams() {
   const params = new URLSearchParams(window.location.search);
-  
-  // Check for track parameter
-  if (params.has('track')) {
-    const trackFromURL = params.get('track');
-    
-    // Check if this is a valid track key
-    if (availableTrackKeys.includes(trackFromURL)) {
-      // Update current track
-      currentTrackKey = trackFromURL;
-      currentTrack = trackConfigs[currentTrackKey];
-      
-      // Update radio button
-      const radioToSelect = document.querySelector(`input[name="track"][value="${currentTrackKey}"]`);
-      if (radioToSelect) {
-        radioToSelect.checked = true;
+
+  if (params.has('data')) {
+    // Shared custom track encoded in the URL
+    const { track, errors } = decodeTrackFromParam(params.get('data'));
+    if (track) {
+      registerCustomTrack('custom', track);
+      addDesignerLink('Open in Designer', 'designer.html?data=' + params.get('data'));
+      selectTrack('custom');
+    } else {
+      console.warn('Could not load shared track:', errors);
+      alert('Could not load the shared track:\n' + errors.join('\n'));
+    }
+  } else if (params.get('track') === 'draft') {
+    // Draft handed over from the designer via localStorage
+    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (raw) {
+      try {
+        const track = JSON.parse(raw);
+        registerCustomTrack('draft', track);
+        addDesignerLink('\u2190 Back to Designer', 'designer.html');
+        selectTrack('draft');
+      } catch (e) {
+        console.warn('Could not load draft track:', e);
       }
-      
-      // Compute buoys for the new track
-      computeBuoys();
+    }
+  } else if (params.has('track')) {
+    const trackFromURL = params.get('track');
+    if (availableTrackKeys.includes(trackFromURL)) {
+      selectTrack(trackFromURL);
     }
   }
-  
+
   // Check for fullscreen parameter
   if (params.has('fullscreen') && params.get('fullscreen') === 'true') {
     // Small delay to ensure everything is loaded
     setTimeout(() => {
       toggleFullScreen();
     }, 500);
+  }
+
+  if (params.has('recordLine')) {
+    recordLineId = params.get('recordLine');
+    showRecordLineBanner();
+    showGhost = false;
+    const showGhostCheckbox = document.getElementById('showGhost');
+    if (showGhostCheckbox) showGhostCheckbox.checked = false;
   }
 }
 
@@ -576,21 +959,82 @@ let keepCurrentGhost = false;  // This should already exist, tied to the checkbo
 // Add a new variable to control ghost visibility
 let showGhost = false;
 
+// Milestone 3 — racing line record mode (from designer)
+let recordLineId = null;
+let activeChaseLineId = null;
+let showRacingLines = true;
+
 function pixelToTrackMeters(px, py) {
-  const localX = px - trackOffset.x;
-  const localY = py - trackOffset.y;
-  const metersX= localX / currentTrack.scale;
-  const metersY= (canvas.height - localY) / currentTrack.scale;
-  return { x: metersX, y: metersY };
+  const cx = px - trackOffset.x;
+  const cy = py - trackOffset.y;
+  if (geoCanvasTransform) {
+    const w = canvasToMercator(cx, cy);
+    const ll = worldPxToLatLng(w.x, w.y, geoCanvasTransform.zoom);
+    return latLngToMeters(currentTrack.geo, ll.lat, ll.lng);
+  }
+  return {
+    x: cx / currentTrack.scale,
+    y: (canvas.height - cy) / currentTrack.scale
+  };
+}
+
+// Track meters -> canvas pixels without trackOffset (used for layout / centering).
+function trackMetersToLocalPixel(mx, my) {
+  if (geoCanvasTransform) {
+    const ll = metersToLatLng(currentTrack.geo, mx, my);
+    const w = latLngToWorldPx(ll.lat, ll.lng, geoCanvasTransform.zoom);
+    return mercatorToCanvas(w.x, w.y);
+  }
+  return {
+    x: mx * currentTrack.scale,
+    y: canvas.height - (my * currentTrack.scale)
+  };
 }
 
 function trackMetersToPixel(mx, my) {
-  const localX = mx * currentTrack.scale;
-  const localY = canvas.height - (my * currentTrack.scale);
+  const local = trackMetersToLocalPixel(mx, my);
   return {
-    x: localX + trackOffset.x,
-    y: localY + trackOffset.y
+    x: local.x + trackOffset.x,
+    y: local.y + trackOffset.y
   };
+}
+
+// Position the player at the track's declarative start position (in track
+// meters) when available, otherwise at the legacy bottom-center spot.
+// Must be called after computeBuoys() so trackOffset is up to date.
+function placePlayerAtStart() {
+  const sp = currentTrack.startPosition;
+  if (sp && Number.isFinite(sp.x) && Number.isFinite(sp.y)) {
+    const p = trackMetersToPixel(sp.x, sp.y);
+    pos.x = p.x;
+    pos.y = p.y;
+    // headingDeg: 0 = +x in track meters, 90 = +y (north on track grid).
+    // For geo tracks, convert to screen-space so heading matches the map rotation.
+    const deg = sp.headingDeg ?? 90;
+    const rad = deg * Math.PI / 180;
+    const ahead = trackMetersToPixel(
+      sp.x + Math.cos(rad) * 5,
+      sp.y + Math.sin(rad) * 5
+    );
+    heading = Math.atan2(ahead.y - p.y, ahead.x - p.x);
+  } else {
+    pos.x = (canvas.width / 2) - 4;
+    pos.y = canvas.height - 150;
+    heading = -Math.PI / 2; // Point upward (-90 degrees)
+  }
+  prevPos.x = pos.x;
+  prevPos.y = pos.y;
+}
+
+// Required crossing direction for directional gates, in pixel space.
+function gateDirectionPx() {
+  const d = (currentTrack.gate && currentTrack.gate.direction) || { x: 1, y: 0 };
+  const p0 = trackMetersToPixel(0, 0);
+  const p1 = trackMetersToPixel(d.x, d.y);
+  const vx = p1.x - p0.x;
+  const vy = p1.y - p0.y;
+  const len = Math.hypot(vx, vy) || 1;
+  return { x: vx / len, y: vy / len };
 }
 
 function recordGhostData(timeSec) {
@@ -684,8 +1128,8 @@ function drawGhostFrame() {
     // Calculate pixel position from track meters
     let ghostX, ghostY;
     
-    // For Sicily, show ghost on parallel track
-    if (currentTrackKey === 'sicily') {
+    // For parallel-lane tracks, show ghost on the parallel track
+    if (currentTrack.parallelTrack) {
         const parallel = trackMetersToPixel(
             frame.x,
             frame.y + currentTrack.trackSeparation
@@ -846,6 +1290,25 @@ function completeLap() {
     
     // Only store ghost data if it's a valid lap
     if (!collidedThisLap && currentLapTime > 10 && distanceTraveled > 100) {
+        if (recordLineId) {
+            const built = buildRacingLineFromGhost(recordedGhost, currentLapTime);
+            if (built) {
+                const line = currentTrack?.racingLines?.find(l => l.id === recordLineId);
+                const capture = {
+                    lineId: recordLineId,
+                    lineName: line?.name || '',
+                    points: built.points,
+                    ghost: built.ghost
+                };
+                localStorage.setItem(LINE_CAPTURE_KEY, JSON.stringify(capture));
+                showLineCaptureOverlay(currentLapTime, capture);
+                recordLineId = null;
+                const banner = document.getElementById('recordLineBanner');
+                if (banner) banner.remove();
+            }
+            return;
+        }
+
         // Store distance in the ghost data
         const newGhostData = {
     trackKey: currentTrackKey,
@@ -882,6 +1345,13 @@ function completeLap() {
         if (ghostCheckbox) {
             ghostCheckbox.checked = true;
         }
+  } else if (recordLineId && collidedThisLap) {
+    const banner = document.getElementById('recordLineBanner');
+    if (banner) {
+      banner.textContent = 'Buoy hit — try again for a clean lap (no collisions)';
+      banner.style.background = 'rgba(255,93,93,0.92)';
+      banner.style.color = '#fff';
+    }
   }
 }
 
@@ -922,12 +1392,16 @@ document.addEventListener('keydown', function(e) {
     // Keep your other cases
   }
 
-  // Toggle 'P' to show/hide the ideal line
+  // Toggle 'P' to show/hide the racing line path
   if (e.key === 'p' || e.key === 'P') {
-    showIdealLine = !showIdealLine;
-    if (showIdealLine && !idealLineData) {
-      loadIdealLineForCurrentTrack();
+    if (trackHasRacingLines(currentTrack)) {
+      setShowRacingLines(!showRacingLines);
     }
+  }
+
+  // Toggle 'G' to keep racing against the current ghost
+  if (e.key === 'g' || e.key === 'G') {
+    setKeepCurrentGhost(!keepCurrentGhost);
   }
 
   // Press 'T' to cycle to the next track
@@ -979,7 +1453,7 @@ function cycleToNextTrack() {
   window.currentTrackKey = currentTrackKey;
 
   // Update the radio buttons to reflect the new track
-  trackRadios.forEach(radio => {
+  document.querySelectorAll('input[name="track"]').forEach(radio => {
     radio.checked = (radio.value === currentTrackKey);
   });
     
@@ -990,11 +1464,9 @@ function cycleToNextTrack() {
   }
   
   computeBuoys();
-    
-  // Position player centered horizontally (minus 1m), higher above the lap time display
-  pos.x = (canvas.width / 2) - (1 * currentTrack.scale) - 4; // Add 4px shift to the left
-  pos.y = canvas.height - 150;
-  heading = -Math.PI / 2; // Point upward (-90 degrees)
+
+  // Position player at the track's start position (or legacy default)
+  placePlayerAtStart();
   
   // Reset for lap timing system
   lapActive = false;
@@ -1011,12 +1483,9 @@ function cycleToNextTrack() {
     lastValidGhost = null;
   }
 
-  // Set prevPos to current pos to avoid immediate false crossing detection
-  prevPos.x = pos.x;
-  prevPos.y = pos.y;
-    
   // Update ghost stats for the new track
   updateGhostStats();
+  updateRacingLineToggleVisibility();
 }
 
 // --- Intersection & Timing Line Crossing ---
@@ -1046,17 +1515,18 @@ function checkGateCrossing(oldPos, newPos) {
     if (currentTrack.useGates) {
         if (!computedGates) return false;
         
-        // For Belgium track, check direction before allowing crossing
-        if (currentTrackKey === 'belgium') {
+        // For directional-gate tracks, check direction before allowing crossing
+        if (currentTrack.requiresDirectionalGates) {
             if (lineIntersection(
                 oldPos.x, oldPos.y,
                 newPos.x, newPos.y,
                 computedGates.start.x1, computedGates.start.y1,
                 computedGates.start.x2, computedGates.start.y2
             )) {
-                const moveVectorX = newPos.x - oldPos.x;
-                if (moveVectorX < 0) {
-                    return false; // Ignore right to left crossings
+                const dir = gateDirectionPx();
+                const dot = (newPos.x - oldPos.x) * dir.x + (newPos.y - oldPos.y) * dir.y;
+                if (dot < 0) {
+                    return false; // Ignore crossings against the required direction
                 }
                 return 'start';
             }
@@ -1070,6 +1540,11 @@ function checkGateCrossing(oldPos, newPos) {
             computedGates.start.x1, computedGates.start.y1,
             computedGates.start.x2, computedGates.start.y2
         )) {
+            // With a shared start/finish gate, the crossing means "finish"
+            // while a lap is running and "start" otherwise
+            if (currentTrack.gates.sameStartFinish) {
+                return lapActive ? 'finish' : 'start';
+            }
             return 'start';
         }
         
@@ -1245,8 +1720,8 @@ function update(dt){
   }
   
   if (!wrapped) {
-    // Debug Sicily's directional crossing (if applicable)
-    if (currentTrackKey === 'sicily') {
+    // Debug directional finish crossings (if applicable)
+    if (currentTrack.directionalFinishGate) {
       debugDirectionalCrossing();
     }
     
@@ -1259,11 +1734,17 @@ function update(dt){
     sumSpeeds += speedKmh;
     frameCount++;
     
-    const dx = pos.x - lastPosTelemetry.x;
-    const dy = pos.y - lastPosTelemetry.y;
-    const distPx = Math.hypot(dx, dy);
-    // Calculate the distance directly from pixels to meters using the track scale
-    const distM = distPx / currentTrack.scale;
+    let distM;
+    if (geoCanvasTransform) {
+      const m0 = pixelToTrackMeters(lastPosTelemetry.x, lastPosTelemetry.y);
+      const m1 = pixelToTrackMeters(pos.x, pos.y);
+      const ll0 = metersToLatLng(currentTrack.geo, m0.x, m0.y);
+      const ll1 = metersToLatLng(currentTrack.geo, m1.x, m1.y);
+      distM = haversineMeters(ll0, ll1);
+    } else {
+      const distPx = Math.hypot(pos.x - lastPosTelemetry.x, pos.y - lastPosTelemetry.y);
+      distM = distPx / currentTrack.scale;
+    }
     distanceTraveled += distM;
     lastPosTelemetry.x = pos.x;
     lastPosTelemetry.y = pos.y;
@@ -1326,16 +1807,29 @@ function drawWake(){
   }
 }
 
+function drawBuoyDot(x, y, isTurn) {
+  const r = isTurn ? 8 : 4;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, 2 * Math.PI);
+  ctx.fillStyle = isTurn ? '#FFE44D' : '#FF8800';
+  ctx.fill();
+  ctx.lineWidth = isTurn ? 2 : 1.5;
+  ctx.strokeStyle = '#fff';
+  ctx.stroke();
+}
+
 function drawTrack() {
   // Draw main track buoys (bottom track)
   buoys.forEach(b => {
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, 8, 0, 2*Math.PI);
-    ctx.fillStyle = '#FFFF00';
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#fff';
-    ctx.stroke();
+    const isTurn = b.turnIndex != null;
+    drawBuoyDot(b.x, b.y, isTurn);
+
+    // Label turn buoys with their number
+    if (isTurn) {
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(String(b.turnIndex), b.x + 11, b.y - 8);
+    }
 
     // Draw parallel track buoys (top track) if enabled
     if (currentTrack.parallelTrack) {
@@ -1343,13 +1837,7 @@ function drawTrack() {
         pixelToTrackMeters(b.x, b.y).x,
         pixelToTrackMeters(b.x, b.y).y + currentTrack.trackSeparation
       );
-      ctx.beginPath();
-      ctx.arc(parallel.x, parallel.y, 8, 0, 2*Math.PI);
-      ctx.fillStyle = '#FFFF00';
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = '#fff';
-      ctx.stroke();
+      drawBuoyDot(parallel.x, parallel.y, isTurn);
     }
   });
 
@@ -1504,6 +1992,62 @@ function loadIdealLineForCurrentTrack() {
     });
 }
 
+function drawRacingLineArrowhead(x, y, angle, size) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.beginPath();
+  ctx.moveTo(size, 0);
+  ctx.lineTo(-size * 0.6, size * 0.55);
+  ctx.lineTo(-size * 0.6, -size * 0.55);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawTrackRacingLines() {
+  if (!showRacingLines) return;
+  const lines = currentTrack?.racingLines;
+  if (!lines?.length) return;
+
+  lines.forEach((line, i) => {
+    if (line.visible === false || !line.points || line.points.length < 2) return;
+    const color = line.color || RACING_LINE_COLORS[i % RACING_LINE_COLORS.length];
+    const pts = line.points.map(p => trackMetersToPixel(p.x, p.y));
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    pts.forEach((p, idx) => {
+      if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+
+    let distAlong = 0;
+    const arrowSpacing = 48;
+    for (let j = 1; j < pts.length; j++) {
+      const a = pts[j - 1];
+      const b = pts[j];
+      const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      let d = arrowSpacing - (distAlong % arrowSpacing);
+      while (d <= segLen) {
+        const t = d / segLen;
+        drawRacingLineArrowhead(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, ang, 8);
+        d += arrowSpacing;
+      }
+      distAlong += segLen;
+    }
+    ctx.restore();
+  });
+}
+
 function drawIdealLine() {
   if (!showIdealLine) return;
   if (!idealLineData || !idealLineData.frames) return;
@@ -1557,13 +2101,20 @@ function gameLoop(timestamp) {
   // Update game state
   update(dt);
   
-  // Clear screen
+  // Clear screen (satellite imagery for geo-anchored tracks, dimmed for contrast)
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#222';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (geoBackground) {
+    ctx.drawImage(geoBackground, 0, 0);
+    ctx.fillStyle = 'rgba(6,14,20,0.42)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } else {
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   // Draw in order of visual importance
   drawIdealLine();
+  drawTrackRacingLines();
   drawTrack();
   drawWake();
   drawGhostFrame(); // Ghost rendering has high priority
@@ -1608,9 +2159,10 @@ function updateGhostStats() {
         statsElement.textContent = `No ghost for ${currentTrack.name}`;
         return;
     }
-    
+
     // Get the lap time and recorded average speed if available
-    const time = currentGhost.frames[currentGhost.frames.length - 1].finalLapTime;
+    const lastFrame = currentGhost.frames[currentGhost.frames.length - 1];
+    const time = lastFrame.finalLapTime ?? currentGhost.time ?? lastFrame.time;
     let avgSpeed = 0;
     
     // Try to get the average speed from stored ghost data
@@ -1633,7 +2185,8 @@ function updateGhostStats() {
         }
     }
     
-    statsElement.textContent = `${currentTrack.name} Ghost - Time: ${time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h`;
+    const prefix = currentGhost.lineName || currentTrack.name;
+    statsElement.textContent = `${prefix} Ghost — Time: ${time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h`;
 }
 
 // Update the ghost import handler
@@ -1670,16 +2223,22 @@ importGhostFile.addEventListener('change', async (e) => {
 });
 
 // Update the checkbox handler
+const showRacingLinesCheckbox = document.getElementById('showRacingLines');
+if (showRacingLinesCheckbox) {
+  showRacingLinesCheckbox.addEventListener('change', function(e) {
+    setShowRacingLines(e.target.checked);
+  });
+}
+
 document.getElementById('keepGhost').addEventListener('change', function(e) {
-    keepCurrentGhost = e.target.checked;
+  setKeepCurrentGhost(e.target.checked);
 });
 
 // Update the clear button handler
 clearGhostBtn.addEventListener('click', () => {
   ghostDataMap.clear();
   ghostWakeTrail = [];
-  document.getElementById('keepGhost').checked = false;
-  keepCurrentGhost = false;
+  setKeepCurrentGhost(false);
   // Set currentGhost to null to fully clear it
   currentGhost = null; 
   showGhost = false;
@@ -1701,10 +2260,8 @@ resizeCanvas();
 // Parse URL parameters before initializing player position
 parseURLParams();
 
-// Initialize player position centered horizontally, higher above the lap time display
-pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
-pos.y = canvas.height - 150; // Changed from 100 to 150 pixels up from bottom
-heading = -Math.PI / 2; // Point upward (-90 degrees)
+// Initialize player position (track start position if defined, else default)
+placePlayerAtStart();
 
 // Add drag and drop event handlers
 const ghostControlsDiv = document.getElementById('ghostControls');
@@ -1954,9 +2511,10 @@ function handleLapTiming() {
     if (currentTrack.useGates) {
         if (currentTrack.requiresDirectionalGates) {
             // Calculate crossing direction
-            const moveVectorX = pos.x - prevPos.x;
-            if (moveVectorX < 0) {
-                // Moving right to left, reset valid crossing state
+            const dir = gateDirectionPx();
+            const dot = (pos.x - prevPos.x) * dir.x + (pos.y - prevPos.y) * dir.y;
+            if (dot < 0) {
+                // Crossing against the required direction, reset valid crossing state
                 validCrossing = false;
                 return;
             }
@@ -1971,24 +2529,24 @@ function handleLapTiming() {
             }
         } else {
             // Normal gate handling
-            if (crossing === 'start' && !currentTrack.gates.sameStartFinish) {
+            if (crossing === 'start') {
                 // Only start a new lap if no lap is currently active
                 if (!lapActive) {
                     startLap();
                 }
                 // If a lap is active, ignore the start gate crossing
-            } else if (crossing === 'finish' || (crossing === 'start' && currentTrack.gates.sameStartFinish)) {
+            } else if (crossing === 'finish') {
                 // Only complete lap if a lap is actually active
                 if (!lapActive) {
                     return; // Ignore finish gate crossings when no lap is active
                 }
                 
-                // Special handling for Sicily's directional finish gate
-                if (currentTrackKey === 'sicily' && currentTrack.directionalFinishGate && crossing === 'finish') {
-                    // Check if we're crossing from left to right (positive x movement)
-                    const moveVectorX = pos.x - prevPos.x;
-                    if (moveVectorX <= 0) {
-                        // Moving right to left or vertically, ignore this crossing
+                // Special handling for directional finish gates (e.g. Sicily)
+                if (currentTrack.directionalFinishGate && crossing === 'finish') {
+                    const dir = gateDirectionPx();
+                    const dot = (pos.x - prevPos.x) * dir.x + (pos.y - prevPos.y) * dir.y;
+                    if (dot <= 0) {
+                        // Crossing against the required direction, ignore it
                         return;
                     }
                 }
@@ -2088,14 +2646,10 @@ window.enableGhostRacing = function() {
   const ghost = ghostDataMap.get(currentTrackKey);
   if (ghost) {
     currentGhost = ghost;
-    keepCurrentGhost = true;
+    setKeepCurrentGhost(true);
     showGhost = true;
     
     // Update checkboxes if they exist
-    const keepGhostCheckbox = document.getElementById('keepGhost');
-    if (keepGhostCheckbox) {
-      keepGhostCheckbox.checked = true;
-    }
     
     const showGhostCheckbox = document.getElementById('showGhost');
     if (showGhostCheckbox) {
@@ -2124,8 +2678,8 @@ window.disableGhostRacing = function() {
 
 // Add this function after handleLapTiming function
 function debugDirectionalCrossing() {
-    // Only run in debug mode when Sicily track is active
-    if (currentTrackKey !== 'sicily' || !currentTrack.directionalFinishGate) return;
+    // Only run for tracks with a directional finish gate
+    if (!currentTrack.directionalFinishGate) return;
     
     // Check if crossing the finish gate
     if (computedGates && computedGates.finish) {

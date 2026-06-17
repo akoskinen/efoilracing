@@ -92,6 +92,10 @@
 
   <!-- Ghost Info -->
   <div id="ghostInfo" style="position: absolute; bottom: 20px; left: 160px; color: white; font-family: monospace;">
+    <label id="racingLineToggleRow">
+      <input type="checkbox" id="showRacingLines" checked> show racing line
+    </label>
+    <br>
     <label>
       <input type="checkbox" id="keepGhost"> keep racing against this ghost:
     </label>
@@ -128,9 +132,12 @@
 	  <input type="radio" name="track" value="belgium">
 	  Belgium Track
 	</label>
+	<br>
+	<a href="designer.html" style="color:#7fd4ff; text-decoration:none; display:inline-block; margin-top:6px;">Design a track &rarr;</a>
   </div>
 
   <!-- Load configuration and engine files -->
+  <script src="lib/lz-string.min.js"></script>
   <script type="module" src="engine.js"></script>
 </body>
 </html>
