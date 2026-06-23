@@ -689,7 +689,62 @@ function eventPos(e) {
   return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 }
 
+const activePointers = new Map();
+let pinch = null;
+
+function pointerCenterAndDist() {
+  const pts = [...activePointers.values()];
+  if (pts.length < 2) return null;
+  return {
+    x: (pts[0].x + pts[1].x) / 2,
+    y: (pts[0].y + pts[1].y) / 2,
+    dist: Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
+  };
+}
+
+function zoomCanvasAt(p, factor) {
+  if (factor === 1) return;
+  if (geoOn && map) {
+    const newZ = Math.max(3, Math.min(19, map.getZoom() + Math.log2(factor)));
+    map.setZoomAround(L.point(p.x, p.y), newZ, { animate: false });
+    draw();
+    return;
+  }
+  const before = pxToM(p.x, p.y);
+  view.pxPerM = Math.max(0.4, Math.min(25, view.pxPerM * factor));
+  const after = pxToM(p.x, p.y);
+  view.cx += before.x - after.x;
+  view.cy += before.y - after.y;
+  draw();
+}
+
+function trackPointer(e) {
+  activePointers.set(e.pointerId, eventPos(e));
+}
+
+function releasePointer(e) {
+  activePointers.delete(e.pointerId);
+  if (activePointers.size < 2) pinch = null;
+}
+
+function beginPinchIfNeeded() {
+  if (activePointers.size !== 2) return;
+  const cd = pointerCenterAndDist();
+  if (!cd || cd.dist < 2) return;
+  pinch = { lastDist: cd.dist };
+  drag = null;
+}
+
+// Block Safari/iOS page zoom gestures over the map area.
+['gesturestart', 'gesturechange', 'gestureend'].forEach(type => {
+  wrap.addEventListener(type, e => e.preventDefault(), { passive: false });
+});
+
 canvas.addEventListener('pointerdown', e => {
+  trackPointer(e);
+  beginPinchIfNeeded();
+  if (pinch) return;
+
   if (e.button !== 0) return;
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointers */ }
   const p = eventPos(e);
@@ -754,6 +809,18 @@ canvas.addEventListener('pointerdown', e => {
 });
 
 canvas.addEventListener('pointermove', e => {
+  trackPointer(e);
+
+  if (pinch && activePointers.size >= 2) {
+    e.preventDefault();
+    const cd = pointerCenterAndDist();
+    if (!cd || cd.dist < 2) return;
+    const factor = cd.dist / pinch.lastDist;
+    zoomCanvasAt({ x: cd.x, y: cd.y }, factor);
+    pinch.lastDist = cd.dist;
+    return;
+  }
+
   if (!drag) return;
   const p = eventPos(e);
   const m = pxToM(p.x, p.y);
@@ -833,6 +900,10 @@ canvas.addEventListener('pointermove', e => {
 });
 
 canvas.addEventListener('pointerup', e => {
+  const wasPinch = !!pinch;
+  releasePointer(e);
+  if (wasPinch) return;
+
   const p = eventPos(e);
   if (drag) {
     if (drag.kind === 'addPending') {
@@ -865,22 +936,19 @@ canvas.addEventListener('pointerup', e => {
   }
 });
 
+canvas.addEventListener('pointercancel', e => {
+  releasePointer(e);
+  if (activePointers.size === 0) {
+    pinch = null;
+    if (drag?.kind === 'panMap') drag = null;
+  }
+});
+
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   const p = eventPos(e);
-  if (geoOn && map) {
-    const newZ = Math.max(3, Math.min(19, map.getZoom() - e.deltaY * 0.003));
-    map.setZoomAround(L.point(p.x, p.y), newZ, { animate: false });
-    draw();
-    return;
-  }
-  const before = pxToM(p.x, p.y);
   const factor = Math.exp(-e.deltaY * 0.0015);
-  view.pxPerM = Math.max(0.4, Math.min(25, view.pxPerM * factor));
-  const after = pxToM(p.x, p.y);
-  view.cx += before.x - after.x;
-  view.cy += before.y - after.y;
-  draw();
+  zoomCanvasAt(p, factor);
 }, { passive: false });
 
 // --- Modes ---
