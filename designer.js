@@ -11,6 +11,7 @@ import {
   encodeTrackForUrl, decodeTrackFromParam, serializeTrack,
   saveDraft, loadDraft,
   hasGeo, metersToLatLng, latLngToMeters, groundDistanceMeters,
+  latLngToWorldPx, metersPerPixel,
   LINE_CAPTURE_KEY, LINE_RECORD_META_KEY,
   RACING_LINE_COLORS, newRacingLineId, defaultRacingLineName,
   buildRacingLineFromGhost
@@ -18,7 +19,7 @@ import {
 
 // --- DOM ---
 const canvas = document.getElementById('designCanvas');
-const ctx = canvas.getContext('2d');
+let ctx = canvas.getContext('2d');
 const wrap = document.getElementById('canvasWrap');
 
 const els = {
@@ -71,11 +72,20 @@ let rotationUndoPushed = false;
 const BUOY_HIT_PX = 14;
 const HANDLE_HIT_PX = 10;
 
+// --- Poster render target (briefing PNG export) ---
+// When set, the draw helpers render into the poster canvas instead of the
+// live editor canvas: cssSize() reports the poster layout size and the geo
+// (Leaflet) transform is bypassed — the poster draws satellite imagery
+// itself and keeps the plain meters transform for all track elements.
+let poster = null; // { ctx, w, h }
+
 // --- Coordinate transforms (CSS pixels <-> track meters) ---
 function cssSize() {
+  if (poster) return { w: poster.w, h: poster.h };
   return { w: canvas.clientWidth, h: canvas.clientHeight };
 }
 function geoActive() {
+  if (poster) return false;
   return geoOn && map && hasGeo(track);
 }
 function mToPx(mx, my) {
@@ -539,16 +549,18 @@ function drawGateSegment(seg, label) {
   ctx.lineTo(p2.x, p2.y);
   ctx.stroke();
 
-  // Endpoint handles
-  [p1, p2].forEach(p => {
-    ctx.fillStyle = '#fff';
-    ctx.strokeStyle = '#FF4444';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.rect(p.x - 4, p.y - 4, 8, 8);
-    ctx.fill();
-    ctx.stroke();
-  });
+  // Endpoint handles (editor chrome, skipped on poster exports)
+  if (!poster) {
+    [p1, p2].forEach(p => {
+      ctx.fillStyle = '#fff';
+      ctx.strokeStyle = '#FF4444';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.rect(p.x - 4, p.y - 4, 8, 8);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
 
   const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
   ctx.font = 'bold 10px sans-serif';
@@ -1504,6 +1516,555 @@ document.getElementById('btnExportCsv').addEventListener('click', () => {
   );
   const csv = 'name,type,lat,lng,x_m,y_m\n' + rows.join('\n') + '\n';
   downloadFile(`${trackSlug()}.csv`, 'text/csv', csv);
+});
+
+// --- Race briefing poster export (PNG) ---
+// Renders the track map at high resolution with a semi-transparent briefing
+// panel: title, author, course stats, buoy order, race notes and a
+// scan-to-ride QR code. Satellite imagery is composited in when the track
+// is geo-anchored.
+
+const POSTER_SCALE = 2;          // device px per layout px
+const POSTER_W = 1200;           // layout px
+const POSTER_H = 848;            // ~A4 landscape ratio
+const POSTER_MARGIN = 32;
+const POSTER_PANEL_W = 400;      // left-column layout
+const POSTER_PANEL_H = 306;      // bottom-band layout
+
+const TITLE_FONT = 'Pacifico, "Brush Script MT", cursive';
+const BODY_FONT = 'Georgia, "Times New Roman", serif';
+
+const pacificoFace = new FontFace('Pacifico', "url('lib/fonts/pacifico.woff2')");
+let pacificoPromise = null;
+function ensurePacifico() {
+  if (!pacificoPromise) {
+    pacificoPromise = pacificoFace.load()
+      .then(face => { document.fonts.add(face); })
+      .catch(() => {}); // poster falls back to the generic cursive font
+  }
+  return pacificoPromise;
+}
+
+function esriTileUrl(z, x, y) {
+  return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+}
+
+function loadTileImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('tile load failed'));
+    img.src = url;
+  });
+}
+
+// Composites Esri World Imagery under the track. Must run while the poster
+// render target is active (uses pxToM/mToPx with the poster view).
+// Returns false when tiles could not be loaded so the caller can fall back.
+async function drawPosterSatellite(pctx, w, h) {
+  const geo = track.geo;
+  const lat0 = geo.origin.lat;
+
+  // Smallest zoom whose imagery resolution meets the poster's device px/m
+  let zoom = 19;
+  for (let z = 3; z <= 19; z++) {
+    if (1 / metersPerPixel(lat0, z) >= view.pxPerM * POSTER_SCALE) { zoom = z; break; }
+  }
+
+  const cornersM = [pxToM(0, 0), pxToM(w, 0), pxToM(0, h), pxToM(w, h)];
+  const worldBounds = z => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    cornersM.forEach(m => {
+      const ll = metersToLatLng(geo, m.x, m.y);
+      const p = latLngToWorldPx(ll.lat, ll.lng, z);
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    });
+    return { minX, minY, maxX, maxY };
+  };
+
+  let wb = worldBounds(zoom);
+  const tileSpan = b =>
+    (Math.floor(b.maxX / 256) - Math.floor(b.minX / 256) + 1) *
+    (Math.floor(b.maxY / 256) - Math.floor(b.minY / 256) + 1);
+  while (zoom > 3 && tileSpan(wb) > 150) {
+    zoom -= 1;
+    wb = worldBounds(zoom);
+  }
+
+  const tx0 = Math.floor(wb.minX / 256), tx1 = Math.floor(wb.maxX / 256);
+  const ty0 = Math.floor(wb.minY / 256), ty1 = Math.floor(wb.maxY / 256);
+  const tilesCanvas = document.createElement('canvas');
+  tilesCanvas.width = (tx1 - tx0 + 1) * 256;
+  tilesCanvas.height = (ty1 - ty0 + 1) * 256;
+  const tctx = tilesCanvas.getContext('2d');
+
+  const jobs = [];
+  for (let tx = tx0; tx <= tx1; tx++) {
+    for (let ty = ty0; ty <= ty1; ty++) {
+      jobs.push(
+        loadTileImage(esriTileUrl(zoom, tx, ty))
+          .then(img => { tctx.drawImage(img, (tx - tx0) * 256, (ty - ty0) * 256); return true; })
+          .catch(() => false)
+      );
+    }
+  }
+  const results = await Promise.all(jobs);
+  const ok = results.filter(Boolean).length;
+  if (ok === 0 || ok < results.length * 0.7) return false;
+
+  // Affine transform world px -> poster layout px, solved from three
+  // reference points in track meters (handles geo rotation exactly).
+  const refs = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 0, y: 100 }].map(m => {
+    const c = mToPx(m.x, m.y);
+    const ll = metersToLatLng(geo, m.x, m.y);
+    return { c, wp: latLngToWorldPx(ll.lat, ll.lng, zoom) };
+  });
+  const [O, U, V] = refs;
+  const du = { x: U.wp.x - O.wp.x, y: U.wp.y - O.wp.y };
+  const dv = { x: V.wp.x - O.wp.x, y: V.wp.y - O.wp.y };
+  const cu = { x: U.c.x - O.c.x, y: U.c.y - O.c.y };
+  const cv = { x: V.c.x - O.c.x, y: V.c.y - O.c.y };
+  const det = du.x * dv.y - du.y * dv.x;
+  if (Math.abs(det) < 1e-12) return false;
+  const a = (cu.x * dv.y - cv.x * du.y) / det;
+  const c = (du.x * cv.x - dv.x * cu.x) / det;
+  const b = (cu.y * dv.y - cv.y * du.y) / det;
+  const d = (du.x * cv.y - dv.x * cu.y) / det;
+  const e = O.c.x - (a * O.wp.x + c * O.wp.y);
+  const f = O.c.y - (b * O.wp.x + d * O.wp.y);
+
+  pctx.save();
+  pctx.transform(a, b, c, d, e, f);
+  pctx.imageSmoothingEnabled = true;
+  pctx.imageSmoothingQuality = 'high';
+  pctx.drawImage(tilesCanvas, tx0 * 256, ty0 * 256);
+  pctx.restore();
+
+  // Slight darkening so the neon track colors keep their contrast
+  pctx.fillStyle = 'rgba(4,10,16,0.18)';
+  pctx.fillRect(0, 0, w, h);
+  return true;
+}
+
+function drawPosterWater(pctx, w, h) {
+  const grad = pctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, '#1f7ea0');
+  grad.addColorStop(1, '#155f7c');
+  pctx.fillStyle = grad;
+  pctx.fillRect(0, 0, w, h);
+}
+
+// Word-wraps text (honoring explicit newlines) with the current pctx font.
+function wrapPosterText(pctx, text, maxW) {
+  const lines = [];
+  String(text).split('\n').forEach(par => {
+    if (par.trim() === '') { lines.push(''); return; }
+    let line = '';
+    par.trim().split(/\s+/).forEach(word => {
+      const attempt = line ? line + ' ' + word : word;
+      if (!line || pctx.measureText(attempt).width <= maxW) line = attempt;
+      else { lines.push(line); line = word; }
+    });
+    lines.push(line);
+  });
+  while (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+function fmtCourseLength(m) {
+  return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
+}
+
+function fmtLatLng(origin) {
+  const lat = origin.lat, lng = origin.lng;
+  return `${Math.abs(lat).toFixed(4)}\u00B0${lat >= 0 ? 'N' : 'S'} ${Math.abs(lng).toFixed(4)}\u00B0${lng >= 0 ? 'E' : 'W'}`;
+}
+
+function posterStatItems() {
+  const stats = trackStats(track);
+  const gate = track.gate;
+  const items = [
+    ['Course length', stats.lapLengthM > 0 ? fmtCourseLength(stats.lapLengthGroundM) : '\u2014'],
+    ['Turn buoys', String(stats.turnCount) + (stats.markerCount ? ` +${stats.markerCount} markers` : '')],
+    ['Gate', stats.gateWidthM
+      ? `${Math.round(stats.gateWidthM)} m ${gate?.sameStartFinish !== false ? 'start/finish' : 'start'}`
+      : '\u2014']
+  ];
+  if (hasGeo(track)) items.push(['Location', fmtLatLng(track.geo.origin)]);
+  return items;
+}
+
+function posterBuoyOrderText() {
+  let n = 0;
+  const parts = [];
+  track.buoys.forEach(b => {
+    if (b.type === 'marker') return;
+    n += 1;
+    parts.push(`${n} ${b.rounding === 'starboard' ? 'Starboard' : 'Port'}`);
+  });
+  return parts.join('  \u00B7  ');
+}
+
+// Draws a heading in the script font, returns the new cursor y.
+function drawPosterHeading(pctx, text, x, y, size = 21) {
+  pctx.font = `${size}px ${TITLE_FONT}`;
+  pctx.fillStyle = '#8fd8f5';
+  pctx.textAlign = 'left';
+  pctx.textBaseline = 'alphabetic';
+  pctx.fillText(text, x, y + size);
+  return y + size + 10;
+}
+
+// Body text with auto-shrink, then ellipsis truncation. Returns new cursor y.
+function drawPosterBody(pctx, text, x, y, maxW, maxBottom) {
+  const sizes = [13.5, 12.5, 11.5];
+  let chosen = null;
+  for (const size of sizes) {
+    pctx.font = `${size}px ${BODY_FONT}`;
+    const lines = wrapPosterText(pctx, text, maxW);
+    const lh = size * 1.45;
+    if (y + lines.length * lh <= maxBottom) { chosen = { size, lines, lh }; break; }
+    chosen = { size, lines, lh }; // keep smallest; truncated below if needed
+  }
+  const { size, lh } = chosen;
+  let { lines } = chosen;
+  const maxLines = Math.max(1, Math.floor((maxBottom - y) / lh));
+  if (lines.length > maxLines) {
+    lines = lines.slice(0, maxLines);
+    while (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    let last = lines[lines.length - 1];
+    pctx.font = `${size}px ${BODY_FONT}`;
+    while (last && pctx.measureText(last + '\u2026').width > maxW) {
+      last = last.slice(0, -1).trimEnd();
+    }
+    lines[lines.length - 1] = last + '\u2026';
+  }
+  pctx.font = `${size}px ${BODY_FONT}`;
+  pctx.fillStyle = 'rgba(238,245,250,0.92)';
+  pctx.textAlign = 'left';
+  pctx.textBaseline = 'alphabetic';
+  lines.forEach((line, i) => pctx.fillText(line, x, y + (i + 0.85) * lh));
+  return y + lines.length * lh;
+}
+
+function drawPosterStats(pctx, x, y, maxW) {
+  const items = posterStatItems();
+  const colW = maxW / 2;
+  const rowH = 44;
+  items.forEach((item, i) => {
+    const cx = x + (i % 2) * colW;
+    const cy = y + Math.floor(i / 2) * rowH;
+    pctx.font = '10px -apple-system, Helvetica, sans-serif';
+    pctx.fillStyle = 'rgba(160,190,210,0.85)';
+    pctx.textAlign = 'left';
+    pctx.textBaseline = 'alphabetic';
+    try { pctx.letterSpacing = '1.5px'; } catch (err) { /* older canvas */ }
+    pctx.fillText(item[0].toUpperCase(), cx, cy + 11);
+    try { pctx.letterSpacing = '0px'; } catch (err) { /* older canvas */ }
+    pctx.font = `bold 16px ${BODY_FONT}`;
+    pctx.fillStyle = '#f2f7fb';
+    pctx.fillText(item[1], cx, cy + 32);
+  });
+  return y + Math.ceil(items.length / 2) * rowH + 2;
+}
+
+// Renders the QR code with the vendored qrcode lib. Returns true on success.
+function drawPosterQr(pctx, text, x, y, size) {
+  let qr;
+  try {
+    qr = qrcode(0, 'L');
+    qr.addData(text);
+    qr.make();
+  } catch (err) {
+    return false; // track too large for a QR code
+  }
+  const n = qr.getModuleCount();
+  const quiet = 3;
+  const cell = size / (n + quiet * 2);
+  pctx.fillStyle = '#ffffff';
+  pctx.beginPath();
+  pctx.roundRect(x, y, size, size, 8);
+  pctx.fill();
+  pctx.fillStyle = '#0c1218';
+  for (let r = 0; r < n; r++) {
+    for (let col = 0; col < n; col++) {
+      if (!qr.isDark(r, col)) continue;
+      pctx.fillRect(x + (quiet + col) * cell, y + (quiet + r) * cell, cell + 0.25, cell + 0.25);
+    }
+  }
+  return true;
+}
+
+function drawPosterTitle(pctx, x, y, maxW) {
+  const name = track.name || 'Untitled Track';
+
+  pctx.font = '11px -apple-system, Helvetica, sans-serif';
+  pctx.fillStyle = 'rgba(143,216,245,0.9)';
+  pctx.textAlign = 'left';
+  pctx.textBaseline = 'alphabetic';
+  try { pctx.letterSpacing = '4px'; } catch (err) { /* older canvas */ }
+  pctx.fillText('RACE BRIEFING', x, y + 11);
+  try { pctx.letterSpacing = '0px'; } catch (err) { /* older canvas */ }
+  y += 24;
+
+  let size = 40;
+  pctx.font = `${size}px ${TITLE_FONT}`;
+  while (size > 22 && pctx.measureText(name).width > maxW) {
+    size -= 2;
+    pctx.font = `${size}px ${TITLE_FONT}`;
+  }
+  const titleLines = wrapPosterText(pctx, name, maxW).slice(0, 2);
+  pctx.fillStyle = '#ffffff';
+  // Pacifico has deep descenders/swashes: give the lines generous height
+  titleLines.forEach((line, i) => pctx.fillText(line, x, y + (i + 1) * size * 1.3));
+  y += titleLines.length * size * 1.3 + size * 0.4;
+
+  const byline = [];
+  if (track.author && track.author.trim()) byline.push(`designed by ${track.author.trim()}`);
+  byline.push(new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }));
+  pctx.font = `italic 13px ${BODY_FONT}`;
+  pctx.fillStyle = 'rgba(180,205,222,0.9)';
+  pctx.fillText(byline.join('  \u00B7  '), x, y + 10);
+  y += 24;
+
+  pctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  pctx.lineWidth = 1;
+  pctx.beginPath();
+  pctx.moveTo(x, y + 6);
+  pctx.lineTo(x + maxW, y + 6);
+  pctx.stroke();
+  return y + 18;
+}
+
+function drawPosterPanel(pctx, panel, shareUrl) {
+  const pad = 28;
+
+  // Contrast vignette bleeding out from the panel side
+  const wide = panel.w > panel.h;
+  const grad = wide
+    ? pctx.createLinearGradient(0, POSTER_H, 0, panel.y - 170)
+    : pctx.createLinearGradient(0, 0, panel.x + panel.w + 190, 0);
+  grad.addColorStop(0, 'rgba(5,10,15,0.55)');
+  grad.addColorStop(1, 'rgba(5,10,15,0)');
+  pctx.fillStyle = grad;
+  pctx.fillRect(0, 0, POSTER_W, POSTER_H);
+
+  // Panel chrome
+  pctx.fillStyle = 'rgba(9,15,21,0.66)';
+  pctx.strokeStyle = 'rgba(255,255,255,0.20)';
+  pctx.lineWidth = 1.5;
+  pctx.beginPath();
+  pctx.roundRect(panel.x, panel.y, panel.w, panel.h, 18);
+  pctx.fill();
+  pctx.stroke();
+
+  const notesText = (track.notes || '').trim();
+  const orderText = posterBuoyOrderText();
+
+  if (!wide) {
+    // Left column: single flow, QR pinned to the bottom
+    const x = panel.x + pad;
+    const maxW = panel.w - pad * 2;
+    let y = drawPosterTitle(pctx, x, panel.y + pad, maxW);
+    y = drawPosterStats(pctx, x, y, maxW);
+
+    const qrSize = 96;
+    const qrTop = panel.y + panel.h - pad - qrSize;
+
+    if (orderText) {
+      y = drawPosterHeading(pctx, 'Course', x, y + 6, 20);
+      y = drawPosterBody(pctx, orderText, x, y, maxW, Math.min(y + 80, qrTop - 16));
+    }
+    if (notesText) {
+      y = drawPosterHeading(pctx, 'Race notes', x, y + 10, 20);
+      drawPosterBody(pctx, notesText, x, y, maxW, qrTop - 16);
+    }
+
+    const hasQr = drawPosterQr(pctx, shareUrl, x, qrTop, qrSize);
+    pctx.textAlign = 'left';
+    pctx.textBaseline = 'alphabetic';
+    if (hasQr) {
+      pctx.font = `16px ${TITLE_FONT}`;
+      pctx.fillStyle = '#8fd8f5';
+      pctx.fillText('Scan to ride this track', x + qrSize + 16, qrTop + 38);
+      pctx.font = `italic 12px ${BODY_FONT}`;
+      pctx.fillStyle = 'rgba(180,205,222,0.85)';
+      pctx.fillText('efoil.racing track designer', x + qrSize + 16, qrTop + 60);
+    } else {
+      pctx.font = `18px ${TITLE_FONT}`;
+      pctx.fillStyle = '#8fd8f5';
+      pctx.fillText('Design & ride at efoil.racing', x, qrTop + qrSize - 8);
+    }
+    return;
+  }
+
+  // Bottom band: three columns — title/stats, course/notes, QR
+  const x1 = panel.x + pad;
+  const col1W = 330;
+  const qrSize = 128;
+  const x3 = panel.x + panel.w - pad - qrSize;
+  const x2 = x1 + col1W + 30;
+  const col2W = x3 - 26 - x2;
+  const bottom = panel.y + panel.h - pad;
+
+  let y1 = drawPosterTitle(pctx, x1, panel.y + pad, col1W);
+  drawPosterStats(pctx, x1, y1, col1W);
+
+  let y2 = panel.y + pad;
+  if (orderText) {
+    y2 = drawPosterHeading(pctx, 'Course', x2, y2, 20);
+    y2 = drawPosterBody(pctx, orderText, x2, y2, col2W, Math.min(y2 + 62, bottom));
+  }
+  if (notesText) {
+    y2 = drawPosterHeading(pctx, 'Race notes', x2, y2 + 8, 20);
+    drawPosterBody(pctx, notesText, x2, y2, col2W, bottom);
+  }
+
+  const qrY = panel.y + pad + 6;
+  const hasQr = drawPosterQr(pctx, shareUrl, x3, qrY, qrSize);
+  pctx.textAlign = 'center';
+  pctx.textBaseline = 'alphabetic';
+  if (hasQr) {
+    pctx.font = `15px ${TITLE_FONT}`;
+    pctx.fillStyle = '#8fd8f5';
+    pctx.fillText('Scan to ride', x3 + qrSize / 2, qrY + qrSize + 28);
+    pctx.font = `italic 11px ${BODY_FONT}`;
+    pctx.fillStyle = 'rgba(180,205,222,0.85)';
+    pctx.fillText('efoil.racing', x3 + qrSize / 2, qrY + qrSize + 46);
+  } else {
+    pctx.font = `16px ${TITLE_FONT}`;
+    pctx.fillStyle = '#8fd8f5';
+    pctx.fillText('efoil.racing', x3 + qrSize / 2, qrY + qrSize / 2);
+  }
+  pctx.textAlign = 'left';
+}
+
+async function renderBriefingPoster() {
+  await ensurePacifico();
+
+  const W = POSTER_W, H = POSTER_H, M = POSTER_MARGIN;
+  const bbox = trackBBox(track);
+  const wide = bbox ? bbox.w / Math.max(bbox.h, 1) >= 1.4 : false;
+
+  const panel = wide
+    ? { x: M, y: H - M - POSTER_PANEL_H, w: W - 2 * M, h: POSTER_PANEL_H }
+    : { x: M, y: M, w: POSTER_PANEL_W, h: H - 2 * M };
+  const free = wide
+    ? { x: 0, y: 0, w: W, h: panel.y }
+    : { x: panel.x + panel.w, y: 0, w: W - (panel.x + panel.w), h: H };
+
+  const cnv = document.createElement('canvas');
+  cnv.width = W * POSTER_SCALE;
+  cnv.height = H * POSTER_SCALE;
+  const pctx = cnv.getContext('2d');
+  pctx.setTransform(POSTER_SCALE, 0, 0, POSTER_SCALE, 0, 0);
+
+  // Fit the track into the free (non-panel) region
+  const pad = 1.3;
+  const spanX = Math.max(bbox ? bbox.w : 100, 40) * pad;
+  const spanY = Math.max(bbox ? bbox.h : 100, 40) * pad;
+  const pxPerM = Math.min(free.w / spanX, free.h / spanY);
+  const bcx = bbox ? (bbox.minX + bbox.maxX) / 2 : 0;
+  const bcy = bbox ? (bbox.minY + bbox.maxY) / 2 : 0;
+  const pview = {
+    pxPerM,
+    cx: bcx - (free.x + free.w / 2 - W / 2) / pxPerM,
+    cy: bcy - (H / 2 - (free.y + free.h / 2)) / pxPerM
+  };
+
+  // Swap the module render target so the existing draw helpers hit the poster
+  const prevCtx = ctx, prevView = view, prevSelection = selection;
+  ctx = pctx; view = pview; selection = null;
+  poster = { ctx: pctx, w: W, h: H };
+  let satellite = false;
+  try {
+    if (hasGeo(track)) {
+      satellite = await drawPosterSatellite(pctx, W, H);
+    }
+    if (!satellite) {
+      drawPosterWater(pctx, W, H);
+      drawGrid(W, H);
+    }
+    drawSequenceLine();
+    drawRacingLines();
+    drawGates();
+    drawStartPos();
+    drawBuoys();
+    drawScaleBar(W, H);
+  } finally {
+    ctx = prevCtx; view = prevView; selection = prevSelection;
+    poster = null;
+  }
+
+  const shareUrl = new URL('index.html', window.location.href);
+  shareUrl.search = '?data=' + encodeTrackForUrl(track);
+  drawPosterPanel(pctx, panel, shareUrl.toString());
+
+  if (satellite) {
+    pctx.font = '9px -apple-system, Helvetica, sans-serif';
+    pctx.fillStyle = 'rgba(255,255,255,0.7)';
+    pctx.textAlign = 'right';
+    pctx.textBaseline = 'alphabetic';
+    pctx.fillText('Imagery \u00A9 Esri \u2014 Esri, Maxar, Earthstar Geographics', W - 8, H - 7);
+    pctx.textAlign = 'left';
+  }
+  return cnv;
+}
+
+const briefingModal = document.getElementById('briefingModal');
+const briefingPreview = document.getElementById('briefingPreview');
+let briefingBlobUrl = null;
+
+function closeBriefingModal() {
+  briefingModal.classList.remove('open');
+  briefingPreview.removeAttribute('src');
+  if (briefingBlobUrl) {
+    URL.revokeObjectURL(briefingBlobUrl);
+    briefingBlobUrl = null;
+  }
+}
+
+document.getElementById('btnBriefing').addEventListener('click', async () => {
+  const { errors } = validateTrack(track);
+  if (errors.length) {
+    alert('Fix these before exporting the briefing:\n' + errors.join('\n'));
+    return;
+  }
+  const btn = document.getElementById('btnBriefing');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Rendering\u2026';
+  try {
+    const cnv = await renderBriefingPoster();
+    const blob = await new Promise(resolve => cnv.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('PNG encoding failed');
+    if (briefingBlobUrl) URL.revokeObjectURL(briefingBlobUrl);
+    briefingBlobUrl = URL.createObjectURL(blob);
+    briefingPreview.src = briefingBlobUrl;
+    briefingModal.classList.add('open');
+  } catch (err) {
+    alert('Briefing export failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
+
+document.getElementById('briefingDownload').addEventListener('click', () => {
+  if (!briefingBlobUrl) return;
+  const link = document.createElement('a');
+  link.href = briefingBlobUrl;
+  link.download = `${trackSlug()}-briefing.png`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+});
+
+document.getElementById('briefingClose').addEventListener('click', closeBriefingModal);
+briefingModal.addEventListener('click', e => {
+  if (e.target === briefingModal) closeBriefingModal();
 });
 
 // --- Topbar actions ---

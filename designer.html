@@ -142,6 +142,24 @@
     #qrContainer { background: #fff; border-radius: 8px; display: inline-block; padding: 8px; line-height: 0; }
     #qrContainer svg { width: 220px; height: 220px; }
     #shareClose { margin-top: 14px; }
+
+    /* ---------- Briefing modal ---------- */
+    #briefingModal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+      display: none; align-items: center; justify-content: center; z-index: 100;
+    }
+    #briefingModal.open { display: flex; }
+    #briefingBox {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      padding: 22px; width: 860px; max-width: 94vw; text-align: center;
+    }
+    #briefingBox h2 { margin: 0 0 4px; font-size: 18px; }
+    #briefingBox p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+    #briefingPreview {
+      display: block; width: 100%; height: auto; border-radius: 8px;
+      border: 1px solid var(--border); background: #0c1218;
+    }
+    #briefingActions { display: flex; gap: 8px; justify-content: center; margin-top: 14px; }
   </style>
 </head>
 <body>
@@ -163,6 +181,7 @@
     <button id="btnNew" class="secondary">New</button>
     <button id="btnImport" class="secondary">Import</button>
     <button id="btnExport" class="secondary">Export JSON</button>
+    <button id="btnBriefing" class="secondary" title="Export a race briefing poster (PNG) with track map, notes and QR code">Briefing</button>
     <input type="file" id="importFile" accept=".json,application/json" style="display:none;">
     <button id="btnShare" class="secondary">Share</button>
     <button id="btnTestRide" class="primary">&#9658; Test Ride</button>
@@ -265,6 +284,18 @@
         <h3>Checks</h3>
         <div id="warnings"></div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="briefingModal">
+  <div id="briefingBox">
+    <h2>Race briefing</h2>
+    <p>High-resolution poster with the course map, notes and a scan-to-ride QR code.</p>
+    <img id="briefingPreview" alt="Race briefing poster preview">
+    <div id="briefingActions">
+      <button id="briefingDownload" class="primary">Download PNG</button>
+      <button id="briefingClose" class="secondary">Close</button>
     </div>
   </div>
 </div>
