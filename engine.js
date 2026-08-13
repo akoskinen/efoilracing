@@ -13,7 +13,7 @@ import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
-  RACING_LINE_COLORS
+  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost
 } from './trackSchema.js';
 
 // Convert declarative track configs into the runtime shape the engine uses.
@@ -22,6 +22,8 @@ Object.keys(trackConfigs).forEach(k => normalizeTrack(trackConfigs[k]));
 // --- Canvas and Context ---
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
+const followCam = { tx: 0, ty: 0, scale: 1 };
+let zoomStopIndex = 0;
 
 // --- Track Setup Variables ---
 let currentTrackKey = 'speedTrack'; // default track key
@@ -78,13 +80,24 @@ let computedGates = null;
 
 // Geo-anchored tracks: mercator world pixels -> canvas pixels (rotation-aware).
 let geoCanvasTransform = null; // { zoom, scale, offsetX, offsetY }
+// Streaming tile budget for the padded camera view (not a one-shot canvas bake).
+const GEO_TILE_BUDGET = 96;
+const GEO_TILE_CACHE_MAX = 420;
+const GEO_MAX_INFLIGHT = 10;
+const GEO_PREFETCH_PAD_TILES = 2;
+const GEO_LOOKAHEAD_SEC = 7;
+const GEO_TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile';
 
 function computeGeoCanvasTransform() {
   geoCanvasTransform = null;
+  if (currentTrack) delete currentTrack._geoPxPerMeter;
   if (!hasGeo(currentTrack)) return;
+  if (!canvas.width || !canvas.height) return;
 
   const geo = currentTrack.geo;
   const latRad = geo.origin.lat * Math.PI / 180;
+  // Native imagery near ~0.25 m/world-px. Visible tiles are streamed at a
+  // camera-dependent zoom, so this no longer has to drop for a full-canvas bake.
   let zoom = Math.round(Math.log2(156543.03392 * Math.cos(latRad) / 0.25));
   zoom = Math.max(12, Math.min(19, zoom));
 
@@ -92,7 +105,6 @@ function computeGeoCanvasTransform() {
     const ll = metersToLatLng(geo, mx, my);
     return latLngToWorldPx(ll.lat, ll.lng, zoom);
   };
-
   const mercPts = [];
   currentTrack.buoys.forEach(b => mercPts.push(toMerc(b.x, b.y)));
   if (currentTrack.gate) {
@@ -112,13 +124,28 @@ function computeGeoCanvasTransform() {
       mercPts.push(toMerc(b.x, b.y + (currentTrack.trackSeparation || 0)));
     });
   }
+  // Include session/ghost GPS path so the rider isn't fitted out of view
+  const ghostForFit =
+    (currentGhost?.frames?.length && currentGhost) ||
+    (typeof ghostDataMap !== 'undefined' && ghostDataMap.get(currentTrackKey)) ||
+    null;
+  if (ghostForFit?.frames?.length) {
+    const step = Math.max(1, Math.ceil(ghostForFit.frames.length / 40));
+    for (let i = 0; i < ghostForFit.frames.length; i += step) {
+      const f = ghostForFit.frames[i];
+      if (Number.isFinite(f.x) && Number.isFinite(f.y)) mercPts.push(toMerc(f.x, f.y));
+    }
+    const last = ghostForFit.frames[ghostForFit.frames.length - 1];
+    if (last && Number.isFinite(last.x)) mercPts.push(toMerc(last.x, last.y));
+  }
+  if (!mercPts.length) return;
 
+  const pad = 1.3;
   const xs = mercPts.map(p => p.x), ys = mercPts.map(p => p.y);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const mercW = Math.max(maxX - minX, 40 / 0.25);
-  const mercH = Math.max(maxY - minY, 40 / 0.25);
-  const pad = 1.3;
+  const mercW = Math.max(maxX - minX, 40);
+  const mercH = Math.max(maxY - minY, 40);
   const scale = Math.min(canvas.width / (mercW * pad), canvas.height / (mercH * pad));
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
@@ -243,13 +270,12 @@ function computeBuoys() {
   // 7) Initialize apex states for these buoys
   initTurnStates();
 
-  // 8) Rebuild the satellite background for geo-anchored tracks
-  buildGeoBackground();
+  // 8) Kick tile prefetch for the current camera (streamed, not baked)
+  prefetchGeoTiles();
 }
 
-// --- Satellite Background (geo-anchored tracks) ---
-let geoBackground = null;
-let geoBgToken = 0;
+// --- Satellite tiles (streamed around the follow camera) ---
+const geoTileCache = new Map(); // key -> {status, img, z, x, y, lastUsed, priority}
 
 function updateGeoAttribution(show) {
   let div = document.getElementById('geoAttribution');
@@ -267,65 +293,310 @@ function updateGeoAttribution(show) {
   div.style.display = show ? 'block' : 'none';
 }
 
-function buildGeoBackground() {
-  geoBgToken++;
-  geoBackground = null;
-  updateGeoAttribution(false);
-  if (!geoCanvasTransform) return;
+function geoTileKey(z, x, y) {
+  return z + '/' + x + '/' + y;
+}
 
-  const token = geoBgToken;
-  const t = geoCanvasTransform;
-  const zoom = t.zoom;
+function wrapTileX(x, z) {
+  const n = 1 << z;
+  return ((x % n) + n) % n;
+}
 
-  const off = document.createElement('canvas');
-  off.width = canvas.width;
-  off.height = canvas.height;
-  const octx = off.getContext('2d');
-  octx.fillStyle = '#10222c';
-  octx.fillRect(0, 0, off.width, off.height);
+function screenToWorld(sx, sy, s, tx, ty) {
+  s = s ?? followCam.scale ?? 1;
+  tx = tx ?? followCam.tx;
+  ty = ty ?? followCam.ty;
+  return { x: (sx - tx) / s, y: (sy - ty) / s };
+}
 
-  // Visible mercator bounds from the shared geo transform
+function cameraWorldBounds(padFrac, extraWorld, s, tx, ty) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const padX = w * padFrac;
+  const padY = h * padFrac;
   const corners = [
-    canvasToMercator(0, 0),
-    canvasToMercator(off.width, 0),
-    canvasToMercator(0, off.height),
-    canvasToMercator(off.width, off.height)
+    screenToWorld(-padX, -padY, s, tx, ty),
+    screenToWorld(w + padX, -padY, s, tx, ty),
+    screenToWorld(-padX, h + padY, s, tx, ty),
+    screenToWorld(w + padX, h + padY, s, tx, ty)
   ];
-  const txMin = Math.floor(Math.min(...corners.map(p => p.x)) / 256);
-  const txMax = Math.floor(Math.max(...corners.map(p => p.x)) / 256);
-  const tyMin = Math.floor(Math.min(...corners.map(p => p.y)) / 256);
-  const tyMax = Math.floor(Math.max(...corners.map(p => p.y)) / 256);
-  const tileCount = (txMax - txMin + 1) * (tyMax - tyMin + 1);
-  if (tileCount > 180) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, c.x);
+    maxX = Math.max(maxX, c.x);
+    minY = Math.min(minY, c.y);
+    maxY = Math.max(maxY, c.y);
+  }
+  if (extraWorld) {
+    const dx = Math.cos(heading) * extraWorld;
+    const dy = Math.sin(heading) * extraWorld;
+    if (dx >= 0) maxX += dx; else minX += dx;
+    if (dy >= 0) maxY += dy; else minY += dy;
+  }
+  return { minX, minY, maxX, maxY };
+}
 
-  const maxTileIndex = Math.pow(2, zoom) - 1;
+function worldBoundsToMercator(b) {
+  const pts = [
+    canvasToMercator(b.minX, b.minY),
+    canvasToMercator(b.maxX, b.minY),
+    canvasToMercator(b.minX, b.maxY),
+    canvasToMercator(b.maxX, b.maxY)
+  ];
+  return {
+    minX: Math.min(pts[0].x, pts[1].x, pts[2].x, pts[3].x),
+    maxX: Math.max(pts[0].x, pts[1].x, pts[2].x, pts[3].x),
+    minY: Math.min(pts[0].y, pts[1].y, pts[2].y, pts[3].y),
+    maxY: Math.max(pts[0].y, pts[1].y, pts[2].y, pts[3].y)
+  };
+}
 
-  function loadTile(z, x, y, depth) {
-    if (x < 0 || y < 0 || x > Math.pow(2, z) - 1 || y > Math.pow(2, z) - 1) return;
+function tileRangeAtZoom(z, merc, tZoom) {
+  const k = Math.pow(2, z - tZoom);
+  return {
+    z,
+    tx0: Math.floor(merc.minX * k / 256),
+    tx1: Math.floor(merc.maxX * k / 256),
+    ty0: Math.floor(merc.minY * k / 256),
+    ty1: Math.floor(merc.maxY * k / 256)
+  };
+}
+
+function chooseDrawZoom(merc, tZoom) {
+  let z = tZoom;
+  for (;;) {
+    const r = tileRangeAtZoom(z, merc, tZoom);
+    const count = (r.tx1 - r.tx0 + 1) * (r.ty1 - r.ty0 + 1);
+    if (count <= GEO_TILE_BUDGET || z <= 8) return r;
+    z -= 1;
+  }
+}
+
+function requestGeoTile(z, x, y, priority) {
+  if (z < 0 || z > 19) return null;
+  const n = 1 << z;
+  if (y < 0 || y >= n) return null;
+  x = wrapTileX(x, z);
+  const key = geoTileKey(z, x, y);
+  let e = geoTileCache.get(key);
+  if (e) {
+    e.lastUsed = performance.now();
+    if (priority < e.priority) e.priority = priority;
+    return e;
+  }
+  e = {
+    status: 'queued',
+    img: null,
+    z, x, y,
+    lastUsed: performance.now(),
+    priority
+  };
+  geoTileCache.set(key, e);
+  pumpGeoTileQueue();
+  return e;
+}
+
+function pumpGeoTileQueue() {
+  let inflight = 0;
+  for (const e of geoTileCache.values()) {
+    if (e.status === 'loading') inflight++;
+  }
+  while (inflight < GEO_MAX_INFLIGHT) {
+    let best = null;
+    for (const e of geoTileCache.values()) {
+      if (e.status !== 'queued') continue;
+      if (!best ||
+          e.priority < best.priority ||
+          (e.priority === best.priority && e.lastUsed > best.lastUsed)) {
+        best = e;
+      }
+    }
+    if (!best) break;
+    best.status = 'loading';
+    inflight++;
     const img = new Image();
+    img.crossOrigin = 'anonymous';
     img.onload = () => {
-      if (token !== geoBgToken) return;
-      const s = Math.pow(2, zoom - z);
-      octx.setTransform(t.scale, 0, 0, t.scale, t.offsetX, t.offsetY);
-      octx.drawImage(img, x * 256 * s, y * 256 * s, 256 * s, 256 * s);
-      octx.setTransform(1, 0, 0, 1, 0, 0);
-      geoBackground = off;
-      updateGeoAttribution(true);
+      best.img = img;
+      best.status = 'ok';
+      pumpGeoTileQueue();
     };
     img.onerror = () => {
-      if (token !== geoBgToken || depth >= 2) return;
-      loadTile(z - 1, x >> 1, y >> 1, depth + 1);
+      best.status = 'error';
+      pumpGeoTileQueue();
     };
-    img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+    img.src = `${GEO_TILE_URL}/${best.z}/${best.y}/${best.x}`;
+  }
+}
+
+function pruneGeoTileCache(keepKeys) {
+  if (geoTileCache.size <= GEO_TILE_CACHE_MAX) return;
+  const entries = [];
+  for (const [k, e] of geoTileCache) {
+    if (e.status === 'loading') continue;
+    entries.push([k, e]);
+  }
+  entries.sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+  for (const [k] of entries) {
+    if (geoTileCache.size <= GEO_TILE_CACHE_MAX) break;
+    if (keepKeys.has(k)) continue;
+    geoTileCache.delete(k);
+  }
+}
+
+function tileWorldRect(z, x, y) {
+  const t = geoCanvasTransform;
+  const s = Math.pow(2, t.zoom - z);
+  const wx0 = x * 256 * s;
+  const wy0 = y * 256 * s;
+  const p0 = mercatorToCanvas(wx0, wy0);
+  const p1 = mercatorToCanvas(wx0 + 256 * s, wy0 + 256 * s);
+  return { x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y };
+}
+
+function drawCachedTileImage(z, x, y, dest) {
+  x = wrapTileX(x, z);
+  const e = geoTileCache.get(geoTileKey(z, x, y));
+  if (e?.status === 'ok' && e.img) {
+    ctx.drawImage(e.img, dest.x, dest.y, dest.w, dest.h);
+    e.lastUsed = performance.now();
+    return true;
+  }
+  return false;
+}
+
+function drawTileWithFallback(z, x, y) {
+  const dest = tileWorldRect(z, x, y);
+  if (drawCachedTileImage(z, x, y, dest)) return true;
+
+  for (let k = 1; k <= 6 && z - k >= 8; k++) {
+    const pz = z - k;
+    const px = x >> k;
+    const py = y >> k;
+    const e = geoTileCache.get(geoTileKey(pz, wrapTileX(px, pz), py));
+    if (e?.status === 'ok' && e.img) {
+      const frac = 256 / (1 << k);
+      const sx = (x - (px << k)) * frac;
+      const sy = (y - (py << k)) * frac;
+      ctx.drawImage(e.img, sx, sy, frac, frac, dest.x, dest.y, dest.w, dest.h);
+      e.lastUsed = performance.now();
+      return true;
+    }
   }
 
-  for (let ty = tyMin; ty <= tyMax; ty++) {
-    for (let tx = txMin; tx <= txMax; tx++) {
-      if (tx >= 0 && ty >= 0 && tx <= maxTileIndex && ty <= maxTileIndex) {
-        loadTile(zoom, tx, ty, 0);
+  const cz = z + 1;
+  if (cz <= 19) {
+    let any = false;
+    for (let dy = 0; dy < 2; dy++) {
+      for (let dx = 0; dx < 2; dx++) {
+        const cd = {
+          x: dest.x + dest.w * dx / 2,
+          y: dest.y + dest.h * dy / 2,
+          w: dest.w / 2,
+          h: dest.h / 2
+        };
+        if (drawCachedTileImage(cz, x * 2 + dx, y * 2 + dy, cd)) any = true;
+      }
+    }
+    if (any) return true;
+  }
+  return false;
+}
+
+function geoLookaheadWorld() {
+  const mps = (speed * speedConversion) / 3.6;
+  return mps * GEO_LOOKAHEAD_SEC * pixelsPerMeter();
+}
+
+function currentGeoTilePlan(forPrefetch) {
+  if (!geoCanvasTransform || !canvas.width) return null;
+  const tZoom = geoCanvasTransform.zoom;
+  let s, tx, ty;
+  if (forPrefetch) {
+    const target = followTargetScale();
+    const cur = followCam.scale || 1;
+    const rsx = pos.x * cur + followCam.tx;
+    const rsy = pos.y * cur + followCam.ty;
+    s = target;
+    tx = rsx - pos.x * target;
+    ty = rsy - pos.y * target;
+  }
+  const look = forPrefetch ? geoLookaheadWorld() : 0;
+  const world = cameraWorldBounds(forPrefetch ? 0.15 : 0.06, look, s, tx, ty);
+  const merc = worldBoundsToMercator(world);
+  const range = chooseDrawZoom(merc, tZoom);
+  if (!forPrefetch) return range;
+
+  const tilePx = 256 * Math.pow(2, tZoom - range.z) * geoCanvasTransform.scale;
+  const extra = Math.max(GEO_PREFETCH_PAD_TILES, Math.ceil(look / Math.max(tilePx, 1)));
+  const hx = Math.cos(heading);
+  const hy = Math.sin(heading);
+  range.tx0 -= GEO_PREFETCH_PAD_TILES + (hx < -0.3 ? extra : 0);
+  range.tx1 += GEO_PREFETCH_PAD_TILES + (hx > 0.3 ? extra : 0);
+  range.ty0 -= GEO_PREFETCH_PAD_TILES + (hy < -0.3 ? extra : 0);
+  range.ty1 += GEO_PREFETCH_PAD_TILES + (hy > 0.3 ? extra : 0);
+  return range;
+}
+
+function enqueueTileRange(range, basePriority) {
+  if (!range) return new Set();
+  const n = 1 << range.z;
+  const keep = new Set();
+  for (let ty = range.ty0; ty <= range.ty1; ty++) {
+    if (ty < 0 || ty >= n) continue;
+    for (let tx = range.tx0; tx <= range.tx1; tx++) {
+      const e = requestGeoTile(range.z, tx, ty, basePriority);
+      if (e) keep.add(geoTileKey(e.z, e.x, e.y));
+    }
+  }
+  // Low-res parents so zoom-out / first pan has coverage while children load
+  if (range.z > 8) {
+    const pz = range.z - 1;
+    const pn = 1 << pz;
+    for (let ty = range.ty0 >> 1; ty <= range.ty1 >> 1; ty++) {
+      if (ty < 0 || ty >= pn) continue;
+      for (let tx = range.tx0 >> 1; tx <= range.tx1 >> 1; tx++) {
+        const e = requestGeoTile(pz, tx, ty, basePriority + 2);
+        if (e) keep.add(geoTileKey(e.z, e.x, e.y));
       }
     }
   }
+  return keep;
+}
+
+function prefetchGeoTiles() {
+  if (!geoCanvasTransform) {
+    updateGeoAttribution(false);
+    return;
+  }
+  const keep = enqueueTileRange(currentGeoTilePlan(true), 1) || new Set();
+  pruneGeoTileCache(keep);
+}
+
+function drawGeoTiles() {
+  if (!geoCanvasTransform) {
+    updateGeoAttribution(false);
+    return false;
+  }
+  const vis = currentGeoTilePlan(false);
+  const pre = currentGeoTilePlan(true);
+  const keep = enqueueTileRange(pre, 1) || new Set();
+  const visKeep = enqueueTileRange(vis, 0);
+  if (visKeep) visKeep.forEach(k => keep.add(k));
+
+  let drawn = false;
+  if (vis) {
+    const n = 1 << vis.z;
+    for (let ty = vis.ty0; ty <= vis.ty1; ty++) {
+      if (ty < 0 || ty >= n) continue;
+      for (let tx = vis.tx0; tx <= vis.tx1; tx++) {
+        if (drawTileWithFallback(vis.z, tx, ty)) drawn = true;
+      }
+    }
+  }
+  pruneGeoTileCache(keep);
+  updateGeoAttribution(drawn);
+  return drawn;
 }
 
 // --- Audio Manager ---
@@ -448,6 +719,7 @@ function resizeCanvas() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
   computeBuoys();
+  resetFollowCamera();
 }
 window.addEventListener('resize', resizeCanvas);
 
@@ -497,8 +769,8 @@ function registerCustomTrack(key, track) {
   if (!availableTrackKeys.includes(key)) availableTrackKeys.push(key);
 
   // Add a radio button for the custom track
-  const selector = document.getElementById('trackSelector');
-  if (selector && !document.querySelector(`input[name="track"][value="${key}"]`)) {
+  const list = document.getElementById('trackList') || document.getElementById('trackSelector');
+  if (list && !document.querySelector(`input[name="track"][value="${key}"]`)) {
     const label = document.createElement('label');
     const input = document.createElement('input');
     input.type = 'radio';
@@ -507,8 +779,7 @@ function registerCustomTrack(key, track) {
     input.addEventListener('change', onTrackRadioChange);
     label.appendChild(input);
     label.appendChild(document.createTextNode(' ' + track.name));
-    selector.appendChild(document.createElement('br'));
-    selector.appendChild(label);
+    list.appendChild(label);
   }
 }
 
@@ -660,16 +931,10 @@ function showLineCaptureOverlay(lapTime, capture) {
 }
 
 function addDesignerLink(text, href) {
-  const link = document.createElement('a');
+  const link = document.getElementById('designerLink');
+  if (!link) return;
   link.href = href;
   link.textContent = text;
-  link.style.cssText = `
-    position: fixed; top: 15px; left: 15px; z-index: 1000;
-    color: #7fd4ff; background: rgba(0,0,0,0.6); padding: 8px 12px;
-    border-radius: 6px; font-family: sans-serif; font-size: 14px;
-    text-decoration: none;
-  `;
-  document.body.appendChild(link);
 }
 
 // --- URL Parameter Handling ---
@@ -822,7 +1087,45 @@ const timeToMaxSpeed = 18;
 const accelRate      = maxSpeed / timeToMaxSpeed;
 const decelRate      = 12.333;
 const speedConversion= 0.6;
-const speedScale     = 0.837;
+// Legacy pixel-speed tuning (built-ins at ~4 px/m). Kept only as the reference
+// for meter-based collision thresholds that were authored in canvas pixels.
+const SPEED_CALIBRATION_PX_PER_M = 4;
+const COLLISION_RADIUS_M = 12 / SPEED_CALIBRATION_PX_PER_M; // 3 m
+const TIGHT_LINE_M       = 15 / SPEED_CALIBRATION_PX_PER_M; // 3.75 m
+
+// Current meters→pixels ratio for the active track layout (collisions, etc.).
+function pixelsPerMeter() {
+  if (geoCanvasTransform &&
+      Number.isFinite(currentTrack._geoPxPerMeter) &&
+      currentTrack._geoPxPerMeter > 0) {
+    return currentTrack._geoPxPerMeter;
+  }
+  const s = currentTrack && currentTrack.scale;
+  return (Number.isFinite(s) && s > 0) ? s : SPEED_CALIBRATION_PX_PER_M;
+}
+
+// Advance the rider in TRACK METERS using HUD km/h, then project to canvas.
+// This keeps ground speed correct regardless of how much the track is fit-scaled.
+function advancePositionBySpeed(speedKmh, dt) {
+  const mps = speedKmh / 3.6;
+  if (mps <= 0 || dt <= 0) return;
+
+  const samplePx = 8;
+  const m0 = pixelToTrackMeters(pos.x, pos.y);
+  const m1 = pixelToTrackMeters(
+    pos.x + Math.cos(heading) * samplePx,
+    pos.y + Math.sin(heading) * samplePx
+  );
+  let dx = m1.x - m0.x;
+  let dy = m1.y - m0.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-9) return;
+  dx = (dx / len) * mps * dt;
+  dy = (dy / len) * mps * dt;
+  const p = trackMetersToPixel(m0.x + dx, m0.y + dy);
+  pos.x = p.x;
+  pos.y = p.y;
+}
 
 const BANK_ANGLE_MAX = 55;
 const bankRate0to30  = 40;
@@ -1024,6 +1327,140 @@ function placePlayerAtStart() {
   }
   prevPos.x = pos.x;
   prevPos.y = pos.y;
+  resetFollowCamera();
+}
+
+// --- Follow camera (smooth edge tracking, no wrap) ---
+const FOLLOW_MARGIN_FRAC = 0.16;
+const FOLLOW_MARGIN_MIN = 90;
+const FOLLOW_TAU = 0.45;
+const CAM_SCALE_TAU = 0.42;
+const OVERVIEW_CENTER_TAU = 0.65;
+// Z cycles: race zoom → 1 km → 5 km → race zoom
+const ZOOM_STOPS_M = [0, 1000, 5000];
+let zoomHintUntil = 0;
+
+function isOverviewZoom() {
+  return zoomStopIndex > 0;
+}
+
+function overviewMeters() {
+  return ZOOM_STOPS_M[zoomStopIndex] || 0;
+}
+
+function followTargetScale() {
+  const meters = overviewMeters();
+  const ppm = pixelsPerMeter();
+  if (!meters || !ppm || !canvas.width || !canvas.height) return 1;
+  const worldSpan = meters * ppm;
+  const view = Math.min(canvas.width, canvas.height);
+  return Math.max(0.02, Math.min(1, view / worldSpan));
+}
+
+function zoomStopTitle(index) {
+  const m = ZOOM_STOPS_M[index] || 0;
+  if (!m) return 'Race zoom';
+  return m >= 1000 ? `Overview — ${m / 1000} km` : `Overview — ${m} m`;
+}
+
+function nextZoomHint() {
+  const next = (zoomStopIndex + 1) % ZOOM_STOPS_M.length;
+  const m = ZOOM_STOPS_M[next] || 0;
+  if (!m) return 'Z · race zoom';
+  return m >= 1000 ? `Z · ${m / 1000} km overview` : `Z · ${m} m overview`;
+}
+
+function resetFollowCamera() {
+  const s = followTargetScale();
+  followCam.scale = s;
+  if (isOverviewZoom() && canvas.width) {
+    followCam.tx = canvas.width / 2 - pos.x * s;
+    followCam.ty = canvas.height / 2 - pos.y * s;
+  } else {
+    followCam.tx = pos.x * (1 - s);
+    followCam.ty = pos.y * (1 - s);
+  }
+}
+
+function updateFollowCamera(dt) {
+  const w = canvas.width;
+  const h = canvas.height;
+  if (!w || !h) return;
+
+  const targetScale = followTargetScale();
+  const scaleA = 1 - Math.exp(-dt / CAM_SCALE_TAU);
+  const oldS = followCam.scale || 1;
+  const newS = oldS + (targetScale - oldS) * scaleA;
+  const rsx = pos.x * oldS + followCam.tx;
+  const rsy = pos.y * oldS + followCam.ty;
+  followCam.scale = newS;
+  followCam.tx = rsx - pos.x * newS;
+  followCam.ty = rsy - pos.y * newS;
+
+  const s = followCam.scale;
+  let tx;
+  let ty;
+  if (isOverviewZoom()) {
+    tx = w / 2 - pos.x * s;
+    ty = h / 2 - pos.y * s;
+  } else {
+    const mx = Math.max(FOLLOW_MARGIN_MIN, w * FOLLOW_MARGIN_FRAC);
+    const my = Math.max(FOLLOW_MARGIN_MIN, h * FOLLOW_MARGIN_FRAC);
+    const look = Math.min(110, (speed * speedConversion / 55) * 85);
+    const fx = pos.x + Math.cos(heading) * look;
+    const fy = pos.y + Math.sin(heading) * look;
+    tx = followCam.tx;
+    ty = followCam.ty;
+    const sx = fx * s + tx;
+    const sy = fy * s + ty;
+    if (sx < mx) tx += mx - sx;
+    else if (sx > w - mx) tx += (w - mx) - sx;
+    if (sy < my) ty += my - sy;
+    else if (sy > h - my) ty += (h - my) - sy;
+  }
+
+  const tau = isOverviewZoom() ? OVERVIEW_CENTER_TAU : FOLLOW_TAU;
+  const a = 1 - Math.exp(-dt / tau);
+  followCam.tx += (tx - followCam.tx) * a;
+  followCam.ty += (ty - followCam.ty) * a;
+}
+
+function worldMarkerScale() {
+  const s = followCam.scale || 1;
+  return s < 0.995 ? 1 / s : 1;
+}
+
+function withWorldMarker(x, y, fn) {
+  const m = worldMarkerScale();
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(m, m);
+  fn();
+  ctx.restore();
+}
+
+function cycleZoomStop() {
+  zoomStopIndex = (zoomStopIndex + 1) % ZOOM_STOPS_M.length;
+  zoomHintUntil = performance.now() + 1800;
+  prefetchGeoTiles();
+}
+
+function drawZoomHint() {
+  const now = performance.now();
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = '13px sans-serif';
+  if (now < zoomHintUntil) {
+    const a = Math.min(1, (zoomHintUntil - now) / 400);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`${zoomStopTitle(zoomStopIndex)}  (Z)`, canvas.width / 2, 42);
+  } else {
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#fff';
+    ctx.fillText(nextZoomHint(), canvas.width / 2, 22);
+  }
+  ctx.restore();
 }
 
 // Required crossing direction for directional gates, in pixel space.
@@ -1091,7 +1528,9 @@ function getGhostPosition(t, ghostData) {
         x: prev.x + ratio * (next.x - prev.x),
         y: prev.y + ratio * (next.y - prev.y),
         heading: prev.heading + ratio * (next.heading - prev.heading),
-        time: t
+        headingSpace: prev.headingSpace || next.headingSpace,
+        time: t,
+        speedKmh: prev.speedKmh
       };
     }
     
@@ -1106,29 +1545,64 @@ function getGhostPosition(t, ghostData) {
   return { ...frames[0] };
 }
 
+// GPS / session ghosts store heading in track-meter radians; legacy sim ghosts
+// store screen-space heading. Convert at draw time so refits stay correct.
+function ghostFrameHeadingToScreen(frame) {
+  if (!frame) return 0;
+  if (frame.headingSpace === 'trackMeters' || frame.headingSpace === 'track') {
+    const rad = frame.heading || 0;
+    const p = trackMetersToPixel(frame.x, frame.y);
+    const ahead = trackMetersToPixel(
+      frame.x + Math.cos(rad) * 5,
+      frame.y + Math.sin(rad) * 5
+    );
+    return Math.atan2(ahead.y - p.y, ahead.x - p.x);
+  }
+  return frame.heading || 0;
+}
+
+// Free-running preview clock so session ghosts are visible before a lap starts.
+let ghostPreviewStart = 0;
+
+function ghostPlaybackTimeSec() {
+  if (lapActive && lapStartTime) {
+    return (performance.now() - lapStartTime) / 1000;
+  }
+  if (ghostPreviewStart) {
+    return (performance.now() - ghostPreviewStart) / 1000;
+  }
+  return 0;
+}
+
+function startGhostPreview() {
+  ghostPreviewStart = performance.now();
+  ghostWakeTrail = [];
+}
+
 function drawGhostFrame() {
-    // Only proceed if all conditions are met
-    if (!lapActive || !showGhost || !currentGhost) {
+    if (!showGhost || !currentGhost) {
         return;
     }
-    
+    // Need an active lap or a free preview (session CSV import starts preview).
+    if (!lapActive && !ghostPreviewStart) {
+        return;
+    }
+
     if (!currentGhost.frames || !Array.isArray(currentGhost.frames) || currentGhost.frames.length === 0) {
         return;
     }
-    
-    // Get the current time in seconds since lap start
-    const timeSec = (performance.now() - lapStartTime) / 1000;
-    
-    // Find the frame at the current time
-    const frame = getGhostPosition(timeSec, currentGhost);
+
+    const timeSec = ghostPlaybackTimeSec();
+    // Loop preview so long sessions keep animating while you wait to start
+    const lapDur = currentGhost.time || currentGhost.frames[currentGhost.frames.length - 1]?.time || 0;
+    const playT = (!lapActive && lapDur > 0) ? (timeSec % Math.max(lapDur, 0.1)) : timeSec;
+
+    const frame = getGhostPosition(playT, currentGhost);
     if (!frame) {
         return;
     }
-    
-    // Calculate pixel position from track meters
+
     let ghostX, ghostY;
-    
-    // For parallel-lane tracks, show ghost on the parallel track
     if (currentTrack.parallelTrack) {
         const parallel = trackMetersToPixel(
             frame.x,
@@ -1137,18 +1611,15 @@ function drawGhostFrame() {
         ghostX = parallel.x;
         ghostY = parallel.y;
     } else {
-        // For other tracks, show ghost on same track
-        const pos = trackMetersToPixel(frame.x, frame.y);
-        ghostX = pos.x;
-        ghostY = pos.y;
+        const p = trackMetersToPixel(frame.x, frame.y);
+        ghostX = p.x;
+        ghostY = p.y;
     }
-    
-    // Draw the ghost
-    drawGhost(ghostX, ghostY, frame.heading);
-    
-    // Update ghost wake trail
+
+    drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame));
+
     ghostWakeTrail.push({ x: ghostX, y: ghostY });
-    const targetWakeLength = 200; // Fixed length for ghost wake
+    const targetWakeLength = 200;
     while (ghostWakeTrail.length > 1 && totalTrailDistance(ghostWakeTrail) > targetWakeLength) {
         ghostWakeTrail.shift();
     }
@@ -1156,19 +1627,18 @@ function drawGhostFrame() {
 
 // Separate function to draw the ghost racer at a given position
 function drawGhost(x, y, heading) {
-  ctx.save();
-    ctx.translate(x, y);
+  withWorldMarker(x, y, () => {
     ctx.rotate(heading - Math.PI / 2);
-    ctx.globalAlpha = 0.25;  // Keep original transparency
-  ctx.beginPath();
-  ctx.moveTo(0, 12.5);
-  ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
-  ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
-  ctx.closePath();
-    ctx.fillStyle = '#ff88ff';  // Keep original color
-  ctx.fill();
-  ctx.restore();
-  ctx.globalAlpha = 1.0;
+    ctx.globalAlpha = 0.25;
+    ctx.beginPath();
+    ctx.moveTo(0, 12.5);
+    ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
+    ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
+    ctx.closePath();
+    ctx.fillStyle = '#ff88ff';
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  });
 }
 
 function startLap(){
@@ -1408,6 +1878,11 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 't' || e.key === 'T') {
     cycleToNextTrack();
   }
+
+  // Cycle Z: race zoom → 1 km → 5 km → race zoom
+  if (e.key === 'z' || e.key === 'Z') {
+    cycleZoomStop();
+  }
 });
 
 document.addEventListener('keyup', function(e) {
@@ -1577,12 +2052,13 @@ function checkGateCrossing(oldPos, newPos) {
 // --- Collision Detection with Buoys ---
 function checkBuoyCollisions(){
   if (!lapActive || collidedThisLap) return;
-  
+
+  const hitRadiusPx = COLLISION_RADIUS_M * pixelsPerMeter();
   for (const b of buoys) {
     const dx   = b.x - pos.x;
     const dy   = b.y - pos.y;
     const dist = Math.hypot(dx, dy);
-    if (dist < 12) {
+    if (dist < hitRadiusPx) {
       penaltySeconds += 10;
       collidedThisLap = true;
       AudioManager.playSound('collision')
@@ -1658,8 +2134,8 @@ function handleApexCommentary(buoy, st) {
   }
   const nearOptimal = (speedDiff <= 25);
 
-  // line tightness
-  const tightLine = (st.minDistance < 15);
+  // line tightness (threshold scales with world px/m, same as collisions)
+  const tightLine = (st.minDistance < TIGHT_LINE_M * pixelsPerMeter());
 
   // pick an event key
   let eventKey = "turn_generic";
@@ -1696,16 +2172,10 @@ function update(dt){
   const angleRad = (bankAngleDeg * Math.PI) / 180;
   const turnFactor = Math.sign(bankAngleDeg) * (Math.abs(angleRad) * turnGain) * ((1 / radius) + lowFactor);
   heading += turnFactor * dt;
-  
-  pos.x += speed * speedScale * dt * Math.cos(heading);
-  pos.y += speed * speedScale * dt * Math.sin(heading);
-  
-  let wrapped = false;
-  if (pos.x > canvas.width) { pos.x = 0; wrapped = true; }
-  else if (pos.x < 0)       { pos.x = canvas.width; wrapped = true; }
-  if (pos.y > canvas.height){ pos.y = 0; wrapped = true; }
-  else if (pos.y < 0)       { pos.y = canvas.height; wrapped = true; }
-  
+
+  advancePositionBySpeed(speedKmh, dt);
+  updateFollowCamera(dt);
+
   // Update wind volume based on speed and ensure it's playing
   AudioManager.ensureWindPlaying();
   AudioManager.sounds.wind.volume = speed / maxSpeed;
@@ -1719,14 +2189,10 @@ function update(dt){
     updateGhostStats();
   }
   
-  if (!wrapped) {
-    // Debug directional finish crossings (if applicable)
-    if (currentTrack.directionalFinishGate) {
-      debugDirectionalCrossing();
-    }
-    
-    handleLapTiming();
+  if (currentTrack.directionalFinishGate) {
+    debugDirectionalCrossing();
   }
+  handleLapTiming();
   
   if (lapActive) {
     if (speedKmh > topSpeedKmh) topSpeedKmh = speedKmh;
@@ -1779,6 +2245,7 @@ function totalTrailDistance(trail){
 }
 
 function drawWake(){
+  const m = worldMarkerScale();
   // Draw player wake
   if (wakeTrail.length < 2) return;
   for (let i = 1; i < wakeTrail.length; i++){
@@ -1788,12 +2255,12 @@ function drawWake(){
     ctx.moveTo(wakeTrail[i-1].x, wakeTrail[i-1].y);
     ctx.lineTo(wakeTrail[i].x, wakeTrail[i].y);
     ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 * m;
     ctx.stroke();
   }
 
-  // Draw ghost wake only during active laps
-  if (lapActive && ghostWakeTrail.length >= 2) {
+  // Draw ghost wake during active laps or free preview
+  if ((lapActive || ghostPreviewStart) && ghostWakeTrail.length >= 2) {
     for (let i = 1; i < ghostWakeTrail.length; i++){
       const t = i / ghostWakeTrail.length;
       const alpha = t;
@@ -1801,21 +2268,23 @@ function drawWake(){
       ctx.moveTo(ghostWakeTrail[i-1].x, ghostWakeTrail[i-1].y);
       ctx.lineTo(ghostWakeTrail[i].x, ghostWakeTrail[i].y);
       ctx.strokeStyle = `rgba(255,136,255,${alpha.toFixed(2)})`;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2 * m;
       ctx.stroke();
     }
   }
 }
 
 function drawBuoyDot(x, y, isTurn) {
-  const r = isTurn ? 8 : 4;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, 2 * Math.PI);
-  ctx.fillStyle = isTurn ? '#FFE44D' : '#FF8800';
-  ctx.fill();
-  ctx.lineWidth = isTurn ? 2 : 1.5;
-  ctx.strokeStyle = '#fff';
-  ctx.stroke();
+  withWorldMarker(x, y, () => {
+    const r = isTurn ? 8 : 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, 2 * Math.PI);
+    ctx.fillStyle = isTurn ? '#FFE44D' : '#FF8800';
+    ctx.fill();
+    ctx.lineWidth = isTurn ? 2 : 1.5;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+  });
 }
 
 function drawTrack() {
@@ -1826,9 +2295,11 @@ function drawTrack() {
 
     // Label turn buoys with their number
     if (isTurn) {
-      ctx.font = '12px sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillText(String(b.turnIndex), b.x + 11, b.y - 8);
+      withWorldMarker(b.x, b.y, () => {
+        ctx.font = '12px sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fillText(String(b.turnIndex), 11, -8);
+      });
     }
 
     // Draw parallel track buoys (top track) if enabled
@@ -1842,13 +2313,14 @@ function drawTrack() {
   });
 
   // Draw timing system
+  const gateW = worldMarkerScale();
   if (currentTrack.useGates) {
     // Draw main track gates (bottom)
     ctx.beginPath();
     ctx.moveTo(gates.start.x1, gates.start.y1);
     ctx.lineTo(gates.start.x2, gates.start.y2);
     ctx.strokeStyle = '#FF0000';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = gateW;
     ctx.stroke();
 
     if (!currentTrack.gates.sameStartFinish) {
@@ -1856,7 +2328,7 @@ function drawTrack() {
       ctx.moveTo(gates.finish.x1, gates.finish.y1);
       ctx.lineTo(gates.finish.x2, gates.finish.y2);
       ctx.strokeStyle = '#FF0000';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = gateW;
       ctx.stroke();
     }
 
@@ -1866,7 +2338,7 @@ function drawTrack() {
       ctx.moveTo(gates.parallelStart.x1, gates.parallelStart.y1);
       ctx.lineTo(gates.parallelStart.x2, gates.parallelStart.y2);
       ctx.strokeStyle = '#FF0000';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = gateW;
       ctx.stroke();
 
       if (!currentTrack.gates.sameStartFinish) {
@@ -1874,18 +2346,18 @@ function drawTrack() {
         ctx.moveTo(gates.parallelFinish.x1, gates.parallelFinish.y1);
         ctx.lineTo(gates.parallelFinish.x2, gates.parallelFinish.y2);
         ctx.strokeStyle = '#FF0000';
-        ctx.lineWidth = 1;
+        ctx.lineWidth = gateW;
         ctx.stroke();
       }
     }
   } else {
     // Draw timing line
-  ctx.beginPath();
-  ctx.moveTo(timingLine.x1, timingLine.y1);
-  ctx.lineTo(timingLine.x2, timingLine.y2);
+    ctx.beginPath();
+    ctx.moveTo(timingLine.x1, timingLine.y1);
+    ctx.lineTo(timingLine.x2, timingLine.y2);
     ctx.strokeStyle = '#FF0000';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+    ctx.lineWidth = gateW;
+    ctx.stroke();
   }
 }
 
@@ -1928,17 +2400,16 @@ function drawTelemetry() {
 }
 
 function drawRacer() {
-  ctx.save();
-  ctx.translate(pos.x, pos.y);
-  ctx.rotate(heading - Math.PI / 2);
-  ctx.beginPath();
-  ctx.moveTo(0, 12.5);
-  ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
-  ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
-  ctx.closePath();
-  ctx.fillStyle = '#00ccff';
-  ctx.fill();
-  ctx.restore();
+  withWorldMarker(pos.x, pos.y, () => {
+    ctx.rotate(heading - Math.PI / 2);
+    ctx.beginPath();
+    ctx.moveTo(0, 12.5);
+    ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
+    ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
+    ctx.closePath();
+    ctx.fillStyle = '#00ccff';
+    ctx.fill();
+  });
 }
 
 // --- Ideal Line Toggle ---
@@ -1993,16 +2464,15 @@ function loadIdealLineForCurrentTrack() {
 }
 
 function drawRacingLineArrowhead(x, y, angle, size) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.beginPath();
-  ctx.moveTo(size, 0);
-  ctx.lineTo(-size * 0.6, size * 0.55);
-  ctx.lineTo(-size * 0.6, -size * 0.55);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
+  withWorldMarker(x, y, () => {
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(size, 0);
+    ctx.lineTo(-size * 0.6, size * 0.55);
+    ctx.lineTo(-size * 0.6, -size * 0.55);
+    ctx.closePath();
+    ctx.fill();
+  });
 }
 
 function drawTrackRacingLines() {
@@ -2015,10 +2485,11 @@ function drawTrackRacingLines() {
     const color = line.color || RACING_LINE_COLORS[i % RACING_LINE_COLORS.length];
     const pts = line.points.map(p => trackMetersToPixel(p.x, p.y));
 
+    const m = worldMarkerScale();
     ctx.save();
     ctx.strokeStyle = color;
     ctx.globalAlpha = 0.75;
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 3 * m;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     ctx.beginPath();
@@ -2030,7 +2501,7 @@ function drawTrackRacingLines() {
     ctx.fillStyle = color;
 
     let distAlong = 0;
-    const arrowSpacing = 48;
+    const arrowSpacing = 48 * m;
     for (let j = 1; j < pts.length; j++) {
       const a = pts[j - 1];
       const b = pts[j];
@@ -2058,7 +2529,7 @@ function drawIdealLine() {
 
   ctx.save();
   ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
-  ctx.lineWidth   = 1;
+  ctx.lineWidth   = worldMarkerScale();
   ctx.beginPath();
 
   let started = false;
@@ -2100,28 +2571,34 @@ function gameLoop(timestamp) {
   
   // Update game state
   update(dt);
-  
-  // Clear screen (satellite imagery for geo-anchored tracks, dimmed for contrast)
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (geoBackground) {
-    ctx.drawImage(geoBackground, 0, 0);
+  ctx.fillStyle = geoCanvasTransform ? '#0c1a22' : '#222';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const camS = followCam.scale || 1;
+  ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
+  drawGeoTiles();
+  if (geoCanvasTransform) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = 'rgba(6,14,20,0.42)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-  } else {
-    ctx.fillStyle = '#222';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
   }
 
-  // Draw in order of visual importance
   drawIdealLine();
   drawTrackRacingLines();
   drawTrack();
   drawWake();
-  drawGhostFrame(); // Ghost rendering has high priority
+  drawGhostFrame();
   drawRacer();
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   drawTouchZones();
   drawTelemetry();
-  
+  drawZoomHint();
+
   requestAnimationFrame(gameLoop);
 }
 
@@ -2186,42 +2663,133 @@ function updateGhostStats() {
     }
     
     const prefix = currentGhost.lineName || currentTrack.name;
-    statsElement.textContent = `${prefix} Ghost — Time: ${time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h`;
+    statsElement.replaceChildren();
+    const nameLine = document.createElement('span');
+    nameLine.textContent = `${prefix} Ghost`;
+    const timeLine = document.createElement('span');
+    timeLine.className = 'ghost-time';
+    timeLine.textContent = `Time: ${time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h`;
+    statsElement.append(nameLine, timeLine);
+}
+
+function applyImportedGhost(ghost, message) {
+  if (!ghost?.frames?.length) {
+    alert('No ghost frames to import.');
+    return false;
+  }
+  ghost.trackKey = ghost.trackKey || currentTrackKey;
+  ghostDataMap.set(ghost.trackKey, ghost);
+  // Also bind to the active track so racing against it works immediately
+  if (ghost.trackKey !== currentTrackKey) {
+    const bound = { ...ghost, trackKey: currentTrackKey };
+    ghostDataMap.set(currentTrackKey, bound);
+  }
+  currentGhost = ghostDataMap.get(currentTrackKey);
+  setKeepCurrentGhost(true);
+  showGhost = true;
+  // Refit the map so the GPS path is on-screen (buoy-only fit hides lake rides)
+  computeBuoys();
+  placePlayerAtStart();
+  startGhostPreview();
+  updateGhostStats();
+  if (message) alert(message);
+  return true;
+}
+
+async function importSessionCsvText(text, fileName) {
+  // With a geo-anchored track selected: project GPS through THAT track's
+  // real-world origin — never re-center or invent a new layout.
+  if (hasGeo(currentTrack)) {
+    const { ghost, errors, warnings } = sessionCsvToGhost(text, currentTrack.geo, {
+      trackKey: currentTrackKey,
+      riderLabel: fileName
+    });
+    if (errors.length) throw new Error(errors.join('\n'));
+    const note = warnings.length ? `\n\nNote: ${warnings.join(' ')}` : '';
+    applyImportedGhost(ghost,
+      `Session CSV imported as ghost on “${currentTrack.name}” ` +
+      `(${ghost.frames.length} frames, ${ghost.time.toFixed(1)}s, ${ghost.distance.toFixed(0)} m).\n` +
+      `Positions are real GPS via this track’s map anchor.\n` +
+      `The pink ghost should start replaying immediately; cross the gate to race it.` + note);
+    return;
+  }
+
+  // No geo track selected — only then build a temporary replay map from GPS.
+  const built = trackFromSessionCsv(text, {
+    trackKey: 'session',
+    name: 'Session Replay',
+    riderLabel: fileName
+  });
+  if (built.errors.length) throw new Error(built.errors.join('\n'));
+
+  registerCustomTrack('session', built.track);
+  selectTrack('session');
+  placePlayerAtStart();
+  speed = 0;
+  bankAngleDeg = 0;
+  wakeTrail = [];
+  lapActive = false;
+
+  const note = built.warnings.length ? `\n\nNote: ${built.warnings.join(' ')}` : '';
+  applyImportedGhost(
+    { ...built.ghost, trackKey: 'session' },
+    `No geo track was selected, so a temporary Session Replay map was created from GPS.\n` +
+    `For racing on your Orlando course: open that track first, then import the CSV.\n` +
+    `Ghost: ${built.ghost.frames.length} frames, ${built.ghost.time.toFixed(1)}s, ${built.ghost.distance.toFixed(0)} m.` +
+    note
+  );
 }
 
 // Update the ghost import handler
 importGhostFile.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  const label = document.getElementById('fileLabel');
+  if (label) label.textContent = file.name;
   try {
-        const text = await file.text();
+    const text = await file.text();
+    const looksCsv = /\.csv$/i.test(file.name) ||
+      text.trimStart().startsWith('# ExportVersion') ||
+      /^Time,.*lat_deg/m.test(text);
+
+    if (looksCsv) {
+      await importSessionCsvText(text, file.name);
+      return;
+    }
+
     const imported = JSON.parse(text);
 
-        // Check if it's an array of track-specific ghosts
-        if (Array.isArray(imported)) {
-            // Handle array of ghosts (old format)
-            imported.forEach(ghost => {
-                if (ghost.trackKey && ghost.frames) {
-                    ghostDataMap.set(ghost.trackKey, ghost);
-                }
-            });
-        } else if (imported.trackKey && imported.frames) {
-            // Handle single ghost data
-            ghostDataMap.set(imported.trackKey, imported);
-        } else {
-            alert('Invalid ghost data file format.');
-            return;
+    if (Array.isArray(imported)) {
+      imported.forEach(ghost => {
+        if (ghost.trackKey && ghost.frames) {
+          ghostDataMap.set(ghost.trackKey, ghost);
         }
-
-        // Update ghost stats for current track
-        currentGhost = ghostDataMap.get(currentTrackKey) || null;
-        updateGhostStats();
-    alert('Ghost data imported successfully! It will appear on your next lap.');
+      });
+      currentGhost = ghostDataMap.get(currentTrackKey) || null;
+      updateGhostStats();
+      alert('Ghost data imported successfully! It will appear on your next lap.');
+    } else if (imported.trackKey && imported.frames) {
+      applyImportedGhost(imported, 'Ghost data imported successfully! It will appear on your next lap.');
+    } else if (imported.frames) {
+      applyImportedGhost(
+        { ...imported, trackKey: currentTrackKey },
+        'Ghost data imported successfully! It will appear on your next lap.'
+      );
+    } else {
+      alert('Invalid ghost data file format.');
+    }
   } catch (err) {
-    alert('Failed to read file: ' + err);
+    alert('Failed to read file: ' + (err?.message || err));
+  } finally {
+    // Allow re-importing the same file
+    e.target.value = '';
   }
 });
 
+const chooseFileBtn = document.getElementById('chooseFileBtn');
+if (chooseFileBtn) {
+  chooseFileBtn.addEventListener('click', () => importGhostFile.click());
+}
 // Update the checkbox handler
 const showRacingLinesCheckbox = document.getElementById('showRacingLines');
 if (showRacingLinesCheckbox) {
@@ -2286,37 +2854,45 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
     ghostControlsDiv.style.backgroundColor = 'transparent';
 
     const file = e.dataTransfer.files[0];
-    if (!file || !file.name.endsWith('.json')) {
-        alert('Please drop a valid .json ghost file');
-        return;
-    }
+    if (!file) return;
+    const label = document.getElementById('fileLabel');
+    if (label) label.textContent = file.name;
 
     try {
         const text = await file.text();
-        const imported = JSON.parse(text);
+        const looksCsv = /\.csv$/i.test(file.name) ||
+          text.trimStart().startsWith('# ExportVersion') ||
+          /^Time,.*lat_deg/m.test(text);
 
-        // Check if it's an array of track-specific ghosts
+        if (looksCsv) {
+          await importSessionCsvText(text, file.name);
+          return;
+        }
+        if (!/\.json$/i.test(file.name)) {
+          alert('Please drop a .json ghost file or session .csv');
+          return;
+        }
+
+        const imported = JSON.parse(text);
         if (Array.isArray(imported)) {
-            // Handle array of ghosts (old format)
             imported.forEach(ghost => {
                 if (ghost.trackKey && ghost.frames) {
                     ghostDataMap.set(ghost.trackKey, ghost);
                 }
             });
-        } else if (imported.trackKey && imported.frames) {
-            // Handle single ghost data
-            ghostDataMap.set(imported.trackKey, imported);
+            currentGhost = ghostDataMap.get(currentTrackKey) || null;
+            updateGhostStats();
+            alert('Ghost data imported successfully! It will appear on your next lap.');
+        } else if (imported.frames) {
+            applyImportedGhost(
+              { ...imported, trackKey: imported.trackKey || currentTrackKey },
+              'Ghost data imported successfully! It will appear on your next lap.'
+            );
         } else {
             alert('Invalid ghost data file format.');
-            return;
         }
-
-        // Update ghost stats for current track
-        currentGhost = ghostDataMap.get(currentTrackKey) || null;
-        updateGhostStats();
-        alert('Ghost data imported successfully! It will appear on your next lap.');
     } catch (err) {
-        alert('Failed to read file: ' + err);
+        alert('Failed to read file: ' + (err?.message || err));
     }
 });
 
@@ -2618,10 +3194,8 @@ function updateLapTimeDisplay() {
     document.getElementById('lapTimeDisplay').innerText = `Laptime: ${lapTimeStr}${penaltyText}`;
 }
 
-// Add with other initialization code
-const highScoreManager = new HighScoreManager();
-
-// Export these for highscores.js to use
+// Export these for highscores.js before constructing HighScoreManager so the
+// engine ↔ highscores circular import can resolve cleanly.
 export function pauseGame() {
     gamePaused = true;
 }
@@ -2630,6 +3204,8 @@ export function resumeGame() {
     gamePaused = false;
     lastTimestamp = performance.now();  // Prevent time jump
 }
+
+const highScoreManager = new HighScoreManager();
 
 requestAnimationFrame(gameLoop);
 
