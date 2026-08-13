@@ -140,6 +140,255 @@ export function createDefaultTrack(name = 'New Track') {
   };
 }
 
+/**
+ * Official Speedtrack triangle in track meters.
+ * Legs: #1→#2 70 m, #2→#3 55 m, #3→#1 105 m.
+ * Rounding (spec): #1 port, #2 port, #3 starboard.
+ * Timing line sits at buoy #1, parallel to #2→#3.
+ */
+export function createOfficialSpeedtrack() {
+  const d12 = 70;
+  const d23 = 55;
+  const d31 = 105;
+  const cosA = (d31 * d31 + d12 * d12 - d23 * d23) / (2 * d31 * d12);
+  const angleA = Math.acos(Math.min(1, Math.max(-1, cosA)));
+
+  // #1 at origin, #2 along +y, #3 to starboard (+x) of the 1→2 heading.
+  const b1 = { x: 0, y: 0 };
+  const b2 = { x: 0, y: d12 };
+  const b3 = { x: d31 * Math.sin(angleA), y: d31 * Math.cos(angleA) };
+
+  // Gate: one end on buoy #1, other end along the #2→#3 heading (same angle).
+  const v23x = b3.x - b2.x;
+  const v23y = b3.y - b2.y;
+  const len23 = Math.hypot(v23x, v23y) || 1;
+  const ux = v23x / len23;
+  const uy = v23y / len23;
+  const gateLen = 47;
+
+  const ox = 80;
+  const oy = 50;
+  const r2 = v => Math.round(v * 100) / 100;
+  const move = p => ({ x: r2(p.x + ox), y: r2(p.y + oy) });
+  const p1 = move(b1);
+  const p2 = move(b2);
+  const p3 = move(b3);
+
+  return {
+    schemaVersion: TRACK_SCHEMA_VERSION,
+    name: 'Official Speedtrack',
+    author: '',
+    notes:
+      'Official Speedtrack — 70 / 55 / 105 m triangle. ' +
+      'Round #1 port, #2 port, #3 starboard. Timing line at #1, parallel to #2–#3. ' +
+      'Theoretical line ~325 m, target lap ~30 s @ ~39 km/h.',
+    scale: 4,
+    buoys: [
+      { x: p1.x, y: p1.y, type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
+      { x: p2.x, y: p2.y, type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
+      { x: p3.x, y: p3.y, type: 'turn', rounding: 'starboard', apexRadius: 40, optimalSpeed: 30 }
+    ],
+    gate: {
+      sameStartFinish: true,
+      directional: false,
+      directionalFinish: false,
+      // Cross heading along #1→#2 into the course
+      direction: { x: 0, y: 1 },
+      start: {
+        x1: p1.x,
+        y1: p1.y,
+        x2: r2(b1.x + ux * gateLen + ox),
+        y2: r2(b1.y + uy * gateLen + oy)
+      },
+      finish: null
+    },
+    startPosition: {
+      x: r2(b1.x + ox),
+      y: r2(b1.y - 45 + oy),
+      headingDeg: 90
+    }
+  };
+}
+
+/** Mirror layout across a vertical axis through the bbox center; swap port/starboard. */
+export function flipTrackLayout(track) {
+  const b = trackBBox(track);
+  const cx = b ? (b.minX + b.maxX) / 2 : 0;
+  const fx = x => 2 * cx - x;
+  const flipPt = p => p && Number.isFinite(p.x) ? { ...p, x: fx(p.x) } : p;
+  const flipSeg = s => isSegment(s)
+    ? { ...s, x1: fx(s.x1), x2: fx(s.x2) }
+    : s;
+
+  (track.buoys || []).forEach(buoy => {
+    buoy.x = fx(buoy.x);
+    if (buoy.type !== 'marker') {
+      buoy.rounding = buoy.rounding === 'starboard' ? 'port' : 'starboard';
+    }
+  });
+  if (track.gate) {
+    track.gate.start = flipSeg(track.gate.start);
+    track.gate.finish = flipSeg(track.gate.finish);
+    if (track.gate.direction && Number.isFinite(track.gate.direction.x)) {
+      track.gate.direction = { x: -track.gate.direction.x, y: track.gate.direction.y };
+    }
+  }
+  if (track.startPosition && Number.isFinite(track.startPosition.x)) {
+    track.startPosition.x = fx(track.startPosition.x);
+    if (Number.isFinite(track.startPosition.headingDeg)) {
+      track.startPosition.headingDeg = ((180 - track.startPosition.headingDeg + 540) % 360) - 180;
+    }
+  }
+  (track.racingLines || []).forEach(line => {
+    if (Array.isArray(line.points)) {
+      line.points = line.points.map(p => flipPt(p));
+    }
+    if (line.ghost?.frames) {
+      line.ghost.frames = line.ghost.frames.map(f => ({ ...f, x: fx(f.x) }));
+    }
+  });
+  return track;
+}
+
+export const BUILTIN_TRACK_PRESETS = [
+  {
+    id: 'official-speedtrack',
+    name: 'Official Speedtrack',
+    builtin: true,
+    meta: '70·55·105 m',
+    create: createOfficialSpeedtrack
+  }
+];
+
+export const TRACK_PRESETS_STORAGE_KEY = 'efoil_track_presets_v1';
+
+function newPresetId() {
+  return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+/** ISO 3166-1 alpha-2 → regional-indicator flag emoji (FI → 🇫🇮). */
+export function countryFlagEmoji(iso2) {
+  const cc = String(iso2 || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc)) return '';
+  return String.fromCodePoint(
+    0x1F1E6 + cc.charCodeAt(0) - 65,
+    0x1F1E6 + cc.charCodeAt(1) - 65
+  );
+}
+
+/** Venue used to group saved tracks by country. */
+export function placeFromTrack(track) {
+  if (!hasGeo(track)) return null;
+  const lat = track.geo.origin.lat;
+  const lng = track.geo.origin.lng;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return {
+    lat,
+    lng,
+    rotationDeg: Number(track.geo.rotationDeg) || 0
+  };
+}
+
+/** Layout-only clone for templates (no geo / racing lines) so it can be placed anywhere. */
+export function trackAsPresetTemplate(track, name) {
+  const s = serializeTrack(track);
+  delete s.geo;
+  delete s.racingLines;
+  s.name = (name && String(name).trim()) || s.name || 'Saved preset';
+  s.notes = s.notes || '';
+  return s;
+}
+
+/** Full track clone for the saved-tracks list, including map location. */
+export function trackAsSavedTrack(track, name) {
+  const s = serializeTrack(track);
+  s.name = (name && String(name).trim()) || s.name || 'Saved track';
+  return s;
+}
+
+export function loadUserTrackPresets() {
+  try {
+    const raw = localStorage.getItem(TRACK_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list.filter(p => p && p.id && p.track && Array.isArray(p.track.buoys));
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveUserTrackPresets(list) {
+  localStorage.setItem(TRACK_PRESETS_STORAGE_KEY, JSON.stringify(list));
+}
+
+export function saveUserTrackPreset(track, name) {
+  const list = loadUserTrackPresets();
+  const preset = {
+    id: newPresetId(),
+    name: (name && String(name).trim()) || track.name || 'Saved track',
+    savedAt: new Date().toISOString(),
+    kind: 'track',
+    track: trackAsSavedTrack(track, name)
+  };
+  const place = placeFromTrack(track);
+  if (place) preset.place = place;
+  list.unshift(preset);
+  saveUserTrackPresets(list);
+  return preset;
+}
+
+export function patchUserTrackPreset(id, patch) {
+  const list = loadUserTrackPresets();
+  const i = list.findIndex(p => p.id === id);
+  if (i < 0) return null;
+  const next = { ...list[i], ...patch, id: list[i].id, track: list[i].track };
+  if (patch.place) next.place = { ...(list[i].place || {}), ...patch.place };
+  list[i] = next;
+  saveUserTrackPresets(list);
+  return next;
+}
+
+export function deleteUserTrackPreset(id) {
+  const list = loadUserTrackPresets().filter(p => p.id !== id);
+  saveUserTrackPresets(list);
+  return list;
+}
+
+export function getTrackPresetById(id) {
+  const builtin = BUILTIN_TRACK_PRESETS.find(p => p.id === id);
+  if (builtin) {
+    return {
+      id: builtin.id,
+      name: builtin.name,
+      builtin: true,
+      kind: 'preset',
+      track: builtin.create()
+    };
+  }
+  const saved = loadUserTrackPresets().find(p => p.id === id);
+  if (!saved) return null;
+  return { ...saved, builtin: false, kind: saved.kind || 'track' };
+}
+
+/** Restore a saved track's map anchor from geo, or from stored/looked-up place. */
+export function geoFromSavedEntry(entry) {
+  if (hasGeo(entry?.track)) {
+    return {
+      origin: { ...entry.track.geo.origin },
+      rotationDeg: Number(entry.track.geo.rotationDeg) || 0
+    };
+  }
+  const p = entry?.place;
+  if (p && Number.isFinite(p.lat) && Number.isFinite(p.lng)) {
+    return {
+      origin: { lat: p.lat, lng: p.lng },
+      rotationDeg: Number(p.rotationDeg) || 0
+    };
+  }
+  return null;
+}
+
 function isSegment(s) {
   return !!s && [s.x1, s.y1, s.x2, s.y2].every(v => Number.isFinite(v));
 }
@@ -505,4 +754,377 @@ export function loadDraft() {
   } catch (e) {
     return null;
   }
+}
+
+// --- Session CSV (eFoil Racing iOS app) → simulator ghost ---
+
+function parseCsvLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else cur += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+export function parseSessionCsv(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const meta = {};
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (line.startsWith('#')) {
+      const m = line.slice(1).trim().match(/^([^:]+):\s*(.*)$/);
+      if (m) meta[m[1].trim()] = m[2].trim();
+      continue;
+    }
+    if (line.toLowerCase().startsWith('time,') || line.includes('lat_deg')) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx < 0) {
+    return { meta, headers: [], rows: [], errors: ['No CSV header row found (expected lat_deg / Time columns)'] };
+  }
+
+  const headers = parseCsvLine(lines[headerIdx]);
+  const rows = [];
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('#')) continue;
+    const cols = parseCsvLine(line);
+    if (cols.length < 8) continue;
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = cols[idx] ?? ''; });
+    const lat = Number(row.lat_deg);
+    const lon = Number(row.lon_deg);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    row._lat = lat;
+    row._lon = lon;
+    row._speedKmh = Number(row.speed_kmh);
+    if (!Number.isFinite(row._speedKmh) && Number.isFinite(Number(row.speed_mps))) {
+      row._speedKmh = Number(row.speed_mps) * 3.6;
+    }
+    row._headingDeg = Number(row.heading_deg);
+    row._lapElapsed = Number(row.lap_elapsed_s);
+    const lapIdx = Number(row.lap_index);
+    row._lapIndex = Number.isFinite(lapIdx) ? lapIdx : null;
+    const tUnix = Number(row.t_unix);
+    if (Number.isFinite(tUnix)) {
+      row._tUnix = tUnix;
+    } else if (row.t_iso) {
+      const ms = Date.parse(row.t_iso);
+      row._tUnix = Number.isFinite(ms) ? ms / 1000 : null;
+    } else {
+      row._tUnix = null;
+    }
+    rows.push(row);
+  }
+
+  if (!rows.length) {
+    return { meta, headers, rows, errors: ['CSV has a header but no valid GPS samples'] };
+  }
+  return { meta, headers, rows, errors: [] };
+}
+
+// Compass degrees (0=N, 90=E) → direction angle in track meters (0=+x/East-ish, 90=+y/North-ish).
+export function compassToTrackHeadingRad(compassDeg, rotationDeg = 0) {
+  const c = (Number(compassDeg) || 0) * Math.PI / 180;
+  const east = Math.sin(c);
+  const north = Math.cos(c);
+  const r = (-(Number(rotationDeg) || 0) * Math.PI) / 180;
+  const dx = east * Math.cos(r) - north * Math.sin(r);
+  const dy = east * Math.sin(r) + north * Math.cos(r);
+  return Math.atan2(dy, dx);
+}
+
+function sessionLapGroups(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    // lap_index -1 / missing means "not in a timed lap" in app exports
+    const key = Number.isFinite(row._lapIndex) && row._lapIndex >= 0
+      ? row._lapIndex
+      : (row.Lap && String(row.Lap).trim() && !/^$/.test(row.Lap) ? String(row.Lap).trim() : 'session');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return groups;
+}
+
+function groupWallElapsed(group) {
+  const a = group.find(r => Number.isFinite(r._tUnix));
+  const b = [...group].reverse().find(r => Number.isFinite(r._tUnix));
+  if (a && b) return Math.max(0, b._tUnix - a._tUnix);
+  return 0;
+}
+
+function groupLapElapsed(group) {
+  const timed = group.filter(r => Number.isFinite(r._lapElapsed));
+  if (timed.length < 2) return 0;
+  const span = timed[timed.length - 1]._lapElapsed - timed[0]._lapElapsed;
+  // All zeros (common when lap_index is -1) is not usable lap timing
+  if (span <= 0.05) return 0;
+  return span;
+}
+
+function pickBestSessionLap(rows) {
+  const groups = sessionLapGroups(rows);
+  let best = null;
+  for (const [key, group] of groups) {
+    if (!group.length) continue;
+    const moving = group.filter(r => (r._speedKmh || 0) > 3).length;
+    let dist = 0;
+    for (let i = 1; i < group.length; i++) {
+      dist += haversineMeters(
+        { lat: group[i - 1]._lat, lng: group[i - 1]._lon },
+        { lat: group[i]._lat, lng: group[i]._lon }
+      );
+    }
+    const lapElapsed = groupLapElapsed(group);
+    const wallElapsed = groupWallElapsed(group);
+    const elapsed = lapElapsed > 0 ? lapElapsed : wallElapsed;
+    const score = dist + moving * 5;
+    if (!best || score > best.score) {
+      best = {
+        key,
+        rows: group,
+        dist,
+        elapsed,
+        useLapElapsed: lapElapsed > 0,
+        score
+      };
+    }
+  }
+  return best;
+}
+
+function rowGhostTime(row, t0, useLapElapsed) {
+  if (useLapElapsed && Number.isFinite(row._lapElapsed)) {
+    return Math.max(0, row._lapElapsed - t0);
+  }
+  if (Number.isFinite(row._tUnix) && Number.isFinite(t0)) {
+    return Math.max(0, row._tUnix - t0);
+  }
+  return null;
+}
+
+/** Haversine from session GPS centroid to a track geo origin (meters). */
+export function sessionDistanceToGeoOrigin(rows, geo) {
+  if (!rows?.length || !geo?.origin) return null;
+  const lat = rows.reduce((s, r) => s + r._lat, 0) / rows.length;
+  const lng = rows.reduce((s, r) => s + r._lon, 0) / rows.length;
+  return haversineMeters({ lat, lng }, { lat: geo.origin.lat, lng: geo.origin.lng });
+}
+
+/**
+ * Convert an eFoil Racing session CSV into a simulator ghost.
+ * Positions are ALWAYS real GPS projected through the given geo anchor
+ * (lat/lng → track meters). Nothing is re-centered onto buoys.
+ * Heading is stored in track-meter radians (`headingSpace: 'trackMeters'`).
+ */
+export function sessionCsvToGhost(csvText, geo, options = {}) {
+  const parsed = parseSessionCsv(csvText);
+  if (parsed.errors.length) {
+    return { ghost: null, track: null, errors: parsed.errors, warnings: [] };
+  }
+  if (!geo?.origin || !Number.isFinite(geo.origin.lat) || !Number.isFinite(geo.origin.lng)) {
+    return { ghost: null, track: null, errors: ['A geo origin is required to project GPS into track meters'], warnings: [] };
+  }
+
+  const warnings = [];
+  const best = pickBestSessionLap(parsed.rows);
+  if (!best || best.rows.length < 2) {
+    return { ghost: null, track: null, errors: ['Not enough GPS samples to build a ghost'], warnings };
+  }
+
+  const lapRows = best.rows;
+  const useLapElapsed = !!best.useLapElapsed;
+  const t0 = useLapElapsed
+    ? lapRows.find(r => Number.isFinite(r._lapElapsed))?._lapElapsed ?? 0
+    : lapRows.find(r => Number.isFinite(r._tUnix))?._tUnix ?? 0;
+  if (!useLapElapsed) {
+    warnings.push('No lap markers in CSV — using full session wall-clock time');
+  }
+
+  const distToOrigin = sessionDistanceToGeoOrigin(lapRows, geo);
+  if (Number.isFinite(distToOrigin) && distToOrigin > 800) {
+    warnings.push(
+      `Session GPS is ~${Math.round(distToOrigin)} m from this track’s map anchor — ` +
+      `confirm the Orlando (or correct) geo track is selected`
+    );
+  }
+
+  const rotationDeg = geo.rotationDeg || 0;
+  const maxFrames = options.maxFrames ?? 800;
+  const step = Math.max(1, Math.ceil(lapRows.length / maxFrames));
+
+  const frames = [];
+  let sumSpeed = 0;
+  let prevM = null;
+
+  const pushFrame = (row) => {
+    const m = latLngToMeters(geo, row._lat, row._lon);
+    let heading = Number.isFinite(row._headingDeg)
+      ? compassToTrackHeadingRad(row._headingDeg, rotationDeg)
+      : 0;
+    if (prevM) {
+      const dx = m.x - prevM.x;
+      const dy = m.y - prevM.y;
+      if (Math.hypot(dx, dy) > 0.15) heading = Math.atan2(dy, dx);
+    }
+    prevM = m;
+
+    let elapsed = rowGhostTime(row, t0, useLapElapsed);
+    if (elapsed == null) elapsed = frames.length * 0.05;
+    const speedKmh = Number.isFinite(row._speedKmh) ? row._speedKmh : 0;
+    sumSpeed += speedKmh;
+    frames.push({
+      time: Math.round(elapsed * 1000) / 1000,
+      x: Math.round(m.x * 100) / 100,
+      y: Math.round(m.y * 100) / 100,
+      heading: Math.round(heading * 1000) / 1000,
+      headingSpace: 'trackMeters',
+      speedKmh: Math.round(speedKmh * 10) / 10
+    });
+  };
+
+  // Ground distance from full-resolution GPS path; frames are downsampled
+  let distance = 0;
+  for (let i = 1; i < lapRows.length; i++) {
+    distance += haversineMeters(
+      { lat: lapRows[i - 1]._lat, lng: lapRows[i - 1]._lon },
+      { lat: lapRows[i]._lat, lng: lapRows[i]._lon }
+    );
+  }
+
+  for (let i = 0; i < lapRows.length; i += step) {
+    pushFrame(lapRows[i]);
+  }
+  const last = lapRows[lapRows.length - 1];
+  const lastFrame = frames[frames.length - 1];
+  const lastT = rowGhostTime(last, t0, useLapElapsed) ?? lastFrame.time;
+  const lastM = latLngToMeters(geo, last._lat, last._lon);
+  if (!lastFrame || Math.hypot(lastFrame.x - lastM.x, lastFrame.y - lastM.y) > 0.05 ||
+      Math.abs(lastFrame.time - lastT) > 0.05) {
+    pushFrame(last);
+  }
+
+  if (best.dist < 15) {
+    warnings.push(`Selected lap only covers ~${best.dist.toFixed(1)} m — replay will look nearly stationary`);
+  }
+
+  const time = frames[frames.length - 1].time;
+  const ghost = {
+    trackKey: options.trackKey || 'session',
+    source: 'sessionCsv',
+    sessionId: parsed.meta.SessionId || null,
+    riderLabel: options.riderLabel || null,
+    geoBound: true,
+    time,
+    distance: Math.round(distance * 10) / 10,
+    avgSpeed: time > 0 ? (distance / time) * 3.6 : (sumSpeed / Math.max(frames.length, 1)),
+    frames
+  };
+
+  return { ghost, track: null, errors: [], warnings, meta: parsed.meta, lapKey: best.key };
+}
+
+/**
+ * Build a minimal geo-anchored track that fits a session GPS path so the
+ * simulator can show satellite imagery + play the ghost without a designer track.
+ */
+export function trackFromSessionCsv(csvText, options = {}) {
+  const parsed = parseSessionCsv(csvText);
+  if (parsed.errors.length) {
+    return { track: null, ghost: null, errors: parsed.errors, warnings: [] };
+  }
+
+  const rows = parsed.rows;
+  const lats = rows.map(r => r._lat);
+  const lons = rows.map(r => r._lon);
+  const origin = {
+    lat: lats.reduce((a, b) => a + b, 0) / lats.length,
+    lng: lons.reduce((a, b) => a + b, 0) / lons.length
+  };
+  const geo = { origin, rotationDeg: 0 };
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const meters = rows.map(r => {
+    const m = latLngToMeters(geo, r._lat, r._lon);
+    minX = Math.min(minX, m.x); maxX = Math.max(maxX, m.x);
+    minY = Math.min(minY, m.y); maxY = Math.max(maxY, m.y);
+    return m;
+  });
+
+  // Pad so tiny sessions still get a sensible map frame
+  const pad = Math.max(40, 0.15 * Math.max(maxX - minX, maxY - minY, 1));
+  minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+
+  const firstMoving = rows.find(r => (r._speedKmh || 0) > 3) || rows[0];
+  const startM = latLngToMeters(geo, firstMoving._lat, firstMoving._lon);
+  const startHeading = Number.isFinite(firstMoving._headingDeg)
+    ? compassToTrackHeadingRad(firstMoving._headingDeg, 0) * 180 / Math.PI
+    : 90;
+
+  const track = {
+    schemaVersion: TRACK_SCHEMA_VERSION,
+    name: options.name || 'Session Replay',
+    author: options.author || '',
+    notes: parsed.meta.SessionId ? `Imported session ${parsed.meta.SessionId}` : 'Imported from session CSV',
+    scale: 4,
+    buoys: [
+      { x: maxX, y: maxY, type: 'marker' },
+      { x: maxX, y: minY, type: 'marker' },
+      { x: minX, y: minY, type: 'marker' },
+      { x: minX, y: maxY, type: 'marker' }
+    ],
+    gate: {
+      sameStartFinish: true,
+      directional: false,
+      directionalFinish: false,
+      direction: { x: 1, y: 0 },
+      start: {
+        x1: startM.x - 8, y1: startM.y - 2,
+        x2: startM.x + 8, y2: startM.y + 2
+      },
+      finish: null
+    },
+    startPosition: {
+      x: Math.round(startM.x * 10) / 10,
+      y: Math.round(startM.y * 10) / 10,
+      headingDeg: Math.round(startHeading)
+    },
+    geo
+  };
+
+  const converted = sessionCsvToGhost(csvText, geo, {
+    trackKey: options.trackKey || 'session',
+    riderLabel: options.riderLabel,
+    maxFrames: options.maxFrames
+  });
+
+  return {
+    track,
+    ghost: converted.ghost,
+    errors: converted.errors,
+    warnings: converted.warnings,
+    meta: parsed.meta,
+    spanM: { w: maxX - minX, h: maxY - minY, samples: meters.length }
+  };
 }

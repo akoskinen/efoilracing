@@ -61,6 +61,25 @@
 	  margin: 6px 0;
 	}
 	
+	/* Ghost info (checkboxes + stats), kept clear of the export panel */
+	#ghostInfo {
+	  position: absolute;
+	  bottom: 20px;
+	  left: 290px;
+	  color: #fff;
+	  font-family: monospace;
+	  font-size: 14px;
+	  line-height: 1.45;
+	  text-shadow: 1px 1px 2px #000;
+	}
+	#ghostStats {
+	  display: block;
+	  margin-top: 2px;
+	}
+	#ghostStats .ghost-time {
+	  display: block;
+	}
+
 	/* Track Selector */
 	#trackSelector {
 	  position: absolute;
@@ -71,6 +90,13 @@
 	  border-radius: 8px;
 	  font-size: 14px;
 	}
+	#designerLink {
+	  display: inline-block;
+	  color: #7fd4ff;
+	  text-decoration: none;
+	  margin-bottom: 8px;
+	}
+	#trackList label { display: block; margin: 3px 0; }
   </style>
 </head>
 <body>
@@ -91,7 +117,7 @@
   <div id="lapHistory"></div>
 
   <!-- Ghost Info -->
-  <div id="ghostInfo" style="position: absolute; bottom: 20px; left: 160px; color: white; font-family: monospace;">
+  <div id="ghostInfo">
     <label id="racingLineToggleRow">
       <input type="checkbox" id="showRacingLines" checked> show racing line
     </label>
@@ -99,41 +125,38 @@
     <label>
       <input type="checkbox" id="keepGhost"> keep racing against this ghost:
     </label>
-    <br>
-    <span id="ghostStats" style="margin-left: 0px;">No ghost loaded</span>
+    <div id="ghostStats">No ghost loaded</div>
   </div>
 
   <!-- Ghost controls -->
   <div id="ghostControls" style="position: absolute; bottom: 20px; left: 20px; padding: 10px; background-color: rgba(0,0,0,0.5); border: 1px dashed rgba(255,255,255,0.3); transition: background-color 0.2s;">
 	<button id="exportGhostBtn">Export Ghost</button><br>
-	<input type="file" id="importGhostFile" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
-	<button id="chooseFileBtn">Choose File</button> <span id="fileLabel">no file selected</span><br>
+	<input type="file" id="importGhostFile" accept=".json,.csv,application/json,text/csv" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
+	<button id="chooseFileBtn">Choose File</button> <span id="fileLabel">ghost JSON or session CSV</span><br>
 	<button id="clearGhostBtn">Clear Ghost</button>
   </div>
 
   <!-- Track Selector -->
   <div id="trackSelector">
+	<a id="designerLink" href="designer.html">Design a track &rarr;</a>
+	<div id="trackList">
 	<label>
 	  <input type="radio" name="track" value="speedTrack" checked>
 	  Speed Track
 	</label>
-	<br>
 	<label>
 	  <input type="radio" name="track" value="dubaiTrack">
 	  Dubai Track
 	</label>
-	<br>
 	<label>
 	  <input type="radio" name="track" value="sicily">
 	  Sicily Track
 	</label>
-	<br>
 	<label>
 	  <input type="radio" name="track" value="belgium">
 	  Belgium Track
 	</label>
-	<br>
-	<a href="designer.html" style="color:#7fd4ff; text-decoration:none; display:inline-block; margin-top:6px;">Design a track &rarr;</a>
+	</div>
   </div>
 
   <!-- Load configuration and engine files -->

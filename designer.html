@@ -51,6 +51,40 @@
     button.secondary { background: var(--panel-2); border: 1px solid var(--border); }
     .spacer { flex: 1; }
 
+    /* Track presets dropdown */
+    .menu-wrap { position: relative; }
+    .menu-panel {
+      display: none; position: absolute; top: calc(100% + 4px); right: 0; z-index: 50;
+      min-width: 280px; max-width: 360px; max-height: 70vh; overflow-y: auto;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      box-shadow: 0 12px 28px rgba(0,0,0,0.45); padding: 6px;
+    }
+    .menu-wrap.open .menu-panel { display: block; }
+    .menu-panel .menu-label,
+    .menu-panel .menu-country {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
+      color: var(--muted); padding: 8px 10px 4px;
+    }
+    .menu-panel .menu-country {
+      display: flex; align-items: center; gap: 6px;
+    }
+    .menu-panel .menu-country .flag {
+      font-size: 15px; letter-spacing: 0; line-height: 1; text-transform: none;
+    }
+    .menu-panel button.menu-item {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      text-align: left; padding: 8px 10px; border-radius: 6px;
+    }
+    .menu-panel button.menu-item:hover { background: rgba(255,255,255,0.08); }
+    .menu-panel .menu-item.under-country { padding-left: 18px; }
+    .menu-panel .menu-item .meta { color: var(--muted); font-size: 11px; margin-left: auto; }
+    .menu-panel .menu-item .del {
+      color: var(--muted); padding: 2px 6px; font-size: 12px; border-radius: 4px;
+    }
+    .menu-panel .menu-item .del:hover { color: var(--danger); background: rgba(255,93,93,0.12); }
+    .menu-panel .menu-sep { height: 1px; background: var(--border); margin: 6px 4px; }
+    .menu-panel .menu-actions { display: flex; flex-direction: column; gap: 2px; padding-top: 2px; }
+
     /* ---------- Main layout ---------- */
     #main { display: flex; flex: 1; min-height: 0; }
     #canvasWrap { position: relative; flex: 1; min-width: 0; touch-action: none; }
@@ -178,6 +212,10 @@
     <button id="btnFit" class="secondary" title="Fit track in view (F)">Fit view</button>
     <button id="btnUndo" class="secondary" title="Undo (Cmd/Ctrl+Z)">Undo</button>
     <div class="spacer"></div>
+    <div class="menu-wrap" id="presetsMenuWrap">
+      <button id="btnPresets" class="secondary" title="Saved tracks and layout presets">Tracks ▾</button>
+      <div class="menu-panel" id="presetsMenu" role="menu"></div>
+    </div>
     <button id="btnNew" class="secondary">New</button>
     <button id="btnImport" class="secondary">Import</button>
     <button id="btnExport" class="secondary">Export JSON</button>
@@ -226,6 +264,7 @@
           </div>
           <div class="row"><button id="btnGeoPlace" class="secondary" style="width:100%;">Move track to map center</button></div>
           <div class="row"><button id="toolGeoMove" class="secondary" style="width:100%;">Drag track on map</button></div>
+          <div class="row"><button id="btnFlipTrack" class="secondary" style="width:100%;" title="Mirror the layout and swap port/starboard rounding">Flip track</button></div>
           <div class="row"><label>Rotation (&deg;)</label><input id="geoRotation" type="number" step="1" min="-180" max="180"></div>
           <input id="geoRotationSlider" type="range" min="-180" max="180" step="1" style="width:100%;">
           <div class="row" id="geoOriginInfo" style="color:var(--muted); font-size:12px;"></div>

@@ -14,7 +14,11 @@ import {
   latLngToWorldPx, metersPerPixel,
   LINE_CAPTURE_KEY, LINE_RECORD_META_KEY,
   RACING_LINE_COLORS, newRacingLineId, defaultRacingLineName,
-  buildRacingLineFromGhost
+  buildRacingLineFromGhost,
+  BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
+  deleteUserTrackPreset, getTrackPresetById,
+  flipTrackLayout, patchUserTrackPreset, countryFlagEmoji, geoFromSavedEntry,
+  placeFromTrack
 } from './trackSchema.js';
 
 // --- DOM ---
@@ -1427,6 +1431,12 @@ document.getElementById('btnGeoPlace').addEventListener('click', () => {
   commit();
 });
 
+document.getElementById('btnFlipTrack').addEventListener('click', () => {
+  pushUndo();
+  flipTrackLayout(track);
+  commit();
+});
+
 els.geoRotation.addEventListener('change', () => {
   if (!hasGeo(track)) return;
   pushUndo();
@@ -2070,6 +2080,360 @@ briefingModal.addEventListener('click', e => {
 // --- Topbar actions ---
 document.getElementById('btnFit').addEventListener('click', fitView);
 document.getElementById('btnUndo').addEventListener('click', undo);
+
+// --- Track Presets menu ---
+const presetsMenuWrap = document.getElementById('presetsMenuWrap');
+const presetsMenu = document.getElementById('presetsMenu');
+const btnPresets = document.getElementById('btnPresets');
+
+function closePresetsMenu() {
+  presetsMenuWrap.classList.remove('open');
+}
+
+const COUNTRY_CACHE_KEY = 'efoil_country_cache_v1';
+const UNPLACED_COUNTRY = { code: '', name: 'No location', sort: '\uffff' };
+let nominatimAt = 0;
+
+function escHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function loadCountryCache() {
+  try {
+    const raw = localStorage.getItem(COUNTRY_CACHE_KEY);
+    const obj = raw ? JSON.parse(raw) : {};
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveCountryCache(cache) {
+  localStorage.setItem(COUNTRY_CACHE_KEY, JSON.stringify(cache));
+}
+
+function geoCacheKey(lat, lng) {
+  return 'geo:' + Number(lat).toFixed(3) + ',' + Number(lng).toFixed(3);
+}
+
+function nameCacheKey(q) {
+  return 'name:' + String(q || '').trim().toLowerCase();
+}
+
+function placeQueryFromName(name) {
+  const n = (name || '').trim();
+  if (!n) return null;
+  const dash = n.lastIndexOf(' - ');
+  if (dash >= 0) {
+    const tail = n.slice(dash + 3).trim();
+    if (tail.length >= 3) return tail;
+  }
+  if (/^(official speedtrack|my preset|untitled|saved preset)$/i.test(n)) return null;
+  return n;
+}
+
+function countryFromNominatim(data) {
+  const item = Array.isArray(data) ? data[0] : data;
+  const a = item?.address;
+  const code = String(a?.country_code || '').toUpperCase();
+  const name = String(a?.country || '').trim();
+  if (!code) return null;
+  const out = { countryCode: code, countryName: name || code };
+  const lat = Number(item.lat);
+  const lon = Number(item.lon);
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    out.lat = lat;
+    out.lng = lon;
+  }
+  return out;
+}
+
+async function nominatimJson(url) {
+  const wait = Math.max(0, 1100 - (Date.now() - nominatimAt));
+  if (wait) await new Promise(r => setTimeout(r, wait));
+  nominatimAt = Date.now();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Nominatim ' + res.status);
+  return res.json();
+}
+
+async function lookupCountry(place, name) {
+  const cache = loadCountryCache();
+  if (place && Number.isFinite(place.lat) && Number.isFinite(place.lng)) {
+    const ck = geoCacheKey(place.lat, place.lng);
+    if (cache[ck]) return cache[ck];
+    try {
+      const url = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1' +
+        `&accept-language=en&zoom=6&lat=${encodeURIComponent(place.lat)}&lon=${encodeURIComponent(place.lng)}`;
+      const found = countryFromNominatim(await nominatimJson(url));
+      if (found) {
+        cache[ck] = found;
+        saveCountryCache(cache);
+        return found;
+      }
+    } catch (e) { /* fall through to name lookup */ }
+  }
+  const q = placeQueryFromName(name);
+  if (!q) return null;
+  const nk = nameCacheKey(q);
+  if (cache[nk]) return cache[nk];
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1' +
+      `&accept-language=en&q=${encodeURIComponent(q)}`;
+    const found = countryFromNominatim(await nominatimJson(url));
+    if (found) {
+      cache[nk] = found;
+      saveCountryCache(cache);
+      return found;
+    }
+  } catch (e) { /* leave unplaced */ }
+  return null;
+}
+
+function collectPresetMenuItems() {
+  const items = [];
+  BUILTIN_TRACK_PRESETS.forEach(p => {
+    items.push({
+      id: p.id,
+      name: p.name,
+      builtin: true,
+      kind: 'preset',
+      meta: p.meta || '',
+      place: p.place || null,
+      canDelete: false
+    });
+  });
+  loadUserTrackPresets().forEach(p => {
+    items.push({
+      id: p.id,
+      name: p.name || 'Untitled',
+      builtin: false,
+      kind: p.kind || 'track',
+      meta: p.savedAt ? new Date(p.savedAt).toLocaleDateString() : '',
+      place: p.place || placeFromTrack(p.track),
+      canDelete: true
+    });
+  });
+  return items;
+}
+
+function countryGroupForItem(item) {
+  const code = String(item.place?.countryCode || '').toUpperCase();
+  const name = String(item.place?.countryName || '').trim();
+  if (!code) return UNPLACED_COUNTRY;
+  return { code, name: name || code, sort: (name || code).toLocaleUpperCase('en') };
+}
+
+function menuItemButton(p) {
+  return (
+    `<button type="button" class="menu-item${p.kind === 'track' ? ' under-country' : ''}" data-apply="${escHtml(p.id)}">` +
+    `<span>${escHtml(p.name)}</span>` +
+    (p.meta ? `<span class="meta">${escHtml(p.meta)}</span>` : '') +
+    (p.canDelete
+      ? `<span class="del" data-del="${escHtml(p.id)}" title="Delete saved track">✕</span>`
+      : '') +
+    `</button>`
+  );
+}
+
+function countryGroupsHtml(items) {
+  const groups = new Map();
+  items.forEach(item => {
+    const g = countryGroupForItem(item);
+    const key = g.code || '__none__';
+    if (!groups.has(key)) groups.set(key, { ...g, items: [] });
+    groups.get(key).items.push(item);
+  });
+
+  const ordered = [...groups.values()].sort((a, b) => {
+    if (a.code === '' && b.code !== '') return 1;
+    if (b.code === '' && a.code !== '') return -1;
+    return a.sort.localeCompare(b.sort, 'en');
+  });
+  ordered.forEach(g => {
+    g.items.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
+  });
+
+  const parts = [];
+  ordered.forEach(g => {
+    const flag = countryFlagEmoji(g.code);
+    parts.push(
+      `<div class="menu-country">${escHtml(g.name)}` +
+      (flag ? ` <span class="flag">${flag}</span>` : '') +
+      `</div>`
+    );
+    g.items.forEach(p => parts.push(menuItemButton(p)));
+  });
+  return parts;
+}
+
+function renderPresetsMenu(items) {
+  const saved = items.filter(i => i.kind !== 'preset');
+  const presets = items.filter(i => i.kind === 'preset');
+  const parts = [];
+
+  parts.push('<div class="menu-label">Saved tracks</div>');
+  if (!saved.length) {
+    parts.push('<button type="button" class="menu-item" disabled><span style="color:var(--muted)">None yet — save a track to reopen it here</span></button>');
+  } else {
+    parts.push(...countryGroupsHtml(saved));
+  }
+
+  parts.push('<div class="menu-sep"></div>');
+  parts.push('<div class="menu-label">Presets</div>');
+  presets.forEach(p => parts.push(menuItemButton(p)));
+
+  parts.push('<div class="menu-sep"></div>');
+  parts.push('<div class="menu-actions">');
+  parts.push('<button type="button" class="menu-item" data-action="save">Save current track…</button>');
+  parts.push('<button type="button" class="menu-item" data-action="export">Export current as JSON backup</button>');
+  parts.push('</div>');
+  presetsMenu.innerHTML = parts.join('');
+}
+
+async function resolvePresetCountries(items) {
+  let changed = false;
+  for (const item of items) {
+    if (item.kind === 'preset') continue;
+    if (item.place?.countryCode && Number.isFinite(item.place.lat)) continue;
+    const found = await lookupCountry(item.place, item.name);
+    if (!found) continue;
+    const prev = item.place || {};
+    item.place = {
+      ...found,
+      ...prev,
+      countryCode: found.countryCode,
+      countryName: found.countryName,
+      lat: Number.isFinite(prev.lat) ? prev.lat : found.lat,
+      lng: Number.isFinite(prev.lng) ? prev.lng : found.lng
+    };
+    patchUserTrackPreset(item.id, { place: item.place });
+    changed = true;
+  }
+  return changed;
+}
+
+function applyTrackFromMenu(nextTrack, { mode } = {}) {
+  pushUndo();
+  const currentGeo = hasGeo(track) ? { ...track.geo, origin: { ...track.geo.origin } } : null;
+  track = withDefaults(nextTrack);
+  if (mode === 'template') {
+    if (currentGeo) track.geo = currentGeo;
+    else if (track.geo) delete track.geo;
+  }
+  selection = null;
+  if (hasGeo(track)) {
+    if (!geoOn) setGeoOn(true);
+    else {
+      ensureMap();
+      map.invalidateSize({ animate: false });
+    }
+  } else if (geoOn) {
+    setGeoOn(false);
+  }
+  fitView();
+  commit();
+}
+
+function refreshPresetsMenu() {
+  const items = collectPresetMenuItems();
+  renderPresetsMenu(items);
+  resolvePresetCountries(items).then(changed => {
+    if (changed && presetsMenuWrap.classList.contains('open')) {
+      renderPresetsMenu(collectPresetMenuItems());
+    }
+  });
+}
+
+btnPresets.addEventListener('click', e => {
+  e.stopPropagation();
+  const willOpen = !presetsMenuWrap.classList.contains('open');
+  if (willOpen) refreshPresetsMenu();
+  presetsMenuWrap.classList.toggle('open', willOpen);
+});
+
+presetsMenu.addEventListener('click', async e => {
+  e.stopPropagation();
+  const del = e.target.closest('[data-del]');
+  if (del) {
+    e.preventDefault();
+    const id = del.getAttribute('data-del');
+    const preset = loadUserTrackPresets().find(p => p.id === id);
+    if (!preset) return;
+    if (!confirm(`Delete saved track “${preset.name}”?`)) return;
+    deleteUserTrackPreset(id);
+    refreshPresetsMenu();
+    return;
+  }
+
+  const applyBtn = e.target.closest('[data-apply]');
+  if (applyBtn) {
+    const id = applyBtn.getAttribute('data-apply');
+    const entry = getTrackPresetById(id);
+    if (!entry?.track) return;
+    const isPreset = entry.kind === 'preset' || entry.builtin;
+    if (isPreset) {
+      const msg = hasGeo(track)
+        ? `Apply “${entry.name}” here, keeping the current map location?`
+        : `Replace the current track with “${entry.name}”?`;
+      if (!confirm(msg)) return;
+      const next = withDefaults(JSON.parse(JSON.stringify(entry.track)));
+      applyTrackFromMenu(next, { mode: 'template' });
+    } else {
+      let geo = geoFromSavedEntry(entry);
+      const canFind = !!(geo || placeQueryFromName(entry.name));
+      const msg = canFind
+        ? `Open “${entry.name}”? The map will move to that venue.`
+        : `Open “${entry.name}”? This save has no map location.`;
+      if (!confirm(msg)) return;
+      let reconstructed = false;
+      if (!geo) {
+        const found = await lookupCountry(entry.place, entry.name);
+        if (found && Number.isFinite(found.lat) && Number.isFinite(found.lng)) {
+          geo = {
+            origin: { lat: found.lat, lng: found.lng },
+            rotationDeg: Number(found.rotationDeg) || 0
+          };
+          reconstructed = true;
+          patchUserTrackPreset(entry.id, { place: { ...(entry.place || {}), ...found } });
+        }
+      }
+      const next = withDefaults(JSON.parse(JSON.stringify(entry.track)));
+      if (geo) next.geo = geo;
+      applyTrackFromMenu(next, { mode: 'saved' });
+      if (geo && reconstructed) {
+        anchorTrackAt(geo.origin.lat, geo.origin.lng);
+        commit();
+      }
+    }
+    closePresetsMenu();
+    return;
+  }
+
+  const actionBtn = e.target.closest('[data-action]');
+  if (!actionBtn) return;
+  const action = actionBtn.getAttribute('data-action');
+  if (action === 'save') {
+    const name = prompt('Name for this saved track:', track.name || 'My track');
+    if (name == null) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    saveUserTrackPreset(track, trimmed);
+    refreshPresetsMenu();
+    const where = hasGeo(track) ? ' (with map location)' : ' (no map location yet)';
+    alert(`Saved “${trimmed}” to Tracks${where}.`);
+  } else if (action === 'export') {
+    const json = JSON.stringify(serializeTrack(track), null, 2);
+    downloadFile(`${trackSlug() || 'track'}.track.json`, 'application/json', json);
+    closePresetsMenu();
+  }
+});
+
+document.addEventListener('click', e => {
+  if (!presetsMenuWrap.contains(e.target)) closePresetsMenu();
+});
 
 document.getElementById('btnNew').addEventListener('click', () => {
   if (!confirm('Start a new track? The current draft will be replaced.')) return;

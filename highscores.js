@@ -523,7 +523,9 @@ export class HighScoreManager {
             const statsElement = document.getElementById('ghostStats');
             if (statsElement) {
               const avgSpeed = score.time > 0 ? (score.distance / score.time) * 3.6 : 0;
-              statsElement.textContent = `${score.nickname} - Time: ${score.time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h`;
+              statsElement.innerHTML =
+                `${score.nickname}` +
+                `<span class="ghost-time">Time: ${score.time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h</span>`;
             }
           }
           
