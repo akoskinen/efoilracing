@@ -18,7 +18,7 @@ import {
   BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
   deleteUserTrackPreset, getTrackPresetById,
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
-  geoFromSavedEntry, placeFromTrack, normalizeRounding
+  geoFromSavedEntry, placeFromTrack, normalizeRounding, migrateTrackSchema
 } from './trackSchema.js';
 
 // --- DOM ---
@@ -67,6 +67,7 @@ let track = null;
 let view = { cx: 80, cy: 60, pxPerM: 4 };
 let mode = 'select'; // select | addTurn | addMarker | gateStart | gateFinish | start | geoMove
 let selection = null; // { kind:'buoy', index } | null
+let showDistanceLegs = true;
 let drag = null;
 let undoStack = [];
 let geoOn = false;
@@ -119,6 +120,7 @@ const snap = v => Math.round(v * 10) / 10;
 
 // --- Track defaults / loading ---
 function withDefaults(t) {
+  migrateTrackSchema(t);
   (t.buoys || []).forEach(b => {
     if (b.type !== 'marker') b.type = 'turn';
     if (b.type === 'turn') b.rounding = normalizeRounding(b.rounding);
@@ -362,10 +364,11 @@ function turnBuoys() {
 }
 
 function drawSequenceLine() {
+  if (!poster && !showDistanceLegs) return;
   const turns = turnBuoys();
   if (turns.length < 2) return;
   ctx.save();
-  ctx.strokeStyle = 'rgba(124,252,0,0.75)';
+  ctx.strokeStyle = 'rgba(124,252,0,0.5)';
   ctx.lineWidth = 2;
   ctx.setLineDash([8, 6]);
   ctx.beginPath();
@@ -378,8 +381,7 @@ function drawSequenceLine() {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  const lineGreen = 'rgba(124,252,0,0.95)';
-  ctx.fillStyle = lineGreen;
+  ctx.fillStyle = 'rgb(124,252,0)';
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -397,7 +399,6 @@ function drawSequenceLine() {
     const distM = hasGeo(track)
       ? groundDistanceMeters(track.geo, cur.x, cur.y, next.x, next.y)
       : Math.hypot(next.x - cur.x, next.y - cur.y);
-    // Offset label perpendicular to the segment so it clears the arrowhead
     const off = segLen > 0 ? 20 : 0;
     const lx = mid.x - Math.sin(ang) * off;
     const ly = mid.y + Math.cos(ang) * off;
@@ -467,9 +468,9 @@ function drawBuoys() {
     if (isTurn) turnNo += 1;
     const r = isTurn ? 10 : 5;
 
-    // Rounding direction arc
+    // Pass side: arc on the left or right of the buoy, relative to inbound heading.
     if (isTurn && b.rounding) {
-      drawRoundingArrow(p.x, p.y, r + 8, normalizeRounding(b.rounding) === 'right');
+      drawPassSideHint(i, p, r + 8, normalizeRounding(b.rounding));
     }
 
     ctx.beginPath();
@@ -502,24 +503,73 @@ function drawBuoys() {
   });
 }
 
-// Visual rounding hint: left = counterclockwise on screen, right = clockwise.
-function drawRoundingArrow(x, y, r, clockwise) {
-  const startA = -Math.PI / 2;
-  const sweep = Math.PI * 1.5;
-  const endA = clockwise ? startA + sweep : startA - sweep;
+function inboundHeadingRad(buoyIndex) {
+  const b = track.buoys[buoyIndex];
+  let from = null;
+  for (let j = buoyIndex - 1; j >= 0; j--) {
+    if (track.buoys[j].type !== 'marker') {
+      from = track.buoys[j];
+      break;
+    }
+  }
+  if (!from && track.startPosition && Number.isFinite(track.startPosition.x)) {
+    from = track.startPosition;
+  }
+  if (!from) {
+    for (let j = track.buoys.length - 1; j > buoyIndex; j--) {
+      if (track.buoys[j].type !== 'marker') {
+        from = track.buoys[j];
+        break;
+      }
+    }
+  }
+  if (!from) return Math.PI / 2;
+  return Math.atan2(b.y - from.y, b.x - from.x);
+}
+
+// Pass-side hint: Right = rider goes on the buoy's right, Left = on its left.
+// Arc on that side of the buoy; triangle continues the curve (tangent), not the inbound heading.
+function drawPassSideHint(buoyIndex, p, r, side) {
+  const b = track.buoys[buoyIndex];
+  const h = inboundHeadingRad(buoyIndex);
+  const ahead = mToPx(b.x + Math.cos(h) * 8, b.y + Math.sin(h) * 8);
+  const fwd = Math.atan2(ahead.y - p.y, ahead.x - p.x);
+  const sideSign = side === 'right' ? 1 : -1;
+  const midA = fwd + sideSign * Math.PI / 2;
+  const sweep = Math.PI * 0.85;
+  const a0 = midA - sweep / 2;
+  const a1 = midA + sweep / 2;
+
+  const fx = Math.cos(fwd);
+  const fy = Math.sin(fwd);
+  const align = ang => Math.cos(ang) * fx + Math.sin(ang) * fy;
+  const options = [
+    { a: a1, tang: a1 + Math.PI / 2 }, // clockwise off a1
+    { a: a0, tang: a0 - Math.PI / 2 }  // counter-clockwise off a0
+  ];
+  const tip = options[align(options[0].tang) >= align(options[1].tang) ? 0 : 1];
+  const size = 6.5;
+  const trim = Math.min(sweep * 0.2, (size * 0.85) / r);
+
   ctx.save();
   ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.arc(x, y, r, startA, endA, !clockwise);
-  ctx.stroke();
-  // Arrowhead at arc end, tangent direction
-  const tx = clockwise ? -Math.sin(endA) : Math.sin(endA);
-  const ty = clockwise ? Math.cos(endA) : -Math.cos(endA);
-  const px = x + r * Math.cos(endA);
-  const py = y + r * Math.sin(endA);
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  drawArrowhead(px, py, Math.atan2(-ty, -tx), 6);
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  if (tip.a === a1) ctx.arc(p.x, p.y, r, a0, a1 - trim, false);
+  else ctx.arc(p.x, p.y, r, a0 + trim, a1, false);
+  ctx.stroke();
+
+  const ex = p.x + r * Math.cos(tip.a);
+  const ey = p.y + r * Math.sin(tip.a);
+  // Base of the triangle sits on the arc end so the tip continues the stroke.
+  drawArrowhead(
+    ex + Math.cos(tip.tang) * size * 0.55,
+    ey + Math.sin(tip.tang) * size * 0.55,
+    tip.tang,
+    size
+  );
   ctx.restore();
 }
 
@@ -928,7 +978,7 @@ canvas.addEventListener('pointerup', e => {
         pushUndo();
         const m = pxToM(p.x, p.y);
         const buoy = (mode === 'addTurn')
-          ? { x: snap(m.x), y: snap(m.y), type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 }
+          ? { x: snap(m.x), y: snap(m.y), type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
           : { x: snap(m.x), y: snap(m.y), type: 'marker', apexRadius: 40 };
         track.buoys.push(buoy);
         selection = { kind: 'buoy', index: track.buoys.length - 1 };
@@ -1000,6 +1050,18 @@ document.addEventListener('keydown', e => {
     case 'm': case 'M': setMode('addMarker'); break;
     case 'g': case 'G': setMode('gateStart'); break;
     case 's': case 'S': setMode('start'); break;
+    case 'p': case 'P':
+      if (track.racingLines?.length) {
+        pushUndo();
+        const show = track.racingLines.every(l => l.visible === false);
+        track.racingLines.forEach(l => { l.visible = show; });
+        commit();
+      }
+      break;
+    case 'd': case 'D':
+      showDistanceLegs = !showDistanceLegs;
+      draw();
+      break;
     case 'f': case 'F': fitView(); break;
     case 'Escape':
       setMode('select');
@@ -1359,7 +1421,7 @@ els.buoyType.addEventListener('change', () => {
   if (!sel) return;
   pushUndo();
   sel.type = els.buoyType.value;
-  if (sel.type === 'turn' && !sel.rounding) sel.rounding = 'left';
+  if (sel.type === 'turn' && !sel.rounding) sel.rounding = 'right';
   commit();
 });
 els.buoyRounding.addEventListener('change', () => {
@@ -1474,7 +1536,7 @@ function geoWaypoints() {
   track.buoys.forEach(b => {
     if (b.type !== 'marker') {
       turnNo += 1;
-      pts.push({ name: `Turn ${turnNo} (${normalizeRounding(b.rounding)})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
+      pts.push({ name: `Turn ${turnNo} (pass ${normalizeRounding(b.rounding)})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
     } else {
       markerNo += 1;
       pts.push({ name: `Marker ${markerNo}`, type: 'marker', x: b.x, y: b.y, ...ll(b.x, b.y) });

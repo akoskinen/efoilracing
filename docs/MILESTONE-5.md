@@ -43,9 +43,9 @@ Presets used to strip geo and apply the layout onto **wherever the map happened 
 
 - **Saved tracks** store the full serialized course **including** geo. Opening one moves the map to that venue. Country grouping uses reverse geocode (Nominatim) from origin, or the name after an em dash for older saves; flags are ISO 3166 regional-indicator emojis.
 - **Presets** (Official Speedtrack) remain layout templates and keep the current location.
-- Flip track mirrors the layout and swaps left/right rounding.
+- Flip track mirrors the layout and swaps left/right pass side.
 
-Official Speedtrack geometry: legs **70 / 55 / 105 m**, #1 left, #2 left, #3 right, gate with one end on #1 and the other 47 m along #2→#3.
+Official Speedtrack geometry: legs **70 / 55 / 105 m**, pass #1 right, #2 left, #3 right (path on that side of the buoy), gate with one end on #1 and the other 47 m along #2→#3.
 
 ### Simulator HUD
 

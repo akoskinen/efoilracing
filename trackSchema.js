@@ -8,11 +8,13 @@
 //
 // Declarative track shape:
 // {
-//   schemaVersion: 1,
+//   schemaVersion: 2,
 //   name, author, notes,
 //   scale: 4,                          // meters -> pixels in the simulator
 //   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'left'|'right',
 //             apexRadius, optimalSpeed }],
+//             rounding = which side of the buoy the rider passes
+//             (right = path on the buoy's right).
 //   gate: {
 //     sameStartFinish: true,
 //     directional: false,              // ALL crossings must match `direction`
@@ -29,7 +31,7 @@
 // }
 ////////////////////////////////////////////////////////////
 
-export const TRACK_SCHEMA_VERSION = 1;
+export const TRACK_SCHEMA_VERSION = 2;
 export const DRAFT_STORAGE_KEY = 'efoil_track_draft';
 export const LINE_CAPTURE_KEY = 'efoil_line_capture';
 export const LINE_RECORD_META_KEY = 'efoil_line_record_meta';
@@ -47,11 +49,32 @@ export function isDeclarativeTrack(track) {
   return !!(track && track.gate);
 }
 
-/** Buoy rounding side: leave the mark to your left or right. Legacy port/starboard map to left/right. */
+/**
+ * Which side of the buoy the rider passes.
+ * Right = path on the buoy's right; Left = path on the buoy's left.
+ * Legacy port = path on the right (buoy on the rider's left); starboard = left.
+ */
 export function normalizeRounding(rounding) {
-  if (rounding === 'right' || rounding === 'starboard') return 'right';
-  if (rounding === 'left' || rounding === 'port') return 'left';
+  if (rounding === 'right' || rounding === 'port') return 'right';
+  if (rounding === 'left' || rounding === 'starboard') return 'left';
   return 'left';
+}
+
+/** v1 stored leave-to-port/starboard as left/right; invert those to path-side. */
+export function migrateTrackSchema(track) {
+  if (!track || typeof track !== 'object') return track;
+  const v = Number(track.schemaVersion) || 1;
+  if (v >= TRACK_SCHEMA_VERSION) return track;
+  if (v < 2) {
+    (track.buoys || []).forEach(b => {
+      if (b.type === 'marker') return;
+      if (b.rounding === 'port') b.rounding = 'right';
+      else if (b.rounding === 'starboard') b.rounding = 'left';
+      else b.rounding = b.rounding === 'right' ? 'left' : 'right';
+    });
+  }
+  track.schemaVersion = TRACK_SCHEMA_VERSION;
+  return track;
 }
 
 // --- Geo anchoring (WGS84 / Web Mercator, matching Leaflet & Esri tiles) ---
@@ -130,10 +153,10 @@ export function createDefaultTrack(name = 'New Track') {
     notes: '',
     scale: 4,
     buoys: [
-      { x: 150, y: 30,  type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
-      { x: 150, y: 110, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
-      { x: 10,  y: 110, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
-      { x: 10,  y: 30,  type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 }
+      { x: 150, y: 30,  type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
+      { x: 150, y: 110, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
+      { x: 10,  y: 110, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
+      { x: 10,  y: 30,  type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
     ],
     gate: {
       sameStartFinish: true,
@@ -150,7 +173,7 @@ export function createDefaultTrack(name = 'New Track') {
 /**
  * Official Speedtrack triangle in track meters.
  * Legs: #1→#2 70 m, #2→#3 55 m, #3→#1 105 m.
- * Rounding (spec): #1 left, #2 left, #3 right.
+ * Pass side: #1 right, #2 left, #3 right (path on that side of the buoy).
  * Timing line sits at buoy #1, parallel to #2→#3.
  */
 export function createOfficialSpeedtrack() {
@@ -187,11 +210,12 @@ export function createOfficialSpeedtrack() {
     author: '',
     notes:
       'Official Speedtrack — 70 / 55 / 105 m triangle. ' +
-      'Round #1 left, #2 left, #3 right. Timing line at #1, parallel to #2–#3. ' +
+      'Pass #1 on the right, #2 on the left, #3 on the right. ' +
+      'Timing line at #1, parallel to #2–#3. ' +
       'Theoretical line ~325 m, target lap ~30 s @ ~39 km/h.',
     scale: 4,
     buoys: [
-      { x: p1.x, y: p1.y, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
+      { x: p1.x, y: p1.y, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
       { x: p2.x, y: p2.y, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
       { x: p3.x, y: p3.y, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
     ],
@@ -217,7 +241,7 @@ export function createOfficialSpeedtrack() {
   };
 }
 
-/** Mirror layout across a vertical axis through the bbox center; swap left/right rounding. */
+/** Mirror layout across a vertical axis through the bbox center; swap left/right pass side. */
 export function flipTrackLayout(track) {
   const b = trackBBox(track);
   const cx = b ? (b.minX + b.maxX) / 2 : 0;
@@ -517,6 +541,7 @@ export function trackStats(track) {
 // Legacy function-based configs (no `gate` field) are returned untouched.
 export function normalizeTrack(track) {
   if (!isDeclarativeTrack(track)) return track;
+  migrateTrackSchema(track);
   const gate = track.gate;
   const sameStartFinish = gate.sameStartFinish !== false;
 
@@ -681,10 +706,11 @@ export function ghostFromRacingLine(line) {
 // Keep only the declarative source fields (drops runtime fields added by
 // normalizeTrack) and round coordinates to keep share URLs short.
 export function serializeTrack(track) {
+  migrateTrackSchema(track);
   const r1 = v => Math.round(v * 10) / 10;
   const seg = s => isSegment(s) ? { x1: r1(s.x1), y1: r1(s.y1), x2: r1(s.x2), y2: r1(s.y2) } : null;
   const out = {
-    schemaVersion: track.schemaVersion || TRACK_SCHEMA_VERSION,
+    schemaVersion: TRACK_SCHEMA_VERSION,
     name: track.name || '',
     author: track.author || '',
     notes: track.notes || '',
