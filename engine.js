@@ -2941,7 +2941,8 @@ const touchControls = {
         rightUpper: false, // Accelerate
         rightLower: false  // Decelerate
     },
-    pinchStepDist: 0,
+    pinchStartDist: 0,
+    pinchFired: false,
 
     init() {
         canvas.addEventListener('touchstart', this.handleTouch.bind(this), { passive: false });
@@ -2957,24 +2958,27 @@ const touchControls = {
     },
 
     resetPinch() {
-        this.pinchStepDist = 0;
+        this.pinchStartDist = 0;
+        this.pinchFired = false;
     },
 
     handlePinch(e) {
         const dist = this.pinchDistance(e.touches);
         if (dist < 8) return true;
-        if (this.pinchStepDist < 8) {
-            this.pinchStepDist = dist;
+        if (this.pinchStartDist < 8) {
+            this.pinchStartDist = dist;
             return true;
         }
-        const ratio = dist / this.pinchStepDist;
-        // Spread → zoom out (race → 1 km → 5 km); pinch in → zoom in. Clamped, no Z wrap.
+        // One zoom stop per two-finger gesture; lift fingers to pinch again.
+        if (this.pinchFired) return true;
+        const ratio = dist / this.pinchStartDist;
+        // Map-style: spread → zoom in toward race; pinch together → zoom out to overview.
         if (ratio > 1.18) {
-            nudgeZoomStop(1);
-            this.pinchStepDist = dist;
-        } else if (ratio < 1 / 1.18) {
             nudgeZoomStop(-1);
-            this.pinchStepDist = dist;
+            this.pinchFired = true;
+        } else if (ratio < 1 / 1.18) {
+            nudgeZoomStop(1);
+            this.pinchFired = true;
         }
         return true;
     },
