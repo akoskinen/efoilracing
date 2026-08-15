@@ -18,7 +18,7 @@ import {
   BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
   deleteUserTrackPreset, getTrackPresetById,
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
-  geoFromSavedEntry, placeFromTrack
+  geoFromSavedEntry, placeFromTrack, normalizeRounding
 } from './trackSchema.js';
 
 // --- DOM ---
@@ -121,7 +121,7 @@ const snap = v => Math.round(v * 10) / 10;
 function withDefaults(t) {
   (t.buoys || []).forEach(b => {
     if (b.type !== 'marker') b.type = 'turn';
-    if (b.type === 'turn' && !b.rounding) b.rounding = 'port';
+    if (b.type === 'turn') b.rounding = normalizeRounding(b.rounding);
     if (b.apexRadius == null) b.apexRadius = 40;
     if (b.type === 'turn' && b.optimalSpeed == null) b.optimalSpeed = 30;
   });
@@ -469,7 +469,7 @@ function drawBuoys() {
 
     // Rounding direction arc
     if (isTurn && b.rounding) {
-      drawRoundingArrow(p.x, p.y, r + 8, b.rounding === 'starboard');
+      drawRoundingArrow(p.x, p.y, r + 8, normalizeRounding(b.rounding) === 'right');
     }
 
     ctx.beginPath();
@@ -502,7 +502,7 @@ function drawBuoys() {
   });
 }
 
-// Visual rounding hint: port = counterclockwise on screen, starboard = clockwise.
+// Visual rounding hint: left = counterclockwise on screen, right = clockwise.
 function drawRoundingArrow(x, y, r, clockwise) {
   const startA = -Math.PI / 2;
   const sweep = Math.PI * 1.5;
@@ -928,7 +928,7 @@ canvas.addEventListener('pointerup', e => {
         pushUndo();
         const m = pxToM(p.x, p.y);
         const buoy = (mode === 'addTurn')
-          ? { x: snap(m.x), y: snap(m.y), type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 }
+          ? { x: snap(m.x), y: snap(m.y), type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 }
           : { x: snap(m.x), y: snap(m.y), type: 'marker', apexRadius: 40 };
         track.buoys.push(buoy);
         selection = { kind: 'buoy', index: track.buoys.length - 1 };
@@ -1282,7 +1282,7 @@ function refreshBuoyProps() {
   els.rowRounding.style.display = isTurn ? '' : 'none';
   els.rowOptimalSpeed.style.display = isTurn ? '' : 'none';
   if (isTurn) {
-    setInput(els.buoyRounding, sel.rounding || 'port');
+    setInput(els.buoyRounding, normalizeRounding(sel.rounding));
     setInput(els.buoyOptimalSpeed, sel.optimalSpeed ?? 30);
   }
   setInput(els.buoyX, sel.x);
@@ -1359,14 +1359,14 @@ els.buoyType.addEventListener('change', () => {
   if (!sel) return;
   pushUndo();
   sel.type = els.buoyType.value;
-  if (sel.type === 'turn' && !sel.rounding) sel.rounding = 'port';
+  if (sel.type === 'turn' && !sel.rounding) sel.rounding = 'left';
   commit();
 });
 els.buoyRounding.addEventListener('change', () => {
   const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
   if (!sel) return;
   pushUndo();
-  sel.rounding = els.buoyRounding.value;
+  sel.rounding = normalizeRounding(els.buoyRounding.value);
   commit();
 });
 els.buoyOptimalSpeed.addEventListener('change', () => {
@@ -1474,7 +1474,7 @@ function geoWaypoints() {
   track.buoys.forEach(b => {
     if (b.type !== 'marker') {
       turnNo += 1;
-      pts.push({ name: `Turn ${turnNo} (${b.rounding || 'port'})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
+      pts.push({ name: `Turn ${turnNo} (${normalizeRounding(b.rounding)})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
     } else {
       markerNo += 1;
       pts.push({ name: `Marker ${markerNo}`, type: 'marker', x: b.x, y: b.y, ...ll(b.x, b.y) });
@@ -1712,7 +1712,7 @@ function posterBuoyOrderText() {
   track.buoys.forEach(b => {
     if (b.type === 'marker') return;
     n += 1;
-    parts.push(`${n} ${b.rounding === 'starboard' ? 'Starboard' : 'Port'}`);
+    parts.push(`${n} ${normalizeRounding(b.rounding) === 'right' ? 'Right' : 'Left'}`);
   });
   return parts.join('  \u00B7  ');
 }

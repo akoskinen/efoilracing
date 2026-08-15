@@ -11,7 +11,7 @@
 //   schemaVersion: 1,
 //   name, author, notes,
 //   scale: 4,                          // meters -> pixels in the simulator
-//   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'port'|'starboard',
+//   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'left'|'right',
 //             apexRadius, optimalSpeed }],
 //   gate: {
 //     sameStartFinish: true,
@@ -45,6 +45,13 @@ function lz() {
 
 export function isDeclarativeTrack(track) {
   return !!(track && track.gate);
+}
+
+/** Buoy rounding side: leave the mark to your left or right. Legacy port/starboard map to left/right. */
+export function normalizeRounding(rounding) {
+  if (rounding === 'right' || rounding === 'starboard') return 'right';
+  if (rounding === 'left' || rounding === 'port') return 'left';
+  return 'left';
 }
 
 // --- Geo anchoring (WGS84 / Web Mercator, matching Leaflet & Esri tiles) ---
@@ -123,10 +130,10 @@ export function createDefaultTrack(name = 'New Track') {
     notes: '',
     scale: 4,
     buoys: [
-      { x: 150, y: 30,  type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
-      { x: 150, y: 110, type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
-      { x: 10,  y: 110, type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
-      { x: 10,  y: 30,  type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 }
+      { x: 150, y: 30,  type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
+      { x: 150, y: 110, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
+      { x: 10,  y: 110, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
+      { x: 10,  y: 30,  type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 }
     ],
     gate: {
       sameStartFinish: true,
@@ -143,7 +150,7 @@ export function createDefaultTrack(name = 'New Track') {
 /**
  * Official Speedtrack triangle in track meters.
  * Legs: #1→#2 70 m, #2→#3 55 m, #3→#1 105 m.
- * Rounding (spec): #1 port, #2 port, #3 starboard.
+ * Rounding (spec): #1 left, #2 left, #3 right.
  * Timing line sits at buoy #1, parallel to #2→#3.
  */
 export function createOfficialSpeedtrack() {
@@ -153,7 +160,7 @@ export function createOfficialSpeedtrack() {
   const cosA = (d31 * d31 + d12 * d12 - d23 * d23) / (2 * d31 * d12);
   const angleA = Math.acos(Math.min(1, Math.max(-1, cosA)));
 
-  // #1 at origin, #2 along +y, #3 to starboard (+x) of the 1→2 heading.
+  // #1 at origin, #2 along +y, #3 to the right (+x) of the 1→2 heading.
   const b1 = { x: 0, y: 0 };
   const b2 = { x: 0, y: d12 };
   const b3 = { x: d31 * Math.sin(angleA), y: d31 * Math.cos(angleA) };
@@ -180,13 +187,13 @@ export function createOfficialSpeedtrack() {
     author: '',
     notes:
       'Official Speedtrack — 70 / 55 / 105 m triangle. ' +
-      'Round #1 port, #2 port, #3 starboard. Timing line at #1, parallel to #2–#3. ' +
+      'Round #1 left, #2 left, #3 right. Timing line at #1, parallel to #2–#3. ' +
       'Theoretical line ~325 m, target lap ~30 s @ ~39 km/h.',
     scale: 4,
     buoys: [
-      { x: p1.x, y: p1.y, type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
-      { x: p2.x, y: p2.y, type: 'turn', rounding: 'port', apexRadius: 40, optimalSpeed: 30 },
-      { x: p3.x, y: p3.y, type: 'turn', rounding: 'starboard', apexRadius: 40, optimalSpeed: 30 }
+      { x: p1.x, y: p1.y, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
+      { x: p2.x, y: p2.y, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
+      { x: p3.x, y: p3.y, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
     ],
     gate: {
       sameStartFinish: true,
@@ -210,7 +217,7 @@ export function createOfficialSpeedtrack() {
   };
 }
 
-/** Mirror layout across a vertical axis through the bbox center; swap port/starboard. */
+/** Mirror layout across a vertical axis through the bbox center; swap left/right rounding. */
 export function flipTrackLayout(track) {
   const b = trackBBox(track);
   const cx = b ? (b.minX + b.maxX) / 2 : 0;
@@ -223,7 +230,7 @@ export function flipTrackLayout(track) {
   (track.buoys || []).forEach(buoy => {
     buoy.x = fx(buoy.x);
     if (buoy.type !== 'marker') {
-      buoy.rounding = buoy.rounding === 'starboard' ? 'port' : 'starboard';
+      buoy.rounding = normalizeRounding(buoy.rounding) === 'right' ? 'left' : 'right';
     }
   });
   if (track.gate) {
@@ -520,6 +527,7 @@ export function normalizeTrack(track) {
     } else {
       turnCounter += 1;
       b.turnIndex = turnCounter;
+      b.rounding = normalizeRounding(b.rounding);
     }
     if (b.aliases == null) b.aliases = (b.turnIndex != null) ? [b.turnIndex] : [];
     if (b.apexRadius == null) b.apexRadius = 40;
@@ -684,7 +692,7 @@ export function serializeTrack(track) {
     buoys: (track.buoys || []).map(b => {
       const o = { x: r1(b.x), y: r1(b.y) };
       if (b.type === 'marker') o.type = 'marker';
-      if (b.rounding) o.rounding = b.rounding;
+      else o.rounding = normalizeRounding(b.rounding);
       if (b.apexRadius != null && b.apexRadius !== 40) o.apexRadius = b.apexRadius;
       if (b.optimalSpeed != null) o.optimalSpeed = b.optimalSpeed;
       return o;
