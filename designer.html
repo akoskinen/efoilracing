@@ -77,7 +77,20 @@
     }
     .menu-panel button.menu-item:hover { background: rgba(255,255,255,0.08); }
     .menu-panel .menu-item.under-country { padding-left: 18px; }
+    .menu-panel .menu-item .check {
+      color: #7cfc00; font-size: 13px; flex: 0 0 auto; line-height: 1;
+    }
     .menu-panel .menu-item .meta { color: var(--muted); font-size: 11px; margin-left: auto; }
+    .menu-track-actions {
+      display: flex; flex-wrap: wrap; gap: 4px;
+      padding: 0 10px 8px 32px;
+    }
+    .menu-track-actions button {
+      font-size: 11px; padding: 4px 8px; border-radius: 5px;
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    }
+    .menu-track-actions button:hover { background: rgba(255,255,255,0.08); }
+    .menu-track-actions button:disabled { opacity: 0.38; pointer-events: none; }
     .menu-panel .menu-item .del {
       color: var(--muted); padding: 2px 6px; font-size: 12px; border-radius: 4px;
     }

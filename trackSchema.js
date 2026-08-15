@@ -338,6 +338,25 @@ export function saveUserTrackPreset(track, name) {
   return preset;
 }
 
+export function replaceUserTrackPreset(id, track, name) {
+  const list = loadUserTrackPresets();
+  const i = list.findIndex(p => p.id === id);
+  if (i < 0) return null;
+  const nm = (name && String(name).trim()) || track.name || list[i].name;
+  const next = {
+    ...list[i],
+    name: nm,
+    savedAt: new Date().toISOString(),
+    kind: 'track',
+    track: trackAsSavedTrack(track, nm)
+  };
+  const place = placeFromTrack(track);
+  if (place) next.place = { ...(list[i].place || {}), ...place };
+  list[i] = next;
+  saveUserTrackPresets(list);
+  return next;
+}
+
 export function patchUserTrackPreset(id, patch) {
   const list = loadUserTrackPresets();
   const i = list.findIndex(p => p.id === id);

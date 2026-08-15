@@ -17,8 +17,8 @@ import {
   buildRacingLineFromGhost,
   BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
   deleteUserTrackPreset, getTrackPresetById,
-  flipTrackLayout, patchUserTrackPreset, countryFlagEmoji, geoFromSavedEntry,
-  placeFromTrack
+  flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
+  geoFromSavedEntry, placeFromTrack
 } from './trackSchema.js';
 
 // --- DOM ---
@@ -2090,6 +2090,42 @@ function closePresetsMenu() {
   presetsMenuWrap.classList.remove('open');
 }
 
+const ACTIVE_SAVED_KEY = 'efoil_active_saved_track_id';
+let activeSavedTrackId = localStorage.getItem(ACTIVE_SAVED_KEY) || null;
+let savedTrackFingerprint = null;
+
+function trackFingerprint(t) {
+  try {
+    return JSON.stringify(serializeTrack(t));
+  } catch (e) {
+    return '';
+  }
+}
+
+function setActiveSavedTrack(id, snapshotTrack) {
+  activeSavedTrackId = id || null;
+  if (activeSavedTrackId) localStorage.setItem(ACTIVE_SAVED_KEY, activeSavedTrackId);
+  else localStorage.removeItem(ACTIVE_SAVED_KEY);
+  const src = snapshotTrack || (id && getTrackPresetById(id)?.track) || null;
+  savedTrackFingerprint = src ? trackFingerprint(src) : null;
+}
+
+function clearActiveSavedTrack() {
+  setActiveSavedTrack(null, null);
+}
+
+function isActiveSavedDirty() {
+  if (!activeSavedTrackId || !savedTrackFingerprint) return false;
+  return trackFingerprint(track) !== savedTrackFingerprint;
+}
+
+if (activeSavedTrackId && !getTrackPresetById(activeSavedTrackId)) {
+  clearActiveSavedTrack();
+} else if (activeSavedTrackId) {
+  const entry = getTrackPresetById(activeSavedTrackId);
+  if (entry?.track) savedTrackFingerprint = trackFingerprint(entry.track);
+}
+
 const COUNTRY_CACHE_KEY = 'efoil_country_cache_v1';
 const UNPLACED_COUNTRY = { code: '', name: 'No location', sort: '\uffff' };
 let nominatimAt = 0;
@@ -2227,14 +2263,25 @@ function countryGroupForItem(item) {
 }
 
 function menuItemButton(p) {
-  return (
-    `<button type="button" class="menu-item${p.kind === 'track' ? ' under-country' : ''}" data-apply="${escHtml(p.id)}">` +
-    `<span>${escHtml(p.name)}</span>` +
+  const selected = !p.builtin && p.id === activeSavedTrackId;
+  const dirty = selected && isActiveSavedDirty();
+  const row =
+    `<button type="button" class="menu-item${p.kind === 'track' ? ' under-country' : ''}${selected ? ' selected' : ''}" data-apply="${escHtml(p.id)}">` +
+    (selected ? '<span class="check" title="Current track">✓</span>' : '') +
+    `<span>${escHtml(p.name)}${dirty ? ' •' : ''}</span>` +
     (p.meta ? `<span class="meta">${escHtml(p.meta)}</span>` : '') +
     (p.canDelete
       ? `<span class="del" data-del="${escHtml(p.id)}" title="Delete saved track">✕</span>`
       : '') +
-    `</button>`
+    `</button>`;
+  if (!selected) return row;
+  return (
+    `<div class="menu-track">` + row +
+    `<div class="menu-track-actions">` +
+    `<button type="button" data-track-action="overwrite" ${dirty ? '' : 'disabled'}>Save changes</button>` +
+    `<button type="button" data-track-action="save-as">Save as…</button>` +
+    `<button type="button" data-track-action="revert" ${dirty ? '' : 'disabled'}>Revert</button>` +
+    `</div></div>`
   );
 }
 
@@ -2356,6 +2403,46 @@ btnPresets.addEventListener('click', e => {
 
 presetsMenu.addEventListener('click', async e => {
   e.stopPropagation();
+
+  const trackAct = e.target.closest('[data-track-action]');
+  if (trackAct) {
+    e.preventDefault();
+    const act = trackAct.getAttribute('data-track-action');
+    if (act === 'overwrite') {
+      if (!activeSavedTrackId) return;
+      replaceUserTrackPreset(activeSavedTrackId, track, track.name);
+      setActiveSavedTrack(activeSavedTrackId, track);
+      refreshPresetsMenu();
+      return;
+    }
+    if (act === 'save-as') {
+      const name = prompt('Save as new track:', track.name || 'My track');
+      if (name == null) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      track.name = trimmed;
+      const created = saveUserTrackPreset(track, trimmed);
+      commit();
+      setActiveSavedTrack(created.id, track);
+      refreshPresetsMenu();
+      return;
+    }
+    if (act === 'revert') {
+      if (!activeSavedTrackId) return;
+      const entry = getTrackPresetById(activeSavedTrackId);
+      if (!entry?.track) return;
+      if (!confirm(`Revert “${entry.name}” to the last saved version? Unsaved edits will be lost.`)) return;
+      const geo = geoFromSavedEntry(entry);
+      const next = withDefaults(JSON.parse(JSON.stringify(entry.track)));
+      if (geo) next.geo = geo;
+      applyTrackFromMenu(next, { mode: 'saved' });
+      setActiveSavedTrack(activeSavedTrackId, track);
+      refreshPresetsMenu();
+      return;
+    }
+    return;
+  }
+
   const del = e.target.closest('[data-del]');
   if (del) {
     e.preventDefault();
@@ -2364,6 +2451,7 @@ presetsMenu.addEventListener('click', async e => {
     if (!preset) return;
     if (!confirm(`Delete saved track “${preset.name}”?`)) return;
     deleteUserTrackPreset(id);
+    if (id === activeSavedTrackId) clearActiveSavedTrack();
     refreshPresetsMenu();
     return;
   }
@@ -2382,6 +2470,7 @@ presetsMenu.addEventListener('click', async e => {
       const next = withDefaults(JSON.parse(JSON.stringify(entry.track)));
       applyTrackFromMenu(next, { mode: 'template' });
     } else {
+      if (id === activeSavedTrackId) return;
       let geo = geoFromSavedEntry(entry);
       const canFind = !!(geo || placeQueryFromName(entry.name));
       const msg = canFind
@@ -2407,6 +2496,7 @@ presetsMenu.addEventListener('click', async e => {
         anchorTrackAt(geo.origin.lat, geo.origin.lng);
         commit();
       }
+      setActiveSavedTrack(id, track);
     }
     closePresetsMenu();
     return;
@@ -2420,7 +2510,10 @@ presetsMenu.addEventListener('click', async e => {
     if (name == null) return;
     const trimmed = name.trim();
     if (!trimmed) return;
-    saveUserTrackPreset(track, trimmed);
+    track.name = trimmed;
+    const created = saveUserTrackPreset(track, trimmed);
+    commit();
+    setActiveSavedTrack(created.id, track);
     refreshPresetsMenu();
     const where = hasGeo(track) ? ' (with map location)' : ' (no map location yet)';
     alert(`Saved “${trimmed}” to Tracks${where}.`);
@@ -2441,6 +2534,7 @@ document.getElementById('btnNew').addEventListener('click', () => {
   track = withDefaults(createDefaultTrack());
   selection = null;
   if (geoOn) setGeoOn(false);
+  clearActiveSavedTrack();
   fitView();
   commit();
 });
@@ -2482,6 +2576,7 @@ els.importFile.addEventListener('change', async e => {
     track = withDefaults(parsed);
     selection = null;
     if (hasGeo(track) !== geoOn) setGeoOn(hasGeo(track));
+    clearActiveSavedTrack();
     fitView();
     commit();
   } catch (err) {

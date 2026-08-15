@@ -7,7 +7,7 @@
 ////////////////////////////////////////////////////////////
 
 import { trackConfigs } from "./trackConfigs.js";
-import { commentaryClips, playCommentary } from "./commentary.js";
+import { playCommentary, resetCommentaryQueue } from "./commentary.js";
 import { HighScoreManager } from './highscores.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
@@ -41,19 +41,23 @@ const availableTrackKeys = Object.keys(trackConfigs);
 
 // --- Additional Variables for Turn Apex Logic ---
 let turnStates = {};
-const THROTTLE_WINDOW = 0.5; // We'll track last 0.5s of throttle usage
+const THROTTLE_WINDOW = 0.5; // last 0.5s of throttle at the mark
+// Must actually round the mark — not merely recede from a distant buoy.
+const APEX_ZONE_M = 16;
+const COMMENTARY_TIGHT_LINE_M = 8;
+const OPTIMAL_SPEED_WINDOW_KMH = 8;
+const APEX_RECEDING_EPS_PX = 0.75;
 
 function initTurnStates() {
-  // We'll reset or create states for each turn buoy
+  turnStates = {};
   buoys.forEach(b => {
     if (b.turnIndex != null) {
       turnStates[b.turnIndex] = {
         apexReached: false,
+        approached: false,
         previousDistance: null,
         minDistance: Infinity,
         apexSpeed: 0,
-
-        // Throttle usage queue
         throttleQueue: [],
         queueTime: 0
       };
@@ -87,6 +91,9 @@ const GEO_MAX_INFLIGHT = 10;
 const GEO_PREFETCH_PAD_TILES = 2;
 const GEO_LOOKAHEAD_SEC = 7;
 const GEO_TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile';
+// Short viewport side at race zoom. Matches a fitted Official Speedtrack
+// (~90–160 m) with a little extra look-ahead so large courses aren't a peephole.
+const RACE_VIEW_METERS = 160;
 
 function computeGeoCanvasTransform() {
   geoCanvasTransform = null;
@@ -140,15 +147,24 @@ function computeGeoCanvasTransform() {
   }
   if (!mercPts.length) return;
 
-  const pad = 1.3;
-  const xs = mercPts.map(p => p.x), ys = mercPts.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const mercW = Math.max(maxX - minX, 40);
-  const mercH = Math.max(maxY - minY, 40);
-  const scale = Math.min(canvas.width / (mercW * pad), canvas.height / (mercH * pad));
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
+  // Race zoom is a fixed "altitude" (short viewport side ≈ RACE_VIEW_METERS),
+  // not a fit of the whole course. Large venues pan; Z / pinch zoom out.
+  const m0 = toMerc(0, 0);
+  const m1 = toMerc(100, 0);
+  const mercPerMeter = Math.hypot(m1.x - m0.x, m1.y - m0.y) / 100;
+  const targetPpm = Math.min(canvas.width, canvas.height) / RACE_VIEW_METERS;
+  const scale = (mercPerMeter > 0) ? (targetPpm / mercPerMeter) : 1;
+
+  let cx, cy;
+  if (currentTrack.startPosition && Number.isFinite(currentTrack.startPosition.x)) {
+    const s = toMerc(currentTrack.startPosition.x, currentTrack.startPosition.y);
+    cx = s.x;
+    cy = s.y;
+  } else {
+    const xs = mercPts.map(p => p.x), ys = mercPts.map(p => p.y);
+    cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  }
 
   geoCanvasTransform = {
     zoom,
@@ -1091,7 +1107,6 @@ const speedConversion= 0.6;
 // for meter-based collision thresholds that were authored in canvas pixels.
 const SPEED_CALIBRATION_PX_PER_M = 4;
 const COLLISION_RADIUS_M = 12 / SPEED_CALIBRATION_PX_PER_M; // 3 m
-const TIGHT_LINE_M       = 15 / SPEED_CALIBRATION_PX_PER_M; // 3.75 m
 
 // Current meters→pixels ratio for the active track layout (collisions, etc.).
 function pixelsPerMeter() {
@@ -1331,8 +1346,8 @@ function placePlayerAtStart() {
 }
 
 // --- Follow camera (smooth edge tracking, no wrap) ---
-const FOLLOW_MARGIN_FRAC = 0.16;
-const FOLLOW_MARGIN_MIN = 90;
+const FOLLOW_MARGIN_FRAC = 0.28;
+const FOLLOW_MARGIN_MIN = 140;
 const FOLLOW_TAU = 0.45;
 const CAM_SCALE_TAU = 0.42;
 const OVERVIEW_CENTER_TAU = 0.65;
@@ -1352,9 +1367,8 @@ function followTargetScale() {
   const meters = overviewMeters();
   const ppm = pixelsPerMeter();
   if (!meters || !ppm || !canvas.width || !canvas.height) return 1;
-  const worldSpan = meters * ppm;
   const view = Math.min(canvas.width, canvas.height);
-  return Math.max(0.02, Math.min(1, view / worldSpan));
+  return Math.max(0.02, view / (meters * ppm));
 }
 
 function zoomStopTitle(index) {
@@ -1439,8 +1453,10 @@ function withWorldMarker(x, y, fn) {
   ctx.restore();
 }
 
-function cycleZoomStop() {
-  zoomStopIndex = (zoomStopIndex + 1) % ZOOM_STOPS_M.length;
+function cycleZoomStop(dir = 1) {
+  const n = ZOOM_STOPS_M.length;
+  const step = dir < 0 ? -1 : 1;
+  zoomStopIndex = (zoomStopIndex + step + n) % n;
   zoomHintUntil = performance.now() + 1800;
   prefetchGeoTiles();
 }
@@ -1680,6 +1696,9 @@ function startLap(){
   
   // Reset ghost recording
   recordedGhost = [];
+
+  initTurnStates();
+  resetCommentaryQueue();
   
   // Start music
   AudioManager.playSound('music')
@@ -1687,13 +1706,10 @@ function startLap(){
   
   // Play appropriate commentary based on starting speed
   const speedKmh = speed * speedConversion;
-  if (speedKmh > 50) {
-    playCommentary("start_over50");
-  } else if (speedKmh > 30) {
-    playCommentary("start_30_50");
-  } else {
-    playCommentary("start_under30");
-  }
+  let startKey = "start_under30";
+  if (speedKmh > 50) startKey = "start_over50";
+  else if (speedKmh > 30) startKey = "start_30_50";
+  playCommentary(startKey, { interrupt: true });
 }
 
 // Calculate average speed properly
@@ -2083,70 +2099,80 @@ function updateThrottleQueue(st, dt) {
 }
 
 // --- APEX DETECTION ---
+function apexZonePx(buoy) {
+  const ppm = pixelsPerMeter();
+  // Designer values (~20–40) are leftover canvas pixels at the 4 px/m scale.
+  // Larger numbers are treated as meters. Floor is APEX_ZONE_M either way.
+  let radiusM = APEX_ZONE_M;
+  if (typeof buoy.apexRadius === "number" && buoy.apexRadius > 0) {
+    const authoredM = buoy.apexRadius > 15
+      ? buoy.apexRadius / SPEED_CALIBRATION_PX_PER_M
+      : buoy.apexRadius;
+    radiusM = Math.max(APEX_ZONE_M, authoredM);
+  }
+  return radiusM * ppm;
+}
+
 function checkBuoyApexes(dt) {
+  const ppm = pixelsPerMeter();
   buoys.forEach(b => {
-    if (b.turnIndex == null) return; // not a turn buoy
+    if (b.turnIndex == null) return;
     const st = turnStates[b.turnIndex];
-    if (st.apexReached) return; // already done
+    if (!st || st.apexReached) return;
 
-    const dx = b.x - pos.x;
-    const dy = b.y - pos.y;
-    const dist = Math.hypot(dx, dy);
+    const dist = Math.hypot(b.x - pos.x, b.y - pos.y);
+    const zonePx = apexZonePx(b);
 
-    // track line tightness
-    if (dist < st.minDistance) {
-      st.minDistance = dist;
+    if (dist > zonePx) {
+      st.previousDistance = null;
+      st.approached = false;
+      st.minDistance = Infinity;
+      st.throttleQueue = [];
+      st.queueTime = 0;
+      return;
     }
 
-    // track throttle usage
+    if (dist < st.minDistance) st.minDistance = dist;
     updateThrottleQueue(st, dt);
 
-    // apex detection
     if (st.previousDistance == null) {
       st.previousDistance = dist;
       return;
     }
-    if (dist > st.previousDistance) {
-      // apex found
-      st.apexReached = true;
-      st.apexSpeed = speed * speedConversion;
-      handleApexCommentary(b, st);
-    } else {
-      // still approaching
-      st.previousDistance = dist;
+
+    if (dist + APEX_RECEDING_EPS_PX < st.previousDistance) {
+      st.approached = true;
     }
+
+    const receding = dist > st.previousDistance + APEX_RECEDING_EPS_PX;
+    st.previousDistance = dist;
+
+    if (!st.approached || !receding) return;
+
+    st.apexReached = true;
+    st.apexSpeed = speed * speedConversion;
+    handleApexCommentary(b, st, ppm);
   });
 }
 
-function handleApexCommentary(buoy, st) {
-  // measure how much throttle was engaged in last 0.5s
+function handleApexCommentary(buoy, st, ppm) {
   let pressedTime = 0;
-  for (let item of st.throttleQueue) {
+  for (const item of st.throttleQueue) {
     if (item.pressed) pressedTime += item.dt;
   }
   const fractionEngaged = (st.queueTime > 0) ? (pressedTime / st.queueTime) : 0;
-  const throttleResult = (fractionEngaged > 0.6) ? "good" : "late";
+  const throttleGood = fractionEngaged > 0.6;
 
-  // compare apexSpeed with buoy.optimalSpeed if present
-  let speedDiff = Infinity;
-  if (typeof buoy.optimalSpeed === "number") {
-    speedDiff = Math.abs(st.apexSpeed - buoy.optimalSpeed);
-  }
-  const nearOptimal = (speedDiff <= 25);
+  const optimal = (typeof buoy.optimalSpeed === "number") ? buoy.optimalSpeed : 30;
+  const nearOptimal = Math.abs(st.apexSpeed - optimal) <= OPTIMAL_SPEED_WINDOW_KMH;
+  const tightLine = st.minDistance < COMMENTARY_TIGHT_LINE_M * ppm;
 
-  // line tightness (threshold scales with world px/m, same as collisions)
-  const tightLine = (st.minDistance < TIGHT_LINE_M * pixelsPerMeter());
-
-  // pick an event key
   let eventKey = "turn_generic";
-  if (nearOptimal && tightLine && throttleResult === "good") {
-    eventKey = "turn_optimalspeed_tightline_goodthrottle";
-  } else if (nearOptimal && tightLine && throttleResult === "late") {
-    eventKey = "turn_optimalspeed_tightline_latethrottle";
-  } else if (nearOptimal && !tightLine) {
-    eventKey = "turn_optimalspeed_wideline_" + throttleResult;
+  if (nearOptimal) {
+    const line = tightLine ? "tightline" : "wideline";
+    const throttle = throttleGood ? "goodthrottle" : "latethrottle";
+    eventKey = `turn_optimalspeed_${line}_${throttle}`;
   }
-  // etc. fallback => "turn_generic"
 
   playCommentary(eventKey);
 }
@@ -2904,12 +2930,44 @@ const touchControls = {
         rightUpper: false, // Accelerate
         rightLower: false  // Decelerate
     },
+    pinchStartDist: 0,
+    pinchArmed: true,
 
     init() {
-        canvas.addEventListener('touchstart', this.handleTouch.bind(this));
-        canvas.addEventListener('touchmove', this.handleTouch.bind(this));
-        canvas.addEventListener('touchend', this.handleTouchEnd.bind(this));
-        canvas.addEventListener('touchcancel', this.handleTouchEnd.bind(this));
+        canvas.addEventListener('touchstart', this.handleTouch.bind(this), { passive: false });
+        canvas.addEventListener('touchmove', this.handleTouch.bind(this), { passive: false });
+        canvas.addEventListener('touchend', this.handleTouchEnd.bind(this), { passive: false });
+        canvas.addEventListener('touchcancel', this.handleTouchEnd.bind(this), { passive: false });
+    },
+
+    pinchDistance(touches) {
+        if (touches.length < 2) return 0;
+        const a = touches[0], b = touches[1];
+        return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    },
+
+    handlePinch(e) {
+        const dist = this.pinchDistance(e.touches);
+        if (dist < 8) return true;
+        if (this.pinchStartDist < 8) {
+            this.pinchStartDist = dist;
+            this.pinchArmed = true;
+            return true;
+        }
+        const ratio = dist / this.pinchStartDist;
+        if (this.pinchArmed && ratio > 1.2) {
+            cycleZoomStop(1);
+            this.pinchArmed = false;
+            this.pinchStartDist = dist;
+        } else if (this.pinchArmed && ratio < 1 / 1.2) {
+            cycleZoomStop(-1);
+            this.pinchArmed = false;
+            this.pinchStartDist = dist;
+        } else if (!this.pinchArmed && ratio > 0.92 && ratio < 1.08) {
+            this.pinchArmed = true;
+            this.pinchStartDist = dist;
+        }
+        return true;
     },
 
     getZone(x, y) {
@@ -2932,7 +2990,21 @@ const touchControls = {
 
     handleTouch(e) {
         e.preventDefault();
-        
+
+        if (e.touches.length >= 2) {
+            Object.keys(this.activeZones).forEach(zone => {
+                this.activeZones[zone] = false;
+            });
+            keys['ArrowLeft'] = false;
+            keys['ArrowRight'] = false;
+            keys['ArrowUp'] = false;
+            keys['ArrowDown'] = false;
+            this.handlePinch(e);
+            return;
+        }
+        this.pinchStartDist = 0;
+        this.pinchArmed = true;
+
         Object.keys(this.activeZones).forEach(zone => {
             this.activeZones[zone] = false;
         });
@@ -2967,6 +3039,10 @@ const touchControls = {
     },
 
     handleTouchEnd(e) {
+        if (e.touches.length < 2) {
+            this.pinchStartDist = 0;
+            this.pinchArmed = true;
+        }
         if (e.touches.length === 0) {
             Object.keys(this.activeZones).forEach(zone => {
                 this.activeZones[zone] = false;
