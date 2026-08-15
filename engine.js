@@ -2941,7 +2941,6 @@ const touchControls = {
         rightUpper: false, // Accelerate
         rightLower: false  // Decelerate
     },
-    pinchStartDist: 0,
     pinchStepDist: 0,
 
     init() {
@@ -2958,7 +2957,6 @@ const touchControls = {
     },
 
     resetPinch() {
-        this.pinchStartDist = 0;
         this.pinchStepDist = 0;
     },
 
@@ -2966,7 +2964,6 @@ const touchControls = {
         const dist = this.pinchDistance(e.touches);
         if (dist < 8) return true;
         if (this.pinchStepDist < 8) {
-            this.pinchStartDist = dist;
             this.pinchStepDist = dist;
             return true;
         }
