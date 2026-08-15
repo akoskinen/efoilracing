@@ -148,7 +148,7 @@ function computeGeoCanvasTransform() {
   if (!mercPts.length) return;
 
   // Race zoom is a fixed "altitude" (short viewport side ≈ RACE_VIEW_METERS),
-  // not a fit of the whole course. Large venues pan; Z / pinch zoom out.
+  // not a fit of the whole course. Large venues pan; Z cycles, pinch zooms in/out.
   const m0 = toMerc(0, 0);
   const m1 = toMerc(100, 0);
   const mercPerMeter = Math.hypot(m1.x - m0.x, m1.y - m0.y) / 100;
@@ -1459,6 +1459,17 @@ function cycleZoomStop(dir = 1) {
   zoomStopIndex = (zoomStopIndex + step + n) % n;
   zoomHintUntil = performance.now() + 1800;
   prefetchGeoTiles();
+}
+
+/** Discrete zoom for pinch: +1 zooms out (race→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
+function nudgeZoomStop(dir) {
+  const n = ZOOM_STOPS_M.length;
+  const next = zoomStopIndex + (dir < 0 ? -1 : 1);
+  if (next < 0 || next >= n) return false;
+  zoomStopIndex = next;
+  zoomHintUntil = performance.now() + 1800;
+  prefetchGeoTiles();
+  return true;
 }
 
 function drawZoomHint() {
@@ -2931,7 +2942,7 @@ const touchControls = {
         rightLower: false  // Decelerate
     },
     pinchStartDist: 0,
-    pinchArmed: true,
+    pinchStepDist: 0,
 
     init() {
         canvas.addEventListener('touchstart', this.handleTouch.bind(this), { passive: false });
@@ -2946,26 +2957,27 @@ const touchControls = {
         return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
     },
 
+    resetPinch() {
+        this.pinchStartDist = 0;
+        this.pinchStepDist = 0;
+    },
+
     handlePinch(e) {
         const dist = this.pinchDistance(e.touches);
         if (dist < 8) return true;
-        if (this.pinchStartDist < 8) {
+        if (this.pinchStepDist < 8) {
             this.pinchStartDist = dist;
-            this.pinchArmed = true;
+            this.pinchStepDist = dist;
             return true;
         }
-        const ratio = dist / this.pinchStartDist;
-        if (this.pinchArmed && ratio > 1.2) {
-            cycleZoomStop(1);
-            this.pinchArmed = false;
-            this.pinchStartDist = dist;
-        } else if (this.pinchArmed && ratio < 1 / 1.2) {
-            cycleZoomStop(-1);
-            this.pinchArmed = false;
-            this.pinchStartDist = dist;
-        } else if (!this.pinchArmed && ratio > 0.92 && ratio < 1.08) {
-            this.pinchArmed = true;
-            this.pinchStartDist = dist;
+        const ratio = dist / this.pinchStepDist;
+        // Spread → zoom out (race → 1 km → 5 km); pinch in → zoom in. Clamped, no Z wrap.
+        if (ratio > 1.18) {
+            nudgeZoomStop(1);
+            this.pinchStepDist = dist;
+        } else if (ratio < 1 / 1.18) {
+            nudgeZoomStop(-1);
+            this.pinchStepDist = dist;
         }
         return true;
     },
@@ -3002,8 +3014,7 @@ const touchControls = {
             this.handlePinch(e);
             return;
         }
-        this.pinchStartDist = 0;
-        this.pinchArmed = true;
+        this.resetPinch();
 
         Object.keys(this.activeZones).forEach(zone => {
             this.activeZones[zone] = false;
@@ -3040,8 +3051,7 @@ const touchControls = {
 
     handleTouchEnd(e) {
         if (e.touches.length < 2) {
-            this.pinchStartDist = 0;
-            this.pinchArmed = true;
+            this.resetPinch();
         }
         if (e.touches.length === 0) {
             Object.keys(this.activeZones).forEach(zone => {
