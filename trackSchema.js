@@ -8,13 +8,13 @@
 //
 // Declarative track shape:
 // {
-//   schemaVersion: 2,
+//   schemaVersion: 3,
 //   name, author, notes,
 //   scale: 4,                          // meters -> pixels in the simulator
 //   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'left'|'right',
 //             apexRadius, optimalSpeed }],
-//             rounding = which side of the buoy the rider passes
-//             (right = path on the buoy's right).
+//   visits: [{ buoy: 0, side: 'left'|'right'|'360-left'|'360-right' }],
+//             buoy = index into buoys; side = path on that side, or 360 wrap direction.
 //   gate: {
 //     sameStartFinish: true,
 //     directional: false,              // ALL crossings must match `direction`
@@ -31,7 +31,7 @@
 // }
 ////////////////////////////////////////////////////////////
 
-export const TRACK_SCHEMA_VERSION = 2;
+export const TRACK_SCHEMA_VERSION = 3;
 export const DRAFT_STORAGE_KEY = 'efoil_track_draft';
 export const LINE_CAPTURE_KEY = 'efoil_line_capture';
 export const LINE_RECORD_META_KEY = 'efoil_line_record_meta';
@@ -60,11 +60,64 @@ export function normalizeRounding(rounding) {
   return 'left';
 }
 
+export function normalizePassSide(side) {
+  if (side === '360-left') return '360-left';
+  if (side === '360-right' || side === '360' || side === 'full') return '360-right';
+  return normalizeRounding(side);
+}
+
+export function is360Pass(side) {
+  const s = normalizePassSide(side);
+  return s === '360-left' || s === '360-right';
+}
+
+export function passSideLabel(side) {
+  const s = normalizePassSide(side);
+  if (s === '360-left') return '360° Left';
+  if (s === '360-right') return '360° Right';
+  return s === 'right' ? 'Right' : 'Left';
+}
+
+export function flipPassSide(side) {
+  const s = normalizePassSide(side);
+  if (s === '360-right') return '360-left';
+  if (s === '360-left') return '360-right';
+  return s === 'right' ? 'left' : 'right';
+}
+
+/** 1-based number among turn buoys (markers skipped). */
+export function physicalBuoyNumber(track, buoyIndex) {
+  let n = 0;
+  for (let i = 0; i <= buoyIndex; i++) {
+    if (track.buoys[i] && track.buoys[i].type !== 'marker') n += 1;
+  }
+  return n;
+}
+
+export function ensureVisits(track) {
+  if (!track || !Array.isArray(track.buoys)) return track;
+  const valid = v =>
+    v && Number.isInteger(v.buoy) && track.buoys[v.buoy] &&
+    track.buoys[v.buoy].type !== 'marker';
+  if (!Array.isArray(track.visits)) {
+    track.visits = [];
+    track.buoys.forEach((b, i) => {
+      if (b.type === 'marker') return;
+      track.visits.push({ buoy: i, side: normalizePassSide(b.rounding) });
+    });
+  } else {
+    track.visits = track.visits.filter(valid).map(v => ({
+      buoy: v.buoy,
+      side: normalizePassSide(v.side || track.buoys[v.buoy].rounding)
+    }));
+  }
+  return track;
+}
+
 /** v1 stored leave-to-port/starboard as left/right; invert those to path-side. */
 export function migrateTrackSchema(track) {
   if (!track || typeof track !== 'object') return track;
   const v = Number(track.schemaVersion) || 1;
-  if (v >= TRACK_SCHEMA_VERSION) return track;
   if (v < 2) {
     (track.buoys || []).forEach(b => {
       if (b.type === 'marker') return;
@@ -73,6 +126,7 @@ export function migrateTrackSchema(track) {
       else b.rounding = b.rounding === 'right' ? 'left' : 'right';
     });
   }
+  ensureVisits(track);
   track.schemaVersion = TRACK_SCHEMA_VERSION;
   return track;
 }
@@ -158,6 +212,12 @@ export function createDefaultTrack(name = 'New Track') {
       { x: 10,  y: 110, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
       { x: 10,  y: 30,  type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
     ],
+    visits: [
+      { buoy: 0, side: 'right' },
+      { buoy: 1, side: 'right' },
+      { buoy: 2, side: 'right' },
+      { buoy: 3, side: 'right' }
+    ],
     gate: {
       sameStartFinish: true,
       directional: false,
@@ -173,7 +233,7 @@ export function createDefaultTrack(name = 'New Track') {
 /**
  * Official Speedtrack triangle in track meters.
  * Legs: #1→#2 70 m, #2→#3 55 m, #3→#1 105 m.
- * Pass side: #1 right, #2 left, #3 right (path on that side of the buoy).
+ * Pass side: #1 right, #2 left, #3 right, then #2 right and #1 right on the return.
  * Timing line sits at buoy #1, parallel to #2→#3.
  */
 export function createOfficialSpeedtrack() {
@@ -210,7 +270,7 @@ export function createOfficialSpeedtrack() {
     author: '',
     notes:
       'Official Speedtrack — 70 / 55 / 105 m triangle. ' +
-      'Pass #1 on the right, #2 on the left, #3 on the right. ' +
+      'Pass #1 on the right, #2 on the left, #3 on the right, then #2 and #1 on the right returning. ' +
       'Timing line at #1, parallel to #2–#3. ' +
       'Theoretical line ~325 m, target lap ~30 s @ ~39 km/h.',
     scale: 4,
@@ -218,6 +278,13 @@ export function createOfficialSpeedtrack() {
       { x: p1.x, y: p1.y, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
       { x: p2.x, y: p2.y, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
       { x: p3.x, y: p3.y, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
+    ],
+    visits: [
+      { buoy: 0, side: 'right' },
+      { buoy: 1, side: 'left' },
+      { buoy: 2, side: 'right' },
+      { buoy: 1, side: 'right' },
+      { buoy: 0, side: 'right' }
     ],
     gate: {
       sameStartFinish: true,
@@ -254,8 +321,12 @@ export function flipTrackLayout(track) {
   (track.buoys || []).forEach(buoy => {
     buoy.x = fx(buoy.x);
     if (buoy.type !== 'marker') {
-      buoy.rounding = normalizeRounding(buoy.rounding) === 'right' ? 'left' : 'right';
+      const side = normalizePassSide(buoy.rounding);
+      buoy.rounding = is360Pass(side) ? flipPassSide(side) : (side === 'right' ? 'left' : 'right');
     }
+  });
+  (track.visits || []).forEach(v => {
+    v.side = flipPassSide(v.side);
   });
   if (track.gate) {
     track.gate.start = flipSeg(track.gate.start);
@@ -421,6 +492,144 @@ export function getTrackPresetById(id) {
   return { ...saved, builtin: false, kind: saved.kind || 'track' };
 }
 
+export const TRACK_LIBRARY_KIND = 'efoil-track-library';
+export const LAST_RIDE_STORAGE_KEY = 'efoil_last_ride_id';
+
+export function countryGroupForPlace(place) {
+  const code = String(place?.countryCode || '').toUpperCase();
+  const name = String(place?.countryName || '').trim();
+  if (!code) return { code: '', name: 'No location', sort: '\uffff' };
+  return { code, name: name || code, sort: (name || code).toLocaleUpperCase('en') };
+}
+
+/** Lat/lng for a saved track: geo origin first, then stored place. */
+export function presetGeoLatLng(preset) {
+  if (hasGeo(preset?.track)) {
+    return { lat: preset.track.geo.origin.lat, lng: preset.track.geo.origin.lng };
+  }
+  const lat = Number(preset?.place?.lat);
+  const lng = Number(preset?.place?.lng);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng };
+  return null;
+}
+
+export function groupPresetsByCountry(presets) {
+  const groups = new Map();
+  (presets || []).forEach(p => {
+    const g = countryGroupForPlace(p.place);
+    const key = g.code || '__none__';
+    if (!groups.has(key)) groups.set(key, { ...g, presets: [] });
+    groups.get(key).presets.push(p);
+  });
+  const ordered = [...groups.values()].sort((a, b) => {
+    if (a.code === '' && b.code !== '') return 1;
+    if (b.code === '' && a.code !== '') return -1;
+    return a.sort.localeCompare(b.sort, 'en');
+  });
+  ordered.forEach(g => {
+    g.presets.sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''), 'en', { sensitivity: 'base' })
+    );
+  });
+  return ordered;
+}
+
+export function exportTrackLibrary(presets) {
+  return {
+    kind: TRACK_LIBRARY_KIND,
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    tracks: (presets || []).map(p => ({
+      id: p.id,
+      name: p.name,
+      savedAt: p.savedAt || null,
+      kind: 'track',
+      place: p.place || placeFromTrack(p.track) || null,
+      track: p.track
+    }))
+  };
+}
+
+function asLibraryEntry(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  if (obj.track && Array.isArray(obj.track.buoys)) {
+    return {
+      id: obj.id,
+      name: obj.name,
+      savedAt: obj.savedAt || null,
+      place: obj.place || null,
+      track: obj.track
+    };
+  }
+  if (Array.isArray(obj.buoys)) {
+    return { name: obj.name, place: null, track: obj };
+  }
+  return null;
+}
+
+/** Parse a single-track file or a multi-track library backup. */
+export function parseTrackImport(parsed) {
+  if (parsed && (parsed.kind === TRACK_LIBRARY_KIND || Array.isArray(parsed.tracks))) {
+    const entries = (parsed.tracks || []).map(asLibraryEntry).filter(Boolean);
+    return {
+      type: 'library',
+      entries,
+      errors: entries.length ? [] : ['No tracks found in this file']
+    };
+  }
+  if (Array.isArray(parsed)) {
+    const entries = parsed.map(asLibraryEntry).filter(Boolean);
+    return {
+      type: 'library',
+      entries,
+      errors: entries.length ? [] : ['No tracks found in this file']
+    };
+  }
+  const one = asLibraryEntry(parsed);
+  if (one) return { type: 'track', track: one.track, entry: one, errors: [] };
+  return { type: null, errors: ['Unrecognized JSON — expected a track or an efoil track library'] };
+}
+
+/** Merge imported library entries into local saved tracks. Never overwrites an existing id. */
+export function mergeImportedTrackPresets(entries) {
+  const list = loadUserTrackPresets();
+  const byId = new Map(list.map(p => [p.id, p]));
+  let imported = 0;
+  let skipped = 0;
+  const names = [];
+  for (const raw of entries || []) {
+    const src = raw.track || raw;
+    const { errors } = validateTrack(src);
+    if (errors.length) {
+      skipped += 1;
+      continue;
+    }
+    if (raw.id && byId.has(raw.id)) {
+      skipped += 1;
+      continue;
+    }
+    const name = (raw.name && String(raw.name).trim()) || src.name || 'Imported track';
+    const preset = {
+      id: newPresetId(),
+      name,
+      savedAt: raw.savedAt || new Date().toISOString(),
+      kind: 'track',
+      track: trackAsSavedTrack(src, name)
+    };
+    if (raw.place) preset.place = raw.place;
+    else {
+      const place = placeFromTrack(preset.track);
+      if (place) preset.place = place;
+    }
+    list.unshift(preset);
+    byId.set(preset.id, preset);
+    imported += 1;
+    names.push(name);
+  }
+  if (imported) saveUserTrackPresets(list);
+  return { imported, skipped, names };
+}
+
 /** Restore a saved track's map anchor from geo, or from stored/looked-up place. */
 export function geoFromSavedEntry(entry) {
   if (hasGeo(entry?.track)) {
@@ -507,26 +716,62 @@ export function validateTrack(track) {
   return { errors, warnings };
 }
 
+function closestPointOnSeg(px, py, seg) {
+  const dx = seg.x2 - seg.x1;
+  const dy = seg.y2 - seg.y1;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-12) return { x: seg.x1, y: seg.y1 };
+  let t = ((px - seg.x1) * dx + (py - seg.y1) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return { x: seg.x1 + t * dx, y: seg.y1 + t * dy };
+}
+
+function distBetween(track, a, b) {
+  const trackDist = Math.hypot(b.x - a.x, b.y - a.y);
+  const groundDist = hasGeo(track)
+    ? groundDistanceMeters(track.geo, a.x, a.y, b.x, b.y)
+    : trackDist;
+  return { trackM: trackDist, groundM: groundDist };
+}
+
 export function trackStats(track) {
+  ensureVisits(track);
   const turns = (track.buoys || []).filter(b => b.type !== 'marker' && Number.isFinite(b?.x));
+  const visits = track.visits || [];
   let lapLengthM = 0;
   let lapLengthGroundM = 0;
   const legDistances = [];
-  if (turns.length >= 2) {
-    for (let i = 0; i < turns.length; i++) {
-      const a = turns[i];
-      const b = turns[(i + 1) % turns.length];
-      const trackDist = Math.hypot(b.x - a.x, b.y - a.y);
-      lapLengthM += trackDist;
-      const groundDist = hasGeo(track)
-        ? groundDistanceMeters(track.geo, a.x, a.y, b.x, b.y)
-        : trackDist;
-      lapLengthGroundM += groundDist;
-      legDistances.push({ from: i + 1, to: (i + 1) % turns.length + 1, trackM: trackDist, groundM: groundDist });
-    }
+
+  const addLeg = (from, to, a, b) => {
+    if (!a || !b || !Number.isFinite(a.x) || !Number.isFinite(b.x)) return;
+    const d = distBetween(track, a, b);
+    lapLengthM += d.trackM;
+    lapLengthGroundM += d.groundM;
+    legDistances.push({ from, to, trackM: d.trackM, groundM: d.groundM });
+  };
+
+  const visitPts = visits.map(v => track.buoys[v.buoy]);
+  const startSeg = track.gate && isSegment(track.gate.start) ? track.gate.start : null;
+  const finishSeg = (track.gate && track.gate.sameStartFinish === false && isSegment(track.gate.finish))
+    ? track.gate.finish
+    : startSeg;
+
+  if (visitPts[0] && startSeg) {
+    const p = closestPointOnSeg(visitPts[0].x, visitPts[0].y, startSeg);
+    addLeg('Start', 1, p, visitPts[0]);
   }
+  for (let i = 0; i < visitPts.length - 1; i++) {
+    addLeg(i + 1, i + 2, visitPts[i], visitPts[i + 1]);
+  }
+  if (visitPts.length && finishSeg) {
+    const last = visitPts[visitPts.length - 1];
+    const p = closestPointOnSeg(last.x, last.y, finishSeg);
+    addLeg(visitPts.length, 'Finish', last, p);
+  }
+
   return {
     turnCount: turns.length,
+    visitCount: visits.length,
     markerCount: (track.buoys || []).length - turns.length,
     lapLengthM,
     lapLengthGroundM: hasGeo(track) ? lapLengthGroundM : lapLengthM,
@@ -546,15 +791,19 @@ export function normalizeTrack(track) {
   const sameStartFinish = gate.sameStartFinish !== false;
 
   let turnCounter = 0;
-  (track.buoys || []).forEach(b => {
+  (track.buoys || []).forEach((b, i) => {
     if (b.type === 'marker') {
       b.turnIndex = null;
+      b.aliases = [];
     } else {
       turnCounter += 1;
       b.turnIndex = turnCounter;
       b.rounding = normalizeRounding(b.rounding);
+      b.aliases = (track.visits || [])
+        .map((v, vi) => v.buoy === i ? vi + 1 : null)
+        .filter(n => n != null);
+      if (!b.aliases.length) b.aliases = [b.turnIndex];
     }
-    if (b.aliases == null) b.aliases = (b.turnIndex != null) ? [b.turnIndex] : [];
     if (b.apexRadius == null) b.apexRadius = 40;
   });
 
@@ -715,14 +964,22 @@ export function serializeTrack(track) {
     author: track.author || '',
     notes: track.notes || '',
     scale: track.scale || 4,
-    buoys: (track.buoys || []).map(b => {
+    buoys: (track.buoys || []).map((b, i) => {
       const o = { x: r1(b.x), y: r1(b.y) };
       if (b.type === 'marker') o.type = 'marker';
-      else o.rounding = normalizeRounding(b.rounding);
+      else {
+        const first = (track.visits || []).find(v => v.buoy === i);
+        const side = first ? normalizePassSide(first.side) : normalizeRounding(b.rounding);
+        o.rounding = is360Pass(side) ? 'right' : side;
+      }
       if (b.apexRadius != null && b.apexRadius !== 40) o.apexRadius = b.apexRadius;
       if (b.optimalSpeed != null) o.optimalSpeed = b.optimalSpeed;
       return o;
     }),
+    visits: (track.visits || []).map(v => ({
+      buoy: v.buoy,
+      side: normalizePassSide(v.side)
+    })),
     gate: track.gate ? {
       sameStartFinish: track.gate.sameStartFinish !== false,
       directional: !!track.gate.directional,

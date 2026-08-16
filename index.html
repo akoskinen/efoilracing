@@ -81,23 +81,130 @@
 	  display: block;
 	}
 
-	/* Track Selector */
-	#trackSelector {
+	#rideChrome {
 	  position: absolute;
-	  bottom: 20px;
-	  right: 20px;
-	  background: rgba(0, 0, 0, 0.7);
-	  padding: 10px;
-	  border-radius: 8px;
-	  font-size: 14px;
+	  top: 16px;
+	  left: 16px;
+	  z-index: 4;
 	}
 	#designerLink {
 	  display: inline-block;
 	  color: #7fd4ff;
 	  text-decoration: none;
-	  margin-bottom: 8px;
+	  font-size: 14px;
+	  text-shadow: 0 1px 3px #000;
 	}
-	#trackList label { display: block; margin: 3px 0; }
+	#atlasHint {
+	  margin-top: 6px;
+	  color: rgba(255,255,255,0.72);
+	  font-size: 12px;
+	  text-shadow: 0 1px 3px #000;
+	}
+
+	#atlasHud {
+	  position: absolute;
+	  inset: 0;
+	  z-index: 5;
+	  pointer-events: none;
+	  display: none;
+	}
+	body.atlas-open #atlasHud { display: block; }
+	#lapTimeDisplay, #speedDisplay, #bankAngleDisplay,
+	#lapHistory, #ghostInfo, #ghostControls {
+	  opacity: 1;
+	}
+	body.atlas-open #lapTimeDisplay,
+	body.atlas-open #speedDisplay,
+	body.atlas-open #bankAngleDisplay,
+	body.atlas-open #lapHistory,
+	body.atlas-open #ghostInfo,
+	body.atlas-open #ghostControls {
+	  opacity: 0;
+	  pointer-events: none;
+	}
+
+	#atlasCard, #atlasLayouts, #atlasEmpty, #atlasConfirm {
+	  pointer-events: auto;
+	  position: absolute;
+	  background: rgba(12, 18, 24, 0.78);
+	  backdrop-filter: blur(16px);
+	  -webkit-backdrop-filter: blur(16px);
+	  border: 1px solid rgba(255,255,255,0.14);
+	  border-radius: 14px;
+	  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+	}
+	#atlasCard, #atlasLayouts {
+	  left: 24px;
+	  top: 50%;
+	  transform: translateY(-50%);
+	  width: min(320px, calc(100vw - 48px));
+	  padding: 14px 16px;
+	  display: none;
+	}
+	#atlasCard.open, #atlasLayouts.open { display: block; }
+	.atlas-card-head {
+	  display: flex; align-items: center; gap: 8px;
+	  font-size: 16px; font-weight: 700; margin-bottom: 10px;
+	}
+	.atlas-flag { font-size: 22px; line-height: 1; }
+	.atlas-card-list { display: flex; flex-direction: column; gap: 2px; }
+	.atlas-card-list button {
+	  display: block; width: 100%; text-align: left;
+	  background: transparent; border: none; color: #fff;
+	  font-size: 14px; padding: 8px 10px; border-radius: 6px; cursor: pointer;
+	}
+	.atlas-card-list button:hover { background: rgba(255,255,255,0.08); }
+	#atlasLayoutsBtn {
+	  pointer-events: auto;
+	  position: absolute;
+	  left: 24px;
+	  bottom: 24px;
+	  background: rgba(12, 18, 24, 0.78);
+	  backdrop-filter: blur(12px);
+	  -webkit-backdrop-filter: blur(12px);
+	  border: 1px solid rgba(255,255,255,0.14);
+	  color: #fff;
+	  border-radius: 20px;
+	  padding: 8px 14px;
+	  font-size: 13px;
+	  cursor: pointer;
+	  display: none;
+	}
+	#atlasLayoutsBtn.show { display: inline-block; }
+	#atlasEmpty {
+	  left: 50%; top: 50%; transform: translate(-50%, -50%);
+	  width: min(360px, calc(100vw - 48px));
+	  padding: 20px 22px;
+	  text-align: center;
+	  display: none;
+	}
+	#atlasEmpty.open { display: block; }
+	#atlasEmpty p { margin: 0 0 12px; color: rgba(255,255,255,0.78); font-size: 14px; line-height: 1.45; }
+	#atlasEmpty a { color: #7fd4ff; }
+	#atlasConfirm {
+	  left: 50%; top: 50%; transform: translate(-50%, -50%);
+	  width: min(340px, calc(100vw - 48px));
+	  padding: 20px 22px;
+	  text-align: center;
+	  display: none;
+	  z-index: 10;
+	}
+	#atlasConfirm.open { display: block; }
+	#atlasConfirm p { margin: 0 0 14px; font-size: 14px; line-height: 1.45; }
+	#atlasConfirm .row { display: flex; gap: 8px; justify-content: center; }
+	#atlasConfirm button {
+	  border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px;
+	}
+	#atlasConfirmYes { background: #ffd54a; color: #1a1400; font-weight: 700; }
+	#atlasConfirmNo { background: rgba(255,255,255,0.1); color: #fff; }
+
+	@media (max-width: 700px) {
+	  #atlasCard, #atlasLayouts {
+	    left: 12px; right: 12px; width: auto;
+	    top: auto; bottom: 64px; transform: none;
+	  }
+	  #atlasLayoutsBtn { left: 12px; bottom: 16px; }
+	}
   </style>
 </head>
 <body>
@@ -137,26 +244,25 @@
 	<button id="clearGhostBtn">Clear Ghost</button>
   </div>
 
-  <!-- Track Selector -->
-  <div id="trackSelector">
+  <!-- Ride / atlas chrome -->
+  <div id="rideChrome">
 	<a id="designerLink" href="designer.html">Design a track &rarr;</a>
-	<div id="trackList">
-	<label>
-	  <input type="radio" name="track" value="speedTrack" checked>
-	  Speed Track
-	</label>
-	<label>
-	  <input type="radio" name="track" value="dubaiTrack">
-	  Dubai Track
-	</label>
-	<label>
-	  <input type="radio" name="track" value="sicily">
-	  Sicily Track
-	</label>
-	<label>
-	  <input type="radio" name="track" value="belgium">
-	  Belgium Track
-	</label>
+	<div id="atlasHint">T world map</div>
+  </div>
+  <div id="atlasHud">
+	<div id="atlasCard"></div>
+	<div id="atlasLayouts"></div>
+	<button type="button" id="atlasLayoutsBtn">Layouts</button>
+	<div id="atlasEmpty">
+	  <p>No saved tracks yet. Design a course, save it with a map location, then pick it from the world.</p>
+	  <a href="designer.html">Open the designer</a>
+	</div>
+  </div>
+  <div id="atlasConfirm">
+	<p>Leave this lap for the world map?</p>
+	<div class="row">
+	  <button type="button" id="atlasConfirmYes">Leave lap</button>
+	  <button type="button" id="atlasConfirmNo">Keep racing</button>
 	</div>
   </div>
 

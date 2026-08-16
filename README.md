@@ -28,9 +28,11 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | **Z** | Cycle zoom: race → **1 km** → **5 km** → race |
 | P | Toggle racing line |
 | G | Keep racing against the current ghost |
-| T | Next built-in track |
+| T | World atlas (Esc or T again returns) |
 
 **Race zoom** uses an edge dead-zone follow camera (the rider stays in frame without wrapping the world). **1 km** and **5 km** ease the rider to the center of the viewport — a quick **Z Z** (out then back) is also a smooth recenter.
+
+**T** opens a world map of saved geo tracks (country pins, then a dive to the venue). The flight always looks at the selected start, not a lerp from world-center, and race-level tiles crossfade in before the camera arrives. Mid-lap T pauses the race and music until you keep racing or leave. See [docs/MILESTONE-6.md](docs/MILESTONE-6.md).
 
 On geo tracks, satellite tiles **stream around the camera** and prefetch along heading/speed so panning and zoom-out should not flash empty water. Lower-zoom parents fill in while higher-zoom tiles load.
 
@@ -41,6 +43,7 @@ Import a **ghost JSON** or a **session CSV** (Choose File / drop). If a geo trac
 - Draw buoys, gates, and start heading on water or a blank grid.
 - **Satellite map**: search a venue, move/rotate/flip the layout, export GPX/KML/CSV.
 - **Test Ride** opens the simulator with the draft; **← Back to Designer** sits at the top of the track list.
+- **Export JSON** — current track, all tracks in one country, or a full library backup. Import merges backups into Saved tracks (existing ids skipped).
 - **Tracks** menu:
   - **Saved tracks** — full course including world location, grouped by country with flag emojis. Opening one jumps the map to that venue.
   - **Presets** — layout templates (Official Speedtrack 70 / 55 / 105 m). Applying a preset keeps the current map location.
@@ -51,7 +54,7 @@ Import a **ghost JSON** or a **session CSV** (Choose File / drop). If a geo trac
 | File | Role |
 |---|---|
 | `trackSchema.js` | Shared track JSON, geo math, Official Speedtrack, session CSV → ghost, saved-track library |
-| `engine.js` | Physics, follow camera, streamed tiles, ghosts, lap timing |
+| `engine.js` | Physics, follow camera, streamed tiles, world atlas, ghosts, lap timing |
 | `designer.js` / `designer.html` | Visual editor on Leaflet + Esri tiles |
 | `trackConfigs.js` | Built-in arcade tracks |
 
@@ -67,7 +70,9 @@ Motion is integrated in **track meters** (`km/h / 3.6`), then projected to pixel
 
 **4 — Briefing polish** — printable course-map poster from the designer.
 
-**5 — Geo racing camera & venue library** *(this drop)* — see [docs/MILESTONE-5.md](docs/MILESTONE-5.md) for what changed and why.
+**5 — Geo racing camera & venue library** — see [docs/MILESTONE-5.md](docs/MILESTONE-5.md).
+
+**6 — World atlas & smooth tile flights** *(this drop)* — **T** world map, look-at-locked 6 s dives, LOD crossfades, sequenced landing. See [docs/MILESTONE-6.md](docs/MILESTONE-6.md).
 
 ### Next (not built)
 

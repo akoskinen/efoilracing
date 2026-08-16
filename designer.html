@@ -190,6 +190,38 @@
     #qrContainer svg { width: 220px; height: 220px; }
     #shareClose { margin-top: 14px; }
 
+    /* ---------- Export JSON modal ---------- */
+    #exportModal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+      display: none; align-items: center; justify-content: center; z-index: 100;
+    }
+    #exportModal.open { display: flex; }
+    #exportBox {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      padding: 22px; width: 420px; max-width: 92vw; text-align: left;
+    }
+    #exportBox h2 { margin: 0 0 4px; font-size: 18px; text-align: center; }
+    #exportBox > p { margin: 0 0 14px; color: var(--muted); font-size: 13px; text-align: center; }
+    #exportChoices { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    #exportChoices label {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--panel-2); cursor: pointer;
+    }
+    #exportChoices label:hover { background: rgba(255,255,255,0.06); }
+    #exportChoices label.is-disabled { opacity: 0.45; pointer-events: none; }
+    #exportChoices input { margin-top: 3px; accent-color: var(--accent); }
+    #exportChoices .choice-copy { flex: 1; min-width: 0; }
+    #exportChoices .choice-title { font-weight: 600; }
+    #exportChoices .choice-note { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    #exportCountryWrap { display: none; margin-top: 8px; }
+    #exportCountryWrap.show { display: block; }
+    #exportCountry {
+      width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      border-radius: 6px; padding: 7px 9px; font-size: 13px;
+    }
+    #exportActions { display: flex; gap: 8px; justify-content: center; }
+
     /* ---------- Briefing modal ---------- */
     #briefingModal {
       position: fixed; inset: 0; background: rgba(0,0,0,0.65);
@@ -242,7 +274,7 @@
     <div id="canvasWrap">
       <div id="geoMap"></div>
       <canvas id="designCanvas"></canvas>
-      <div id="hint">Scroll to zoom &middot; drag empty water to pan &middot; drag buoys to move them &middot; P racing line &middot; D distances &middot; Delete removes the selected buoy</div>
+      <div id="hint">Scroll to zoom &middot; drag empty water to pan &middot; P racing line &middot; D distances &middot; Add a turn, then click a buoy &middot; Delete removes the selected turn</div>
     </div>
 
     <div id="sidebar">
@@ -303,8 +335,14 @@
       </div>
 
       <div class="section">
-        <h3>Buoys (rounding order)</h3>
+        <h3>Course order</h3>
         <div id="buoyList"></div>
+        <div class="row" style="margin-top:6px;">
+          <button id="btnAddVisit" class="secondary" style="width:100%;" title="Click a turn buoy to add another pass">+ Add a turn</button>
+        </div>
+        <div style="color:var(--muted); font-size:12px; line-height:1.45; margin-top:6px;">
+          Yellow numbers are visit order. The same buoy can appear more than once. 360° Left/Right is a full wrap.
+        </div>
       </div>
 
       <div class="section" id="buoyProps" style="display:none;">
@@ -316,9 +354,11 @@
           </select>
         </div>
         <div class="row" id="rowRounding"><label title="Which side of the buoy the rider passes">Pass side</label>
-          <select id="buoyRounding" title="Right = path on the buoy's right; Left = path on the buoy's left">
+          <select id="buoyRounding" title="Right = path on the buoy's right; Left = path on the buoy's left; 360° = full wrap in that direction">
             <option value="left">Left</option>
             <option value="right">Right</option>
+            <option value="360-left">360° Left</option>
+            <option value="360-right">360° Right</option>
           </select>
         </div>
         <div class="row" id="rowOptimalSpeed"><label>Optimal speed km/h</label><input id="buoyOptimalSpeed" type="number" min="5" max="60" step="1"></div>
@@ -348,6 +388,43 @@
     <div id="briefingActions">
       <button id="briefingDownload" class="primary">Download PNG</button>
       <button id="briefingClose" class="secondary">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="exportModal">
+  <div id="exportBox">
+    <h2>Export JSON</h2>
+    <p>Share a track file, or a backup the community can import into Saved tracks.</p>
+    <div id="exportChoices">
+      <label>
+        <input type="radio" name="exportScope" value="current" checked>
+        <span class="choice-copy">
+          <span class="choice-title">Current track</span>
+          <span class="choice-note">Opens in the editor when someone imports it</span>
+        </span>
+      </label>
+      <label id="exportCountryChoice">
+        <input type="radio" name="exportScope" value="country">
+        <span class="choice-copy">
+          <span class="choice-title">Pick country</span>
+          <span class="choice-note">All saved tracks in one country</span>
+          <span id="exportCountryWrap">
+            <select id="exportCountry"></select>
+          </span>
+        </span>
+      </label>
+      <label id="exportAllChoice">
+        <input type="radio" name="exportScope" value="all">
+        <span class="choice-copy">
+          <span class="choice-title">All tracks</span>
+          <span class="choice-note">Full Saved tracks backup</span>
+        </span>
+      </label>
+    </div>
+    <div id="exportActions">
+      <button id="exportDownload" class="primary">Download</button>
+      <button id="exportClose" class="secondary">Cancel</button>
     </div>
   </div>
 </div>

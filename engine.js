@@ -6,18 +6,18 @@
 // All Rights reserved, contact by email for any inquiries.
 ////////////////////////////////////////////////////////////
 
-import { trackConfigs } from "./trackConfigs.js";
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
 import { HighScoreManager } from './highscores.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
-  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost
+  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost,
+  createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
+  countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
 } from './trackSchema.js';
 
-// Convert declarative track configs into the runtime shape the engine uses.
-Object.keys(trackConfigs).forEach(k => normalizeTrack(trackConfigs[k]));
+const trackConfigs = {};
 
 // --- Canvas and Context ---
 const canvas = document.getElementById('gameCanvas');
@@ -26,8 +26,10 @@ const followCam = { tx: 0, ty: 0, scale: 1 };
 let zoomStopIndex = 0;
 
 // --- Track Setup Variables ---
-let currentTrackKey = 'speedTrack'; // default track key
-let currentTrack    = trackConfigs[currentTrackKey]; // default track object
+let currentTrackKey = 'official';
+let currentTrack = createOfficialSpeedtrack();
+normalizeTrack(currentTrack);
+trackConfigs.official = currentTrack;
 
 let buoys = [];
 let timingLine = { x1: 0, y1: 0, x2: 0, y2: 0 };
@@ -36,8 +38,7 @@ let gates = { start: null, finish: null, parallelStart: null, parallelFinish: nu
 // We'll store the offset used to center the track on the canvas.
 let trackOffset = { x: 0, y: 0 };
 
-// Gather all track keys from trackConfigs, e.g. ["speedTrack", "dubaiTrack", ...]
-const availableTrackKeys = Object.keys(trackConfigs);
+const availableTrackKeys = ['official'];
 
 // --- Additional Variables for Turn Apex Logic ---
 let turnStates = {};
@@ -724,6 +725,28 @@ const AudioManager = {
         };
         
         fade();
+    },
+
+    pauseMusic() {
+        const music = this.sounds.music;
+        if (!music || music.paused) return;
+        try { music.pause(); } catch (error) {
+            console.warn('Error pausing music:', error);
+        }
+    },
+
+    resumeMusic() {
+        const music = this.sounds.music;
+        if (!music || !music.paused) return;
+        music.play().catch(err => console.warn('Failed to resume music:', err));
+    },
+
+    pauseWind() {
+        const wind = this.sounds.wind;
+        if (!wind || wind.paused) return;
+        try { wind.pause(); } catch (error) {
+            console.warn('Error pausing wind:', error);
+        }
     }
 };
 
@@ -739,42 +762,35 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 
-// --- Track Selector Handling (Radio Buttons) ---
-function onTrackRadioChange() {
-  if (this.checked) {
-    currentTrackKey = this.value;
-    currentTrack    = trackConfigs[currentTrackKey];
-    window.currentTrackKey = currentTrackKey;
-    computeBuoys();
+function savedTrackKey(id) {
+  return 'saved_' + id;
+}
 
-    // Reset player state
-    speed = 0;
-    bankAngleDeg = 0;
-    wakeTrail = [];
-    lapActive = false;
-    validCrossing = false;
-
-    placePlayerAtStart();
-
-    // Reset or clear the ideal line
-    idealLineData = null;
-    showIdealLine = false;
-    ghostWakeTrail = [];
-
-    // Update current ghost for the new track
-    currentGhost = ghostDataMap.get(currentTrackKey) || null;
-    updateGhostStats();
-    updateRacingLineToggleVisibility();
-
-    // Update URL to reflect track change (without reloading page)
-    const url = new URL(window.location);
-    url.searchParams.set('track', currentTrackKey);
-    url.searchParams.delete('data');
-    window.history.replaceState({}, '', url);
+function rememberLastRide(key) {
+  if (key && key.startsWith('saved_')) {
+    localStorage.setItem(LAST_RIDE_STORAGE_KEY, key.slice('saved_'.length));
   }
 }
-document.querySelectorAll('input[name="track"]')
-  .forEach(radio => radio.addEventListener('change', onTrackRadioChange));
+
+function trackFromPreset(preset) {
+  const track = JSON.parse(JSON.stringify(preset.track));
+  track.name = preset.name || track.name;
+  const geo = geoFromSavedEntry(preset);
+  if (geo) {
+    const rotationDeg = Number(track.geo?.rotationDeg);
+    track.geo = {
+      origin: { ...geo.origin },
+      rotationDeg: Number.isFinite(rotationDeg) ? rotationDeg : (geo.rotationDeg || 0)
+    };
+  }
+  return track;
+}
+
+function hydrateSavedTracks() {
+  loadUserTrackPresets().forEach(p => {
+    registerCustomTrack(savedTrackKey(p.id), trackFromPreset(p));
+  });
+}
 
 // --- Custom Track Registration (from designer / share links) ---
 function registerCustomTrack(key, track) {
@@ -783,29 +799,34 @@ function registerCustomTrack(key, track) {
   trackConfigs[key] = track;
   installTrackRacingGhosts(key, track);
   if (!availableTrackKeys.includes(key)) availableTrackKeys.push(key);
+}
 
-  // Add a radio button for the custom track
-  const list = document.getElementById('trackList') || document.getElementById('trackSelector');
-  if (list && !document.querySelector(`input[name="track"][value="${key}"]`)) {
-    const label = document.createElement('label');
-    const input = document.createElement('input');
-    input.type = 'radio';
-    input.name = 'track';
-    input.value = key;
-    input.addEventListener('change', onTrackRadioChange);
-    label.appendChild(input);
-    label.appendChild(document.createTextNode(' ' + track.name));
-    list.appendChild(label);
+function resetRideForNewTrack() {
+  speed = 0;
+  bankAngleDeg = 0;
+  wakeTrail = [];
+  lapActive = false;
+  validCrossing = false;
+  idealLineData = null;
+  showIdealLine = false;
+  ghostWakeTrail = [];
+  zoomStopIndex = 0;
+  const music = AudioManager.sounds.music;
+  if (music && !music.paused) {
+    music.pause();
+    music.currentTime = 0;
   }
 }
 
 function selectTrack(key) {
+  if (!trackConfigs[key]) return;
   currentTrackKey = key;
   currentTrack = trackConfigs[key];
   window.currentTrackKey = key;
-  const radio = document.querySelector(`input[name="track"][value="${key}"]`);
-  if (radio) radio.checked = true;
+  rememberLastRide(key);
+  resetRideForNewTrack();
   computeBuoys();
+  placePlayerAtStart();
   if (currentTrack?.racingLines?.some(l => l.ghost?.frames?.length)) {
     if (!keepCurrentGhost || !currentGhost) {
       applyChaseGhostFromTrack(currentTrack);
@@ -817,7 +838,858 @@ function selectTrack(key) {
   }
   updateGhostStats();
   updateRacingLineToggleVisibility();
+  if (key !== 'custom') {
+    const url = new URL(window.location);
+    url.searchParams.set('track', currentTrackKey);
+    url.searchParams.delete('data');
+    window.history.replaceState({}, '', url);
+  }
 }
+
+// --- World atlas (T) ---
+const ATLAS_WORLD = { lat: 22, lng: 12, zoom: 2.35 };
+const ATLAS_TRANSITION_MS = 6000;
+const ATLAS_ZOOM_STOPS = [3, 6, 9, 12, 15, 17, 18];
+const ATLAS_LAYER_TILE_MAX = 96;
+const ATLAS_ZOOM_ARRIVE = 0.62;
+const RIDE_REVEAL_MS = 500;
+const INTRO_STAGGER_MS = 100;
+const INTRO_LINE_MS = 5000;
+let rideOverlay = 1;
+let rideOverlayFrom = 1;
+let rideOverlayTo = 1;
+let rideOverlayT0 = 0;
+let rideOverlayPending = false;
+let rideConcealDone = null;
+let rideIntroActive = false;
+let rideIntroPending = false;
+let rideIntroT0 = 0;
+const rideHudEls = [
+  document.getElementById('lapTimeDisplay'),
+  document.getElementById('speedDisplay'),
+  document.getElementById('bankAngleDisplay'),
+  document.getElementById('lapHistory'),
+  document.getElementById('ghostInfo'),
+  document.getElementById('ghostControls')
+].filter(Boolean);
+const ATLAS_DOT_R = 9;
+const ATLAS_HIT_R = 22;
+const atlasEls = {
+  hud: document.getElementById('atlasHud'),
+  card: document.getElementById('atlasCard'),
+  layouts: document.getElementById('atlasLayouts'),
+  layoutsBtn: document.getElementById('atlasLayoutsBtn'),
+  empty: document.getElementById('atlasEmpty'),
+  confirm: document.getElementById('atlasConfirm'),
+  hint: document.getElementById('atlasHint')
+};
+const atlas = {
+  open: false,
+  view: { ...ATLAS_WORLD },
+  anim: null,
+  pins: [],
+  layouts: [],
+  selectedKey: null,
+  hoverKey: null,
+  openedAt: 0,
+  usedTouch: false,
+  ignoreClickUntil: 0,
+  concealing: false,
+  pendingFrom: null
+};
+
+function escAtlas(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function atlasEaseInOut(t) {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  return t < 0.5
+    ? 4 * t * t * t
+    : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function atlasLogLerp(a, b, t) {
+  const a0 = Math.max(0.5, a);
+  const b0 = Math.max(0.5, b);
+  return Math.exp(Math.log(a0) + (Math.log(b0) - Math.log(a0)) * t);
+}
+
+function atlasScreenCenter() {
+  return { x: canvas.width / 2, y: canvas.height / 2 };
+}
+
+/** Camera so `lat/lng` sits at a screen pixel — zoom is always toward that point. */
+function atlasViewLookingAt(lat, lng, zoom, screenX, screenY) {
+  const world = latLngToWorldPx(lat, lng, zoom);
+  const cx = world.x - (screenX - canvas.width / 2);
+  const cy = world.y - (screenY - canvas.height / 2);
+  const ll = worldPxToLatLng(cx, cy, zoom);
+  return { lat: ll.lat, lng: ll.lng, zoom };
+}
+
+function atlasEffectiveZoomForTrack(track) {
+  if (!hasGeo(track) || !canvas.width || !canvas.height) return 12.5;
+  const geo = track.geo;
+  const latRad = geo.origin.lat * Math.PI / 180;
+  let z = Math.round(Math.log2(156543.03392 * Math.cos(latRad) / 0.25));
+  z = Math.max(12, Math.min(19, z));
+  const m0 = latLngToWorldPx(geo.origin.lat, geo.origin.lng, z);
+  const ll1 = metersToLatLng(geo, 100, 0);
+  const m1 = latLngToWorldPx(ll1.lat, ll1.lng, z);
+  const mercPerM = Math.hypot(m1.x - m0.x, m1.y - m0.y) / 100;
+  const targetPpm = Math.min(canvas.width, canvas.height) / RACE_VIEW_METERS;
+  const scale = mercPerM > 0 ? targetPpm / mercPerM : 1;
+  return z + Math.log2(Math.max(0.02, scale));
+}
+
+/** Lat/lng the ride camera frames: start position, not the geo origin pin. */
+function atlasRideLookLatLng(track) {
+  if (!hasGeo(track)) return null;
+  const sp = track.startPosition;
+  if (sp && Number.isFinite(sp.x) && Number.isFinite(sp.y)) {
+    return metersToLatLng(track.geo, sp.x, sp.y);
+  }
+  return { lat: track.geo.origin.lat, lng: track.geo.origin.lng };
+}
+
+function cameraLookLatLng() {
+  if (hasGeo(currentTrack) && geoCanvasTransform && canvas.width) {
+    const s = followCam.scale || 1;
+    const wx = (canvas.width / 2 - followCam.tx) / s;
+    const wy = (canvas.height / 2 - followCam.ty) / s;
+    const merc = canvasToMercator(wx, wy);
+    return worldPxToLatLng(merc.x, merc.y, geoCanvasTransform.zoom);
+  }
+  if (hasGeo(currentTrack)) return atlasRideLookLatLng(currentTrack);
+  return { lat: ATLAS_WORLD.lat, lng: ATLAS_WORLD.lng };
+}
+
+function atlasZoomProgress(u, fromZoom, toZoom) {
+  const goingIn = toZoom > fromZoom + 0.2;
+  if (!goingIn) return atlasEaseInOut(u);
+  const zU = Math.min(1, u / ATLAS_ZOOM_ARRIVE);
+  return atlasEaseInOut(zU);
+}
+
+function startAtlasFocusAnim({ lat, lng, fromZoom, toZoom, fromScreen, toScreen, onDone }) {
+  atlas.anim = {
+    lat,
+    lng,
+    fromZoom,
+    toZoom,
+    fromScreen: { x: fromScreen.x, y: fromScreen.y },
+    toScreen: { x: toScreen.x, y: toScreen.y },
+    t0: performance.now(),
+    dur: ATLAS_TRANSITION_MS,
+    onDone: onDone || null
+  };
+  prefetchAtlasStops(lat, lng, fromZoom, toZoom);
+}
+
+function cameraLatLngZoom() {
+  if (hasGeo(currentTrack) && geoCanvasTransform) {
+    const look = cameraLookLatLng();
+    const scale = (geoCanvasTransform.scale || 1) * (followCam.scale || 1);
+    return {
+      lat: look.lat,
+      lng: look.lng,
+      zoom: geoCanvasTransform.zoom + Math.log2(Math.max(0.02, scale))
+    };
+  }
+  return { ...ATLAS_WORLD };
+}
+
+function buildAtlasPins() {
+  const presets = loadUserTrackPresets();
+  const byKey = new Map();
+  const layouts = [];
+  for (const p of presets) {
+    const ll = presetGeoLatLng(p);
+    if (!ll) {
+      layouts.push(p);
+      continue;
+    }
+    const g = countryGroupForPlace(p.place);
+    const key = g.code || '__geo__';
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        key,
+        code: g.code,
+        name: g.code ? g.name : 'On the map',
+        flag: countryFlagEmoji(g.code),
+        presets: [],
+        lat: 0,
+        lng: 0
+      });
+    }
+    const bucket = byKey.get(key);
+    bucket.presets.push(p);
+    bucket.lat += ll.lat;
+    bucket.lng += ll.lng;
+  }
+  const pins = [...byKey.values()].map(b => ({
+    ...b,
+    lat: b.lat / b.presets.length,
+    lng: b.lng / b.presets.length
+  }));
+  pins.sort((a, b) => a.lng - b.lng);
+  return { pins, layouts };
+}
+
+function currentAtlasCountryKey() {
+  if (!currentTrackKey.startsWith('saved_')) return null;
+  const id = currentTrackKey.slice('saved_'.length);
+  const pin = atlas.pins.find(p => p.presets.some(t => t.id === id));
+  return pin ? pin.key : null;
+}
+
+function atlasLatLngToScreen(lat, lng, view) {
+  const world = latLngToWorldPx(lat, lng, view.zoom);
+  const c = latLngToWorldPx(view.lat, view.lng, view.zoom);
+  return {
+    x: canvas.width / 2 + (world.x - c.x),
+    y: canvas.height / 2 + (world.y - c.y)
+  };
+}
+
+function pinOpacity(pin, index, now) {
+  const t = (now - atlas.openedAt) / 1000;
+  const start = ATLAS_TRANSITION_MS / 1000 * 0.72 + index * 0.08;
+  let a = Math.max(0, Math.min(1, (t - start) / 0.55));
+  if (atlas.anim && atlas.anim.toZoom > atlas.anim.fromZoom + 0.2) {
+    const u = Math.min(1, (now - atlas.anim.t0) / atlas.anim.dur);
+    a *= 1 - atlasZoomProgress(u, atlas.anim.fromZoom, atlas.anim.toZoom);
+  }
+  return a;
+}
+
+function hitAtlasPin(sx, sy) {
+  let best = null;
+  let bestD = ATLAS_HIT_R;
+  atlas.pins.forEach((pin, i) => {
+    if (pinOpacity(pin, i, performance.now()) < 0.4) return;
+    const p = atlasLatLngToScreen(pin.lat, pin.lng, atlas.view);
+    const d = Math.hypot(p.x - sx, p.y - sy);
+    if (d < bestD) {
+      best = pin;
+      bestD = d;
+    }
+  });
+  return best;
+}
+
+function closeAtlasCards() {
+  atlas.selectedKey = null;
+  atlasEls.card.classList.remove('open');
+  atlasEls.layouts.classList.remove('open');
+  atlasEls.card.innerHTML = '';
+  atlasEls.layouts.innerHTML = '';
+}
+
+function renderAtlasTrackList(host, title, flag, presets) {
+  const tracks = presets.map(p =>
+    `<button type="button" data-track-id="${escAtlas(p.id)}">${escAtlas(p.name || 'Untitled')}</button>`
+  ).join('');
+  host.innerHTML =
+    `<div class="atlas-card-head">` +
+    (flag ? `<span class="atlas-flag">${flag}</span>` : '') +
+    `<span>${escAtlas(title)}</span></div>` +
+    `<div class="atlas-card-list">${tracks}</div>`;
+  host.classList.add('open');
+}
+
+function showAtlasCountry(pin) {
+  atlas.selectedKey = pin.key;
+  atlasEls.layouts.classList.remove('open');
+  renderAtlasTrackList(atlasEls.card, pin.name, pin.flag, pin.presets);
+}
+
+function showAtlasLayouts() {
+  atlas.selectedKey = '__layouts__';
+  atlasEls.card.classList.remove('open');
+  renderAtlasTrackList(atlasEls.layouts, 'Layouts', '', atlas.layouts);
+}
+
+function refreshAtlasChrome() {
+  const { pins, layouts } = buildAtlasPins();
+  atlas.pins = pins;
+  atlas.layouts = layouts;
+  const empty = !pins.length && !layouts.length;
+  atlasEls.empty.classList.toggle('open', empty);
+  atlasEls.layoutsBtn.classList.toggle('show', layouts.length > 0 && !empty);
+  if (atlas.selectedKey === '__layouts__') {
+    if (layouts.length) showAtlasLayouts();
+    else closeAtlasCards();
+  } else if (atlas.selectedKey) {
+    const pin = pins.find(p => p.key === atlas.selectedKey);
+    if (pin) showAtlasCountry(pin);
+    else closeAtlasCards();
+  }
+}
+
+function setRideHudOpacity(a) {
+  const v = Math.max(0, Math.min(1, a));
+  const events = v >= 0.99 ? '' : 'none';
+  rideHudEls.forEach(el => {
+    el.style.opacity = String(v);
+    el.style.pointerEvents = events;
+  });
+}
+
+function rideOverlayEase(t) {
+  return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+function startRideReveal() {
+  rideConcealDone = null;
+  rideOverlay = 1;
+  rideOverlayFrom = 1;
+  rideOverlayTo = 1;
+  rideOverlayT0 = 0;
+  rideOverlayPending = false;
+  rideIntroActive = true;
+  rideIntroPending = true;
+  rideIntroT0 = 0;
+  setRideHudOpacity(0);
+}
+
+function startRideConceal(onDone) {
+  rideIntroActive = false;
+  rideIntroPending = false;
+  rideIntroT0 = 0;
+  rideConcealDone = onDone || null;
+  if (rideOverlay <= 0.001) {
+    rideOverlay = 0;
+    rideOverlayFrom = 0;
+    rideOverlayTo = 0;
+    rideOverlayT0 = 0;
+    rideOverlayPending = false;
+    setRideHudOpacity(0);
+    if (onDone) onDone();
+    return;
+  }
+  rideOverlayFrom = rideOverlay;
+  rideOverlayTo = 0;
+  rideOverlayPending = true;
+  rideOverlayT0 = 0;
+}
+
+function stepRideOverlay(now) {
+  if (rideOverlayPending) {
+    rideOverlayPending = false;
+    rideOverlayT0 = now;
+    rideOverlay = rideOverlayFrom;
+    setRideHudOpacity(rideOverlay);
+    return rideOverlay;
+  }
+  if (!rideOverlayT0) {
+    rideOverlay = rideOverlayTo;
+    return rideOverlay;
+  }
+  const t = (now - rideOverlayT0) / RIDE_REVEAL_MS;
+  if (t <= 0) {
+    rideOverlay = rideOverlayFrom;
+    setRideHudOpacity(rideOverlay);
+    return rideOverlay;
+  }
+  if (t >= 1) {
+    rideOverlay = rideOverlayTo;
+    rideOverlayT0 = 0;
+    setRideHudOpacity(rideOverlay);
+    const done = rideConcealDone;
+    rideConcealDone = null;
+    if (done) done();
+    return rideOverlay;
+  }
+  const e = rideOverlayEase(t);
+  rideOverlay = rideOverlayFrom + (rideOverlayTo - rideOverlayFrom) * e;
+  setRideHudOpacity(rideOverlay);
+  return rideOverlay;
+}
+
+function stepRideIntro(now) {
+  if (!rideIntroActive) return;
+  if (rideIntroPending) {
+    rideIntroPending = false;
+    rideIntroT0 = now;
+  }
+}
+
+function introFadeAt(ageMs, startMs) {
+  const u = Math.max(0, Math.min(1, (ageMs - startMs) / RIDE_REVEAL_MS));
+  return rideOverlayEase(u);
+}
+
+function turnBuoysInOrder() {
+  return buoys
+    .filter(b => b.turnIndex != null)
+    .sort((a, b) => a.turnIndex - b.turnIndex);
+}
+
+function introFocusRacingLine() {
+  if (!showRacingLines) return null;
+  const vis = (currentTrack?.racingLines || []).filter(
+    l => l.visible !== false && l.points?.length >= 2
+  );
+  if (!vis.length) return null;
+  return vis.find(l => l.chase) || vis[0];
+}
+
+function getRideIntro(now) {
+  if (!rideIntroActive) return null;
+  if (!rideIntroT0) {
+    return {
+      gates: 0,
+      turnFade: () => 0,
+      turns: [],
+      markers: 0,
+      rider: 0,
+      lineProg: 0,
+      line: null,
+      hud: 0
+    };
+  }
+  const age = now - rideIntroT0;
+  const turns = turnBuoysInOrder();
+  const gates = introFadeAt(age, 0);
+  const turnStart = RIDE_REVEAL_MS;
+  const turnFade = i => introFadeAt(age, turnStart + i * INTRO_STAGGER_MS);
+  const lastTurnStart = turns.length
+    ? turnStart + (turns.length - 1) * INTRO_STAGGER_MS
+    : 0;
+  const markersStart = turns.length ? lastTurnStart + RIDE_REVEAL_MS : turnStart;
+  const markers = introFadeAt(age, markersStart);
+  const rider = markers;
+  const hud = markers;
+  const line = introFocusRacingLine();
+  const lineStart = markersStart + RIDE_REVEAL_MS;
+  const lineProg = line
+    ? Math.max(0, Math.min(1, (age - lineStart) / INTRO_LINE_MS))
+    : 1;
+  if (gates >= 1 && markers >= 1 && lineProg >= 1) {
+    rideIntroActive = false;
+    setRideHudOpacity(1);
+    return null;
+  }
+  return { gates, turnFade, turns, markers, rider, hud, line, lineProg };
+}
+
+function setAtlasOpen(on) {
+  atlas.open = on;
+  document.body.classList.toggle('atlas-open', on);
+  canvas.style.cursor = '';
+  if (atlasEls.hint) atlasEls.hint.textContent = on ? 'T or Esc to return' : 'T world map';
+  if (on) {
+    setRideHudOpacity(0);
+    return;
+  }
+  atlas.anim = null;
+  atlas.hoverKey = null;
+  atlas.concealing = false;
+  closeAtlasCards();
+  atlasEls.empty.classList.remove('open');
+  atlasEls.layoutsBtn.classList.remove('show');
+  atlasEls.confirm.classList.remove('open');
+  startRideReveal();
+  if (rideSimPaused && !lapActive) resumeRideSim({ music: false });
+}
+
+function pauseRideSim() {
+  if (!rideSimPaused) {
+    rideSimPaused = true;
+    rideSimPauseAt = performance.now();
+  }
+  AudioManager.pauseMusic();
+  AudioManager.pauseWind();
+}
+
+function resumeRideSim({ music = true } = {}) {
+  if (rideSimPaused && rideSimPauseAt) {
+    const held = performance.now() - rideSimPauseAt;
+    if (lapActive && lapStartTime) lapStartTime += held;
+    if (ghostPreviewStart) ghostPreviewStart += held;
+  }
+  rideSimPaused = false;
+  rideSimPauseAt = 0;
+  if (music) AudioManager.resumeMusic();
+}
+
+function showAtlasConfirm() {
+  atlasEls.confirm.classList.add('open');
+  pauseRideSim();
+}
+
+function hideAtlasConfirm() {
+  atlasEls.confirm.classList.remove('open');
+}
+
+function keepRacingFromAtlasConfirm() {
+  hideAtlasConfirm();
+  resumeRideSim({ music: true });
+}
+
+function beginAtlasWorldFlight() {
+  refreshAtlasChrome();
+  const from = atlas.pendingFrom || cameraLatLngZoom();
+  atlas.pendingFrom = null;
+  const center = atlasScreenCenter();
+  atlas.view = { ...from };
+  atlas.openedAt = performance.now();
+  startAtlasFocusAnim({
+    lat: from.lat,
+    lng: from.lng,
+    fromZoom: from.zoom,
+    toZoom: ATLAS_WORLD.zoom,
+    fromScreen: center,
+    toScreen: center
+  });
+  setAtlasOpen(true);
+}
+
+function openAtlas({ immediate } = {}) {
+  if (atlas.open || atlas.concealing) return;
+  hideAtlasConfirm();
+  if (immediate) {
+    refreshAtlasChrome();
+    atlas.view = { ...ATLAS_WORLD };
+    atlas.openedAt = performance.now() - ATLAS_TRANSITION_MS;
+    rideOverlay = 0;
+    rideOverlayFrom = 0;
+    rideOverlayTo = 0;
+    rideOverlayT0 = 0;
+    rideConcealDone = null;
+    setRideHudOpacity(0);
+    setAtlasOpen(true);
+    return;
+  }
+  atlas.pendingFrom = cameraLatLngZoom();
+  atlas.concealing = true;
+  startRideConceal(() => {
+    atlas.concealing = false;
+    beginAtlasWorldFlight();
+  });
+}
+
+function closeAtlas() {
+  if (!atlas.open) return;
+  hideAtlasConfirm();
+  closeAtlasCards();
+  const to = cameraLatLngZoom();
+  if (!hasGeo(currentTrack)) {
+    setAtlasOpen(false);
+    return;
+  }
+  const pin = atlasLatLngToScreen(to.lat, to.lng, atlas.view);
+  startAtlasFocusAnim({
+    lat: to.lat,
+    lng: to.lng,
+    fromZoom: atlas.view.zoom,
+    toZoom: to.zoom,
+    fromScreen: pin,
+    toScreen: atlasScreenCenter(),
+    onDone: () => setAtlasOpen(false)
+  });
+}
+
+function requestAtlas() {
+  if (atlas.concealing) return;
+  if (atlas.open) {
+    closeAtlas();
+    return;
+  }
+  if (lapActive) {
+    showAtlasConfirm();
+    return;
+  }
+  openAtlas();
+}
+
+function diveToPreset(preset) {
+  if (!preset?.track) return;
+  const key = savedTrackKey(preset.id);
+  registerCustomTrack(key, trackFromPreset(preset));
+  closeAtlasCards();
+  const track = trackConfigs[key] || trackFromPreset(preset);
+  const look = atlasRideLookLatLng(track) || presetGeoLatLng(preset);
+  if (!look) {
+    selectTrack(key);
+    setAtlasOpen(false);
+    return;
+  }
+  const fromScreen = atlasLatLngToScreen(look.lat, look.lng, atlas.view);
+  startAtlasFocusAnim({
+    lat: look.lat,
+    lng: look.lng,
+    fromZoom: atlas.view.zoom,
+    toZoom: atlasEffectiveZoomForTrack(track),
+    fromScreen,
+    toScreen: atlasScreenCenter(),
+    onDone: () => {
+      selectTrack(key);
+      setAtlasOpen(false);
+    }
+  });
+}
+
+function stepAtlas(now) {
+  if (!atlas.anim) return;
+  const u = Math.min(1, (now - atlas.anim.t0) / atlas.anim.dur);
+  const e = atlasZoomProgress(u, atlas.anim.fromZoom, atlas.anim.toZoom);
+  const zoom = atlasLogLerp(atlas.anim.fromZoom, atlas.anim.toZoom, e);
+  const sx = atlas.anim.fromScreen.x + (atlas.anim.toScreen.x - atlas.anim.fromScreen.x) * e;
+  const sy = atlas.anim.fromScreen.y + (atlas.anim.toScreen.y - atlas.anim.fromScreen.y) * e;
+  atlas.view = atlasViewLookingAt(atlas.anim.lat, atlas.anim.lng, zoom, sx, sy);
+  if (u >= 1) {
+    const done = atlas.anim.onDone;
+    atlas.anim = null;
+    if (done) done();
+  }
+}
+
+function atlasLayerRect(lat, lng, viewZoom, z) {
+  const scale = Math.pow(2, viewZoom - z);
+  const tileSize = 256 * scale;
+  const center = latLngToWorldPx(lat, lng, z);
+  const ox = canvas.width / 2 - center.x * scale;
+  const oy = canvas.height / 2 - center.y * scale;
+  const n = 1 << z;
+  return {
+    z, scale, tileSize, ox, oy, n,
+    tx0: Math.floor(-ox / tileSize) - 1,
+    ty0: Math.max(0, Math.floor(-oy / tileSize) - 1),
+    tx1: Math.ceil((canvas.width - ox) / tileSize) + 1,
+    ty1: Math.min(n - 1, Math.ceil((canvas.height - oy) / tileSize) + 1)
+  };
+}
+
+function atlasLayerTileCount(r) {
+  return (r.tx1 - r.tx0 + 1) * (r.ty1 - r.ty0 + 1);
+}
+
+function atlasStopsInRange(fromZoom, toZoom) {
+  const lo = Math.min(fromZoom, toZoom) - 1;
+  const hi = Math.max(fromZoom, toZoom) + 1;
+  const stops = ATLAS_ZOOM_STOPS.filter(z => z >= lo && z <= hi);
+  const dest = Math.max(fromZoom, toZoom);
+  if (dest >= 11) {
+    const z0 = Math.max(12, Math.min(19, Math.floor(dest)));
+    const z1 = Math.max(12, Math.min(19, Math.round(dest)));
+    [z0, z1].forEach(z => {
+      if (!stops.includes(z)) stops.push(z);
+    });
+  }
+  stops.sort((a, b) => a - b);
+  return stops;
+}
+
+function forEachAtlasLayerTile(r, fn) {
+  for (let ty = r.ty0; ty <= r.ty1; ty++) {
+    for (let tx = r.tx0; tx <= r.tx1; tx++) {
+      fn(wrapTileX(tx, r.z), ty, tx);
+    }
+  }
+}
+
+function prefetchAtlasStops(lat, lng, fromZoom, toZoom) {
+  const stops = atlasStopsInRange(fromZoom, toZoom).slice();
+  stops.sort((a, b) => {
+    const pa = Math.min(Math.abs(a - fromZoom), Math.abs(a - toZoom) * 0.35);
+    const pb = Math.min(Math.abs(b - fromZoom), Math.abs(b - toZoom) * 0.35);
+    return pa - pb;
+  });
+  stops.forEach((z, i) => {
+    const r = atlasLayerRect(lat, lng, z, z);
+    forEachAtlasLayerTile(r, (wx, ty) => {
+      requestGeoTile(z, wx, ty, i);
+    });
+  });
+}
+
+function atlasKeepKeys(lat, lng, fromZoom, toZoom) {
+  const keep = new Set();
+  atlasStopsInRange(fromZoom, toZoom).forEach(z => {
+    const r = atlasLayerRect(lat, lng, z, z);
+    forEachAtlasLayerTile(r, (wx, ty) => {
+      keep.add(geoTileKey(z, wx, ty));
+    });
+  });
+  return keep;
+}
+
+function drawAtlasLayer(r, alpha, keep) {
+  if (alpha <= 0.02) return false;
+  let drawn = false;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  forEachAtlasLayerTile(r, (wx, ty, tx) => {
+    requestGeoTile(r.z, wx, ty, 0);
+    const key = geoTileKey(r.z, wx, ty);
+    keep.add(key);
+    const e = geoTileCache.get(key);
+    if (e?.status === 'ok' && e.img) {
+      ctx.drawImage(
+        e.img,
+        r.ox + tx * r.tileSize,
+        r.oy + ty * r.tileSize,
+        r.tileSize,
+        r.tileSize
+      );
+      drawn = true;
+    }
+  });
+  ctx.restore();
+  return drawn;
+}
+
+function drawWorldTiles(lat, lng, zoom) {
+  const fromZ = atlas.anim ? atlas.anim.fromZoom : zoom;
+  const toZ = atlas.anim ? atlas.anim.toZoom : zoom;
+  const stops = atlasStopsInRange(fromZ, toZ);
+  const keep = atlasKeepKeys(
+    atlas.anim ? atlas.anim.lat : lat,
+    atlas.anim ? atlas.anim.lng : lng,
+    fromZ,
+    toZ
+  );
+
+  let base = stops[0] ?? ATLAS_ZOOM_STOPS[0];
+  for (const z of stops) {
+    if (z > zoom + 0.05) break;
+    const r = atlasLayerRect(lat, lng, zoom, z);
+    if (atlasLayerTileCount(r) <= ATLAS_LAYER_TILE_MAX) base = z;
+  }
+  const next = stops.find(z => z > base) ?? base;
+
+  const baseRect = atlasLayerRect(lat, lng, zoom, base);
+  let drawn = drawAtlasLayer(baseRect, 1, keep);
+
+  if (next !== base) {
+    const nextRect = atlasLayerRect(lat, lng, zoom, next);
+    if (atlasLayerTileCount(nextRect) <= ATLAS_LAYER_TILE_MAX) {
+      const span = Math.max(0.35, next - base);
+      const t = Math.max(0, Math.min(1, (zoom - base + span * 0.15) / span));
+      const fade = t * t * (3 - 2 * t);
+      if (drawAtlasLayer(nextRect, fade, keep)) drawn = true;
+    }
+  }
+
+  pruneGeoTileCache(keep);
+  updateGeoAttribution(drawn);
+}
+
+function drawAtlas() {
+  const v = atlas.view;
+  ctx.fillStyle = '#0c1a22';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  drawWorldTiles(v.lat, v.lng, v.zoom);
+  ctx.fillStyle = 'rgba(6,14,20,0.32)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const now = performance.now();
+  const currentKey = currentAtlasCountryKey();
+  atlas.pins.forEach((pin, i) => {
+    const a = pinOpacity(pin, i, now);
+    if (a <= 0) return;
+    const p = atlasLatLngToScreen(pin.lat, pin.lng, v);
+    const selected = atlas.selectedKey === pin.key || atlas.hoverKey === pin.key;
+    const pulse = pin.key === currentKey
+      ? 1 + 0.18 * Math.sin(now / 280)
+      : 1;
+    const r = ATLAS_DOT_R * pulse * (selected ? 1.15 : 1);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r + 6, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 213, 74, 0.22)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffd54a';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function atlasPointerPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+    y: (e.clientY - rect.top) * (canvas.height / rect.height)
+  };
+}
+
+function onAtlasMove(e) {
+  if (!atlas.open || atlas.usedTouch) return;
+  const { x, y } = atlasPointerPos(e);
+  const pin = hitAtlasPin(x, y);
+  atlas.hoverKey = pin ? pin.key : null;
+  canvas.style.cursor = pin ? 'pointer' : '';
+  if (pin && atlas.selectedKey !== pin.key) showAtlasCountry(pin);
+}
+
+function onAtlasClick(e) {
+  if (!atlas.open) return;
+  if (atlasEls.confirm.classList.contains('open')) return;
+  if (performance.now() < (atlas.ignoreClickUntil || 0)) return;
+  const { x, y } = atlasPointerPos(e);
+  const pin = hitAtlasPin(x, y);
+  if (pin) {
+    if (pin.presets.length === 1) {
+      diveToPreset(pin.presets[0]);
+      return;
+    }
+    showAtlasCountry(pin);
+    return;
+  }
+  if (atlas.selectedKey) {
+    closeAtlasCards();
+    return;
+  }
+  closeAtlas();
+}
+
+function onAtlasTap(clientX, clientY) {
+  atlas.usedTouch = true;
+  atlas.ignoreClickUntil = performance.now() + 600;
+  onAtlasClick({ clientX, clientY });
+}
+
+if (atlasEls.layoutsBtn) {
+  atlasEls.layoutsBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (atlas.selectedKey === '__layouts__') closeAtlasCards();
+    else showAtlasLayouts();
+  });
+}
+if (atlasEls.card) {
+  atlasEls.card.addEventListener('click', e => {
+    const btn = e.target.closest('[data-track-id]');
+    if (btn) diveToPreset(loadUserTrackPresets().find(p => p.id === btn.getAttribute('data-track-id')));
+  });
+}
+if (atlasEls.layouts) {
+  atlasEls.layouts.addEventListener('click', e => {
+    const btn = e.target.closest('[data-track-id]');
+    if (btn) diveToPreset(loadUserTrackPresets().find(p => p.id === btn.getAttribute('data-track-id')));
+  });
+}
+document.getElementById('atlasConfirmYes')?.addEventListener('click', () => {
+  hideAtlasConfirm();
+  lapActive = false;
+  validCrossing = false;
+  openAtlas();
+});
+document.getElementById('atlasConfirmNo')?.addEventListener('click', keepRacingFromAtlasConfirm);
+
+canvas.addEventListener('mousemove', onAtlasMove);
+canvas.addEventListener('click', onAtlasClick);
 
 function trackHasRacingLines(track) {
   return (track?.racingLines || []).some(l => l.visible !== false && l.points?.length >= 2);
@@ -974,6 +1846,12 @@ function parseURLParams() {
     if (raw) {
       try {
         const track = JSON.parse(raw);
+        if (!hasGeo(track)) {
+          const match = loadUserTrackPresets().find(p =>
+            (p.name || p.track?.name) === track.name);
+          const geo = match ? geoFromSavedEntry(match) : null;
+          if (geo) track.geo = geo;
+        }
         registerCustomTrack('draft', track);
         addDesignerLink('\u2190 Back to Designer', 'designer.html');
         selectTrack('draft');
@@ -983,8 +1861,10 @@ function parseURLParams() {
     }
   } else if (params.has('track')) {
     const trackFromURL = params.get('track');
-    if (availableTrackKeys.includes(trackFromURL)) {
+    if (trackConfigs[trackFromURL]) {
       selectTrack(trackFromURL);
+    } else if (trackConfigs[savedTrackKey(trackFromURL)]) {
+      selectTrack(savedTrackKey(trackFromURL));
     }
   }
 
@@ -1243,6 +2123,14 @@ let oldPos  = { x: 0, y: 0 };
 let lapActive      = false;
 let lapStartTime   = 0;
 let currentLapTime = 0;
+let validCrossing  = false;
+let lastCrossingTime = 0;
+let rideSimPaused = false;
+let rideSimPauseAt = 0;
+let prevPos = { x: 0, y: 0 };
+let wakeTrail = [];
+let showIdealLine = false;
+let idealLineData = null;
 
 // Change laps array to a Map to store laps per track
 let lapsMap = new Map(); // Store laps for each track
@@ -1478,12 +2366,11 @@ function drawZoomHint() {
   ctx.textAlign = 'center';
   ctx.font = '13px sans-serif';
   if (now < zoomHintUntil) {
-    const a = Math.min(1, (zoomHintUntil - now) / 400);
-    ctx.globalAlpha = a;
+    ctx.globalAlpha *= Math.min(1, (zoomHintUntil - now) / 400);
     ctx.fillStyle = '#fff';
     ctx.fillText(`${zoomStopTitle(zoomStopIndex)}  (Z)`, canvas.width / 2, 42);
   } else {
-    ctx.globalAlpha = 0.45;
+    ctx.globalAlpha *= 0.45;
     ctx.fillStyle = '#fff';
     ctx.fillText(nextZoomHint(), canvas.width / 2, 22);
   }
@@ -1592,11 +2479,12 @@ function ghostFrameHeadingToScreen(frame) {
 let ghostPreviewStart = 0;
 
 function ghostPlaybackTimeSec() {
+  const now = (rideSimPaused && rideSimPauseAt) ? rideSimPauseAt : performance.now();
   if (lapActive && lapStartTime) {
-    return (performance.now() - lapStartTime) / 1000;
+    return (now - lapStartTime) / 1000;
   }
   if (ghostPreviewStart) {
-    return (performance.now() - ghostPreviewStart) / 1000;
+    return (now - ghostPreviewStart) / 1000;
   }
   return 0;
 }
@@ -1656,7 +2544,7 @@ function drawGhostFrame() {
 function drawGhost(x, y, heading) {
   withWorldMarker(x, y, () => {
     ctx.rotate(heading - Math.PI / 2);
-    ctx.globalAlpha = 0.25;
+    ctx.globalAlpha *= 0.25;
     ctx.beginPath();
     ctx.moveTo(0, 12.5);
     ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
@@ -1664,7 +2552,6 @@ function drawGhost(x, y, heading) {
     ctx.closePath();
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
-    ctx.globalAlpha = 1.0;
   });
 }
 
@@ -1860,6 +2747,23 @@ document.addEventListener('keydown', function(e) {
   if (gamePaused || (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
     return;
   }
+
+  if (atlasEls.confirm.classList.contains('open')) {
+    if (e.key === 'Escape') keepRacingFromAtlasConfirm();
+    return;
+  }
+
+  if (atlas.open) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (atlas.selectedKey) closeAtlasCards();
+      else closeAtlas();
+    } else if (e.key === 't' || e.key === 'T') {
+      e.preventDefault();
+      closeAtlas();
+    }
+    return;
+  }
   
   switch(e.key) {
     case 'ArrowUp':
@@ -1901,9 +2805,9 @@ document.addEventListener('keydown', function(e) {
     setKeepCurrentGhost(!keepCurrentGhost);
   }
 
-  // Press 'T' to cycle to the next track
+  // Press 'T' for the world atlas
   if (e.key === 't' || e.key === 'T') {
-    cycleToNextTrack();
+    requestAtlas();
   }
 
   // Cycle Z: race zoom → 1 km → 5 km → race zoom
@@ -1941,55 +2845,6 @@ document.addEventListener('keyup', function(e) {
   // ...
 });
 
-// Update cycleToNextTrack to handle track-specific telemetry
-function cycleToNextTrack() {
-  const currentIndex = availableTrackKeys.indexOf(currentTrackKey);
-  if (currentIndex === -1) return;
-
-  // Move to the next track, wrap around if needed
-  const nextIndex = (currentIndex + 1) % availableTrackKeys.length;
-  currentTrackKey = availableTrackKeys[nextIndex];
-  currentTrack = trackConfigs[currentTrackKey];
-  
-  // Update global reference for highscore system
-  window.currentTrackKey = currentTrackKey;
-
-  // Update the radio buttons to reflect the new track
-  document.querySelectorAll('input[name="track"]').forEach(radio => {
-    radio.checked = (radio.value === currentTrackKey);
-  });
-    
-  // Reset music if it was playing
-  if (!AudioManager.sounds.music.paused) {
-    AudioManager.sounds.music.pause();
-    AudioManager.sounds.music.currentTime = 0;
-  }
-  
-  computeBuoys();
-
-  // Position player at the track's start position (or legacy default)
-  placePlayerAtStart();
-  
-  // Reset for lap timing system
-  lapActive = false;
-  validCrossing = false;
-  
-  // Clear or reload ideal line if you want
-  idealLineData = null;
-  showIdealLine = false;
-  ghostWakeTrail = [];
-    
-  // Update current ghost for the new track
-  currentGhost = ghostDataMap.get(currentTrackKey) || null;
-  if (!keepCurrentGhost) {
-    lastValidGhost = null;
-  }
-
-  // Update ghost stats for the new track
-  updateGhostStats();
-  updateRacingLineToggleVisibility();
-}
-
 // --- Intersection & Timing Line Crossing ---
 function orientation(p, q, r){
   return (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
@@ -2007,9 +2862,6 @@ function linesIntersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2){
   }
   return false;
 }
-
-// Add this near the top with other state variables
-let prevPos = { x: 0, y: 0 };
 
 // Modify the checkGateCrossing function to be simpler and more reliable
 function checkGateCrossing(oldPos, newPos) {
@@ -2269,7 +3121,6 @@ function update(dt){
 }
 
 // --- Wake Trail and Drawing ---
-let wakeTrail = [];
 function totalTrailDistance(trail){
   let d = 0;
   for (let i = 1; i < trail.length; i++){
@@ -2324,35 +3175,28 @@ function drawBuoyDot(x, y, isTurn) {
   });
 }
 
-function drawTrack() {
-  // Draw main track buoys (bottom track)
-  buoys.forEach(b => {
-    const isTurn = b.turnIndex != null;
-    drawBuoyDot(b.x, b.y, isTurn);
+function drawOneBuoy(b) {
+  const isTurn = b.turnIndex != null;
+  drawBuoyDot(b.x, b.y, isTurn);
+  if (isTurn) {
+    withWorldMarker(b.x, b.y, () => {
+      ctx.font = '12px sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(String(b.turnIndex), 11, -8);
+    });
+  }
+  if (currentTrack.parallelTrack) {
+    const parallel = trackMetersToPixel(
+      pixelToTrackMeters(b.x, b.y).x,
+      pixelToTrackMeters(b.x, b.y).y + currentTrack.trackSeparation
+    );
+    drawBuoyDot(parallel.x, parallel.y, isTurn);
+  }
+}
 
-    // Label turn buoys with their number
-    if (isTurn) {
-      withWorldMarker(b.x, b.y, () => {
-        ctx.font = '12px sans-serif';
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        ctx.fillText(String(b.turnIndex), 11, -8);
-      });
-    }
-
-    // Draw parallel track buoys (top track) if enabled
-    if (currentTrack.parallelTrack) {
-      const parallel = trackMetersToPixel(
-        pixelToTrackMeters(b.x, b.y).x,
-        pixelToTrackMeters(b.x, b.y).y + currentTrack.trackSeparation
-      );
-      drawBuoyDot(parallel.x, parallel.y, isTurn);
-    }
-  });
-
-  // Draw timing system
+function drawTimingLines() {
   const gateW = worldMarkerScale();
   if (currentTrack.useGates) {
-    // Draw main track gates (bottom)
     ctx.beginPath();
     ctx.moveTo(gates.start.x1, gates.start.y1);
     ctx.lineTo(gates.start.x2, gates.start.y2);
@@ -2369,7 +3213,6 @@ function drawTrack() {
       ctx.stroke();
     }
 
-    // Draw parallel track gates (top) if enabled
     if (currentTrack.parallelTrack) {
       ctx.beginPath();
       ctx.moveTo(gates.parallelStart.x1, gates.parallelStart.y1);
@@ -2388,7 +3231,6 @@ function drawTrack() {
       }
     }
   } else {
-    // Draw timing line
     ctx.beginPath();
     ctx.moveTo(timingLine.x1, timingLine.y1);
     ctx.lineTo(timingLine.x2, timingLine.y2);
@@ -2398,11 +3240,36 @@ function drawTrack() {
   }
 }
 
+function withDrawAlpha(a, fn) {
+  if (a <= 0.001) return;
+  ctx.save();
+  ctx.globalAlpha *= a;
+  fn();
+  ctx.restore();
+}
+
+function drawTrack(intro) {
+  if (intro) {
+    withDrawAlpha(intro.gates, drawTimingLines);
+    (intro.turns || []).forEach((b, i) => {
+      withDrawAlpha(intro.turnFade(i), () => drawOneBuoy(b));
+    });
+    buoys.forEach(b => {
+      if (b.turnIndex != null) return;
+      withDrawAlpha(intro.markers, () => drawOneBuoy(b));
+    });
+    return;
+  }
+
+  buoys.forEach(b => drawOneBuoy(b));
+  drawTimingLines();
+}
+
 function drawTelemetry() {
   ctx.save();
     ctx.font = '14px monospace';
   ctx.fillStyle = '#fff';
-  let x = 20, y = 50;
+  let x = 20, y = 88;
     
     ctx.fillText(`${currentTrack.name} Telemetry:`, x, y);
   y += 20;
@@ -2450,10 +3317,6 @@ function drawRacer() {
 }
 
 // --- Ideal Line Toggle ---
-let showIdealLine = false;
-let idealLineData = null;
-
-// Load the ideal line for the current track
 function loadIdealLineForCurrentTrack() {
   const trackKey = currentTrackKey;
   
@@ -2461,7 +3324,7 @@ function loadIdealLineForCurrentTrack() {
   idealLineData = null;
   
   // If this track doesn't have an ideal line, don't try to load it
-  if (!trackConfigs[trackKey].hasIdealLine) {
+  if (!trackConfigs[trackKey]?.hasIdealLine) {
       return;
     }
   
@@ -2500,6 +3363,38 @@ function loadIdealLineForCurrentTrack() {
     });
 }
 
+function polylineLength(pts) {
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  }
+  return total;
+}
+
+function strokePolylineUntil(pts, untilLen) {
+  if (pts.length < 2 || untilLen <= 0) return 0;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const len = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    if (acc + len <= untilLen) {
+      ctx.lineTo(pts[i].x, pts[i].y);
+      acc += len;
+      continue;
+    }
+    const t = (untilLen - acc) / (len || 1);
+    ctx.lineTo(
+      pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t,
+      pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t
+    );
+    acc = untilLen;
+    break;
+  }
+  ctx.stroke();
+  return acc;
+}
+
 function drawRacingLineArrowhead(x, y, angle, size) {
   withWorldMarker(x, y, () => {
     ctx.rotate(angle);
@@ -2512,47 +3407,60 @@ function drawRacingLineArrowhead(x, y, angle, size) {
   });
 }
 
-function drawTrackRacingLines() {
+function drawOneRacingLine(line, color, progress) {
+  const pts = line.points.map(p => trackMetersToPixel(p.x, p.y));
+  if (pts.length < 2) return;
+  const total = polylineLength(pts);
+  const until = total * Math.max(0, Math.min(1, progress));
+  if (until <= 0.5) return;
+
+  const m = worldMarkerScale();
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha *= 0.75;
+  ctx.lineWidth = 3 * m;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  strokePolylineUntil(pts, until);
+  ctx.restore();
+  ctx.save();
+  ctx.fillStyle = color;
+
+  let distAlong = 0;
+  const arrowSpacing = 48 * m;
+  for (let j = 1; j < pts.length; j++) {
+    const a = pts[j - 1];
+    const b = pts[j];
+    const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    let d = arrowSpacing - (distAlong % arrowSpacing);
+    while (d <= segLen && distAlong + d <= until) {
+      const t = d / segLen;
+      drawRacingLineArrowhead(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, ang, 8);
+      d += arrowSpacing;
+    }
+    distAlong += segLen;
+    if (distAlong >= until) break;
+  }
+  ctx.restore();
+}
+
+function drawTrackRacingLines(intro) {
   if (!showRacingLines) return;
   const lines = currentTrack?.racingLines;
   if (!lines?.length) return;
 
+  if (intro) {
+    if (!intro.line || intro.lineProg <= 0) return;
+    const color = intro.line.color || RACING_LINE_COLORS[0];
+    drawOneRacingLine(intro.line, color, intro.lineProg);
+    return;
+  }
+
   lines.forEach((line, i) => {
     if (line.visible === false || !line.points || line.points.length < 2) return;
     const color = line.color || RACING_LINE_COLORS[i % RACING_LINE_COLORS.length];
-    const pts = line.points.map(p => trackMetersToPixel(p.x, p.y));
-
-    const m = worldMarkerScale();
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.75;
-    ctx.lineWidth = 3 * m;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    pts.forEach((p, idx) => {
-      if (idx === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-    });
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = color;
-
-    let distAlong = 0;
-    const arrowSpacing = 48 * m;
-    for (let j = 1; j < pts.length; j++) {
-      const a = pts[j - 1];
-      const b = pts[j];
-      const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-      const ang = Math.atan2(b.y - a.y, b.x - a.x);
-      let d = arrowSpacing - (distAlong % arrowSpacing);
-      while (d <= segLen) {
-        const t = d / segLen;
-        drawRacingLineArrowhead(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, ang, 8);
-        d += arrowSpacing;
-      }
-      distAlong += segLen;
-    }
-    ctx.restore();
+    drawOneRacingLine(line, color, 1);
   });
 }
 
@@ -2598,16 +3506,30 @@ function gameLoop(timestamp) {
   let dt = (timestamp - lastTimestamp) / 1000;
   lastTimestamp = timestamp;
   if (dt > 0.1) dt = 0.1;
-  
-  // Update player wake trail
-  wakeTrail.push({ x: pos.x, y: pos.y });
-  const targetWakeLength = (speed / maxSpeed) * 200;
-  while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
-    wakeTrail.shift();
+
+  const settleReveal = (rideOverlayPending && rideOverlayTo > rideOverlayFrom) || rideIntroPending;
+  stepRideOverlay(timestamp);
+  stepRideIntro(timestamp);
+
+  if (atlas.open) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    stepAtlas(timestamp);
+    if (atlas.open) {
+      drawAtlas();
+      requestAnimationFrame(gameLoop);
+      return;
+    }
   }
-  
-  // Update game state
-  update(dt);
+
+  if (!settleReveal && !rideSimPaused) {
+    wakeTrail.push({ x: pos.x, y: pos.y });
+    const targetWakeLength = (speed / maxSpeed) * 200;
+    while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
+      wakeTrail.shift();
+    }
+    update(dt);
+  }
 
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -2617,24 +3539,54 @@ function gameLoop(timestamp) {
   const camS = followCam.scale || 1;
   ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
   drawGeoTiles();
+  const intro = getRideIntro(timestamp);
+  if (intro) setRideHudOpacity(intro.hud);
+  const reveal = rideOverlay;
   if (geoCanvasTransform) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = 'rgba(6,14,20,0.42)';
+    const overlayA = intro ? intro.gates : reveal;
+    const overlay = 0.32 + 0.10 * overlayA;
+    ctx.fillStyle = `rgba(6,14,20,${overlay})`;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
   }
 
-  drawIdealLine();
-  drawTrackRacingLines();
-  drawTrack();
-  drawWake();
-  drawGhostFrame();
-  drawRacer();
+  if (intro) {
+    ctx.save();
+    drawTrackRacingLines(intro);
+    drawTrack(intro);
+    withDrawAlpha(intro.rider, () => {
+      drawWake();
+      drawGhostFrame();
+      drawRacer();
+    });
+    ctx.restore();
 
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  drawTouchZones();
-  drawTelemetry();
-  drawZoomHint();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    withDrawAlpha(intro.hud, () => {
+      drawTouchZones();
+      drawTelemetry();
+      drawZoomHint();
+    });
+  } else if (reveal > 0.001) {
+    ctx.save();
+    ctx.globalAlpha *= reveal;
+    drawIdealLine();
+    drawTrackRacingLines();
+    drawTrack();
+    drawWake();
+    drawGhostFrame();
+    drawRacer();
+    ctx.restore();
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.save();
+    ctx.globalAlpha *= reveal;
+    drawTouchZones();
+    drawTelemetry();
+    drawZoomHint();
+    ctx.restore();
+  }
 
   requestAnimationFrame(gameLoop);
 }
@@ -2856,17 +3808,36 @@ clearGhostBtn.addEventListener('click', () => {
   alert('Ghost data cleared.');
 });
 
-// Call this on initial load
-updateGhostStats();
+function applyDefaultSavedTrack() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('data') || params.has('track')) return;
+  const last = localStorage.getItem(LAST_RIDE_STORAGE_KEY);
+  if (last && trackConfigs[savedTrackKey(last)]) {
+    selectTrack(savedTrackKey(last));
+    return;
+  }
+  const presets = loadUserTrackPresets();
+  const geo = presets.find(p => presetGeoLatLng(p));
+  const pick = geo || presets[0];
+  if (pick) selectTrack(savedTrackKey(pick.id));
+}
 
 // --- Initialization ---
+hydrateSavedTracks();
 resizeCanvas();
 
 // Parse URL parameters before initializing player position
 parseURLParams();
+applyDefaultSavedTrack();
 
 // Initialize player position (track start position if defined, else default)
 placePlayerAtStart();
+updateGhostStats();
+
+const bootParams = new URLSearchParams(window.location.search);
+if (!loadUserTrackPresets().length && !bootParams.has('data') && bootParams.get('track') !== 'draft') {
+  openAtlas({ immediate: true });
+}
 
 // Add drag and drop event handlers
 const ghostControlsDiv = document.getElementById('ghostControls');
@@ -3004,6 +3975,14 @@ const touchControls = {
     handleTouch(e) {
         e.preventDefault();
 
+        if (atlas.open) {
+            if (e.type === 'touchstart' && e.touches.length === 1) {
+                const t = e.touches[0];
+                onAtlasTap(t.clientX, t.clientY);
+            }
+            return;
+        }
+
         if (e.touches.length >= 2) {
             Object.keys(this.activeZones).forEach(zone => {
                 this.activeZones[zone] = false;
@@ -3090,8 +4069,7 @@ function drawTouchZones() {
     const midX = width / 2;
 
     ctx.save();
-    // Reduce opacity to 0.01
-    ctx.globalAlpha = 0.01;
+    ctx.globalAlpha *= 0.01;
     
     // Left side zones
     ctx.beginPath();
@@ -3131,10 +4109,6 @@ function drawTouchZones() {
 
     ctx.restore();
 }
-
-// Add these at the top with other state variables
-let validCrossing = false;
-let lastCrossingTime = 0;
 
 function handleLapTiming() {
     const crossing = checkGateCrossing(prevPos, pos);

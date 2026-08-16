@@ -18,7 +18,9 @@ import {
   BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
   deleteUserTrackPreset, getTrackPresetById,
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
-  geoFromSavedEntry, placeFromTrack, normalizeRounding, migrateTrackSchema
+  geoFromSavedEntry, placeFromTrack, normalizeRounding, migrateTrackSchema,
+  ensureVisits, normalizePassSide, passSideLabel, physicalBuoyNumber,
+  groupPresetsByCountry, exportTrackLibrary, parseTrackImport, mergeImportedTrackPresets
 } from './trackSchema.js';
 
 // --- DOM ---
@@ -45,6 +47,7 @@ const els = {
   buoyX: document.getElementById('buoyX'),
   buoyY: document.getElementById('buoyY'),
   btnDeleteBuoy: document.getElementById('btnDeleteBuoy'),
+  btnAddVisit: document.getElementById('btnAddVisit'),
   stats: document.getElementById('stats'),
   warnings: document.getElementById('warnings'),
   toolGateFinish: document.getElementById('toolGateFinish'),
@@ -121,6 +124,7 @@ const snap = v => Math.round(v * 10) / 10;
 // --- Track defaults / loading ---
 function withDefaults(t) {
   migrateTrackSchema(t);
+  ensureVisits(t);
   (t.buoys || []).forEach(b => {
     if (b.type !== 'marker') b.type = 'turn';
     if (b.type === 'turn') b.rounding = normalizeRounding(b.rounding);
@@ -462,16 +466,14 @@ function drawRacingLines() {
 
 function drawBuoys() {
   let turnNo = 0;
+  const selBuoy = selectedBuoyIndex();
   track.buoys.forEach((b, i) => {
     const p = mToPx(b.x, b.y);
     const isTurn = b.type !== 'marker';
     if (isTurn) turnNo += 1;
     const r = isTurn ? 10 : 5;
 
-    // Pass side: arc on the left or right of the buoy, relative to inbound heading.
-    if (isTurn && b.rounding) {
-      drawPassSideHint(i, p, r + 8, normalizeRounding(b.rounding));
-    }
+    if (isTurn) drawVisitHints(i, p, r);
 
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
@@ -491,7 +493,7 @@ function drawBuoys() {
       ctx.textBaseline = 'alphabetic';
     }
 
-    if (selection && selection.kind === 'buoy' && selection.index === i) {
+    if (selBuoy === i) {
       ctx.beginPath();
       ctx.arc(p.x, p.y, r + 5, 0, Math.PI * 2);
       ctx.strokeStyle = '#36b6e5';
@@ -503,7 +505,33 @@ function drawBuoys() {
   });
 }
 
+function selectedBuoyIndex() {
+  if (selection?.kind === 'buoy') return selection.index;
+  if (selection?.kind === 'visit') {
+    const v = track.visits?.[selection.index];
+    return v ? v.buoy : null;
+  }
+  return null;
+}
+
+function inboundHeadingForVisit(visitIndex) {
+  const v = track.visits[visitIndex];
+  const b = track.buoys[v.buoy];
+  let from = null;
+  if (visitIndex > 0) {
+    from = track.buoys[track.visits[visitIndex - 1].buoy];
+  } else if (track.startPosition && Number.isFinite(track.startPosition.x)) {
+    from = track.startPosition;
+  } else if (track.visits.length > 1) {
+    from = track.buoys[track.visits[track.visits.length - 1].buoy];
+  }
+  if (!from || (from.x === b.x && from.y === b.y)) return Math.PI / 2;
+  return Math.atan2(b.y - from.y, b.x - from.x);
+}
+
 function inboundHeadingRad(buoyIndex) {
+  const at = (track.visits || []).findIndex(v => v.buoy === buoyIndex);
+  if (at >= 0) return inboundHeadingForVisit(at);
   const b = track.buoys[buoyIndex];
   let from = null;
   for (let j = buoyIndex - 1; j >= 0; j--) {
@@ -515,55 +543,41 @@ function inboundHeadingRad(buoyIndex) {
   if (!from && track.startPosition && Number.isFinite(track.startPosition.x)) {
     from = track.startPosition;
   }
-  if (!from) {
-    for (let j = track.buoys.length - 1; j > buoyIndex; j--) {
-      if (track.buoys[j].type !== 'marker') {
-        from = track.buoys[j];
-        break;
-      }
-    }
-  }
   if (!from) return Math.PI / 2;
   return Math.atan2(b.y - from.y, b.x - from.x);
 }
 
-// Pass-side hint: Right = rider goes on the buoy's right, Left = on its left.
-// Arc on that side of the buoy; triangle continues the curve (tangent), not the inbound heading.
-function drawPassSideHint(buoyIndex, p, r, side) {
-  const b = track.buoys[buoyIndex];
-  const h = inboundHeadingRad(buoyIndex);
-  const ahead = mToPx(b.x + Math.cos(h) * 8, b.y + Math.sin(h) * 8);
-  const fwd = Math.atan2(ahead.y - p.y, ahead.x - p.x);
-  const sideSign = side === 'right' ? 1 : -1;
-  const midA = fwd + sideSign * Math.PI / 2;
-  const sweep = Math.PI * 0.85;
-  const a0 = midA - sweep / 2;
-  const a1 = midA + sweep / 2;
+function drawVisitHints(buoyIndex, p, r) {
+  const at = (track.visits || [])
+    .map((v, i) => ({ v, i }))
+    .filter(x => x.v.buoy === buoyIndex);
+  if (!at.length) {
+    const side = track.buoys[buoyIndex].rounding;
+    if (side) drawPassSideHint(buoyIndex, p, r + 8, normalizePassSide(side), '#fff', null);
+    return;
+  }
+  at.forEach((entry, pass) => {
+    const radius = r + 8 + pass * 10;
+    const color = pass === 0 ? '#fff' : '#ffe44d';
+    drawPassSideHint(buoyIndex, p, radius, normalizePassSide(entry.v.side), color, entry.i);
+  });
+}
 
-  const fx = Math.cos(fwd);
-  const fy = Math.sin(fwd);
-  const align = ang => Math.cos(ang) * fx + Math.sin(ang) * fy;
-  const options = [
-    { a: a1, tang: a1 + Math.PI / 2 }, // clockwise off a1
-    { a: a0, tang: a0 - Math.PI / 2 }  // counter-clockwise off a0
-  ];
-  const tip = options[align(options[0].tang) >= align(options[1].tang) ? 0 : 1];
+function strokeShortArc(p, r, a0, a1, tip, color) {
   const size = 6.5;
-  const trim = Math.min(sweep * 0.2, (size * 0.85) / r);
-
+  const trim = (size * 0.85) / r;
   ctx.save();
-  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
   ctx.lineWidth = 1.6;
   ctx.lineCap = 'round';
   ctx.beginPath();
+  // a0 → a1 is the short clockwise sweep. Never take the long way around.
   if (tip.a === a1) ctx.arc(p.x, p.y, r, a0, a1 - trim, false);
   else ctx.arc(p.x, p.y, r, a0 + trim, a1, false);
   ctx.stroke();
-
   const ex = p.x + r * Math.cos(tip.a);
   const ey = p.y + r * Math.sin(tip.a);
-  // Base of the triangle sits on the arc end so the tip continues the stroke.
   drawArrowhead(
     ex + Math.cos(tip.tang) * size * 0.55,
     ey + Math.sin(tip.tang) * size * 0.55,
@@ -571,6 +585,63 @@ function drawPassSideHint(buoyIndex, p, r, side) {
     size
   );
   ctx.restore();
+}
+
+function draw360Hint(p, r, fwd, goRight, color) {
+  const size = 6.5;
+  const gapPx = 4;
+  const open = Math.max(0.18, (size * 1.55 + gapPx) / r);
+  const sweep = Math.PI * 2 - open;
+  const a0 = fwd + Math.PI;
+  const dir = goRight ? 1 : -1;
+  const a1 = a0 + dir * sweep;
+  const tang = a1 + dir * Math.PI / 2;
+  const endTrim = (size * 0.7) / r;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r, a0, a1 - dir * endTrim, dir < 0);
+  ctx.stroke();
+  const ex = p.x + r * Math.cos(a1);
+  const ey = p.y + r * Math.sin(a1);
+  drawArrowhead(
+    ex + Math.cos(tang) * size * 0.55,
+    ey + Math.sin(tang) * size * 0.55,
+    tang,
+    size
+  );
+  ctx.restore();
+}
+
+// Pass-side hint: Right/Left = path on that side; 360 Left/Right = almost-full wrap.
+function drawPassSideHint(buoyIndex, p, r, side, color = '#fff', visitIndex = null) {
+  const b = track.buoys[buoyIndex];
+  const h = (visitIndex != null)
+    ? inboundHeadingForVisit(visitIndex)
+    : inboundHeadingRad(buoyIndex);
+  const ahead = mToPx(b.x + Math.cos(h) * 8, b.y + Math.sin(h) * 8);
+  const fwd = Math.atan2(ahead.y - p.y, ahead.x - p.x);
+
+  if (side === '360-left' || side === '360-right' || side === '360') {
+    draw360Hint(p, r, fwd, side !== '360-left', color);
+    return;
+  }
+
+  const sideSign = side === 'right' ? 1 : -1;
+  const midA = fwd + sideSign * Math.PI / 2;
+  const sweep = Math.PI * 0.85;
+  const a0 = midA - sweep / 2;
+  const a1 = midA + sweep / 2;
+  const fx = Math.cos(fwd);
+  const fy = Math.sin(fwd);
+  const align = tang => Math.cos(tang) * fx + Math.sin(tang) * fy;
+  const cwTip = { a: a1, tang: a1 + Math.PI / 2 };
+  const ccwTip = { a: a0, tang: a0 - Math.PI / 2 };
+  const tip = align(cwTip.tang) >= align(ccwTip.tang) ? cwTip : ccwTip;
+  strokeShortArc(p, r, a0, a1, tip, color);
 }
 
 function drawGates() {
@@ -837,7 +908,8 @@ canvas.addEventListener('pointerdown', e => {
     if (hit) {
       pushUndo();
       if (hit.kind === 'buoy') {
-        selection = hit;
+        const vi = (track.visits || []).findIndex(v => v.buoy === hit.index);
+        selection = vi >= 0 ? { kind: 'visit', index: vi } : hit;
         const b = track.buoys[hit.index];
         drag = { kind: 'buoy', index: hit.index, offX: b.x - m.x, offY: b.y - m.y };
         refreshUI();
@@ -859,6 +931,17 @@ canvas.addEventListener('pointerdown', e => {
     }
   } else if (mode === 'addTurn' || mode === 'addMarker') {
     drag = { kind: 'addPending', startPx: p };
+  } else if (mode === 'addVisit') {
+    const hit = hitTest(p.x, p.y);
+    if (hit?.kind === 'buoy' && track.buoys[hit.index].type !== 'marker') {
+      pushUndo();
+      if (!track.visits) track.visits = [];
+      track.visits.push({ buoy: hit.index, side: 'right' });
+      selection = { kind: 'visit', index: track.visits.length - 1 };
+      setMode('select');
+      commit();
+    }
+    return;
   } else if (mode === 'gateStart' || mode === 'gateFinish') {
     pushUndo();
     const which = (mode === 'gateStart') ? 'start' : 'finish';
@@ -981,7 +1064,13 @@ canvas.addEventListener('pointerup', e => {
           ? { x: snap(m.x), y: snap(m.y), type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 }
           : { x: snap(m.x), y: snap(m.y), type: 'marker', apexRadius: 40 };
         track.buoys.push(buoy);
-        selection = { kind: 'buoy', index: track.buoys.length - 1 };
+        if (mode === 'addTurn') {
+          if (!track.visits) track.visits = [];
+          track.visits.push({ buoy: track.buoys.length - 1, side: 'right' });
+          selection = { kind: 'visit', index: track.visits.length - 1 };
+        } else {
+          selection = { kind: 'buoy', index: track.buoys.length - 1 };
+        }
       }
     } else if (drag.kind === 'gateDraw') {
       const seg = track.gate[drag.which];
@@ -1030,7 +1119,10 @@ const modeButtons = {
 
 function setMode(m) {
   mode = m;
-  Object.entries(modeButtons).forEach(([key, btn]) => btn.classList.toggle('active', key === m));
+  Object.entries(modeButtons).forEach(([key, btn]) => {
+    if (btn) btn.classList.toggle('active', key === m);
+  });
+  if (els.btnAddVisit) els.btnAddVisit.classList.toggle('active', m === 'addVisit');
   canvas.style.cursor = (m === 'select') ? 'default' : 'crosshair';
 }
 Object.entries(modeButtons).forEach(([key, btn]) => btn.addEventListener('click', () => setMode(key)));
@@ -1066,9 +1158,13 @@ document.addEventListener('keydown', e => {
     case 'Escape':
       setMode('select');
       els.shareModal.classList.remove('open');
+      closeExportModal();
       break;
     case 'Delete': case 'Backspace':
-      if (selection && selection.kind === 'buoy') {
+      if (selection?.kind === 'visit') {
+        e.preventDefault();
+        deleteSelectedVisit();
+      } else if (selection && selection.kind === 'buoy') {
         e.preventDefault();
         deleteSelectedBuoy();
       }
@@ -1078,10 +1174,32 @@ document.addEventListener('keydown', e => {
 
 // --- Buoy operations ---
 function deleteSelectedBuoy() {
-  if (!selection || selection.kind !== 'buoy') return;
+  const idx = selectedBuoyIndex();
+  if (idx == null) return;
   pushUndo();
-  track.buoys.splice(selection.index, 1);
+  track.visits = (track.visits || [])
+    .filter(v => v.buoy !== idx)
+    .map(v => ({ ...v, buoy: v.buoy > idx ? v.buoy - 1 : v.buoy }));
+  track.buoys.splice(idx, 1);
   selection = null;
+  commit();
+}
+
+function deleteSelectedVisit() {
+  if (selection?.kind !== 'visit') return;
+  pushUndo();
+  track.visits.splice(selection.index, 1);
+  selection = null;
+  commit();
+}
+
+function moveVisit(index, delta) {
+  const target = index + delta;
+  if (target < 0 || target >= track.visits.length) return;
+  pushUndo();
+  const [v] = track.visits.splice(index, 1);
+  track.visits.splice(target, 0, v);
+  selection = { kind: 'visit', index: target };
   commit();
 }
 
@@ -1091,6 +1209,11 @@ function moveBuoy(index, delta) {
   pushUndo();
   const [b] = track.buoys.splice(index, 1);
   track.buoys.splice(target, 0, b);
+  (track.visits || []).forEach(v => {
+    if (v.buoy === index) v.buoy = target;
+    else if (delta > 0 && v.buoy > index && v.buoy <= target) v.buoy -= 1;
+    else if (delta < 0 && v.buoy >= target && v.buoy < index) v.buoy += 1;
+  });
   if (selection?.kind === 'buoy' && selection.index === index) selection.index = target;
   commit();
 }
@@ -1284,51 +1407,46 @@ function refreshGeoUI() {
 
 function rebuildBuoyList() {
   els.buoyList.innerHTML = '';
-  let turnNo = 0;
-  track.buoys.forEach((b, i) => {
-    const isTurn = b.type !== 'marker';
-    if (isTurn) turnNo += 1;
+  ensureVisits(track);
+  if (!track.visits.length) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'color:var(--muted); font-size:12px; padding:4px 0;';
+    empty.textContent = 'No turns yet — place a turn buoy, or Add a turn on an existing one.';
+    els.buoyList.appendChild(empty);
+    return;
+  }
+  track.visits.forEach((v, i) => {
     const item = document.createElement('div');
-    item.className = 'buoyItem' + (selection?.kind === 'buoy' && selection.index === i ? ' selected' : '');
+    item.className = 'buoyItem' + (selection?.kind === 'visit' && selection.index === i ? ' selected' : '');
 
     const tag = document.createElement('span');
-    tag.className = 'tag ' + (isTurn ? 'turn' : 'marker');
-    tag.textContent = isTurn ? String(turnNo) : 'M';
+    tag.className = 'tag turn';
+    tag.textContent = String(i + 1);
     item.appendChild(tag);
 
     const coords = document.createElement('span');
     coords.className = 'coords';
-    let distHint = '';
-    if (isTurn && hasGeo(track)) {
-      const turns = track.buoys.filter(bb => bb.type !== 'marker');
-      const tIdx = turns.indexOf(b);
-      if (tIdx > 0) {
-        const prev = turns[tIdx - 1];
-        const gnd = groundDistanceMeters(track.geo, prev.x, prev.y, b.x, b.y);
-        distHint = ` · ${gnd.toFixed(0)} m from prev`;
-      }
-    }
-    coords.textContent = `${b.x.toFixed(0)}, ${b.y.toFixed(0)} m` +
-      (isTurn && b.rounding ? ` · ${b.rounding}` : '') + distHint;
+    const n = physicalBuoyNumber(track, v.buoy);
+    coords.textContent = `Buoy #${n} \u00B7 ${passSideLabel(v.side)}`;
     item.appendChild(coords);
 
     const up = document.createElement('button');
-    up.className = 'mini'; up.textContent = '\u25B2'; up.title = 'Earlier in rounding order';
-    up.addEventListener('click', ev => { ev.stopPropagation(); moveBuoy(i, -1); });
+    up.className = 'mini'; up.textContent = '\u25B2'; up.title = 'Earlier in course order';
+    up.addEventListener('click', ev => { ev.stopPropagation(); moveVisit(i, -1); });
     const down = document.createElement('button');
-    down.className = 'mini'; down.textContent = '\u25BC'; down.title = 'Later in rounding order';
-    down.addEventListener('click', ev => { ev.stopPropagation(); moveBuoy(i, 1); });
+    down.className = 'mini'; down.textContent = '\u25BC'; down.title = 'Later in course order';
+    down.addEventListener('click', ev => { ev.stopPropagation(); moveVisit(i, 1); });
     const del = document.createElement('button');
-    del.className = 'mini'; del.textContent = '\u2715'; del.title = 'Delete buoy';
+    del.className = 'mini'; del.textContent = '\u2715'; del.title = 'Remove this turn';
     del.addEventListener('click', ev => {
       ev.stopPropagation();
-      selection = { kind: 'buoy', index: i };
-      deleteSelectedBuoy();
+      selection = { kind: 'visit', index: i };
+      deleteSelectedVisit();
     });
     item.appendChild(up); item.appendChild(down); item.appendChild(del);
 
     item.addEventListener('click', () => {
-      selection = { kind: 'buoy', index: i };
+      selection = { kind: 'visit', index: i };
       refreshOnly();
     });
     els.buoyList.appendChild(item);
@@ -1336,7 +1454,8 @@ function rebuildBuoyList() {
 }
 
 function refreshBuoyProps() {
-  const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
+  const buoyIdx = selectedBuoyIndex();
+  const sel = buoyIdx != null ? track.buoys[buoyIdx] : null;
   els.buoyProps.style.display = sel ? '' : 'none';
   if (!sel) return;
   const isTurn = sel.type !== 'marker';
@@ -1344,7 +1463,10 @@ function refreshBuoyProps() {
   els.rowRounding.style.display = isTurn ? '' : 'none';
   els.rowOptimalSpeed.style.display = isTurn ? '' : 'none';
   if (isTurn) {
-    setInput(els.buoyRounding, normalizeRounding(sel.rounding));
+    const visit = selection?.kind === 'visit'
+      ? track.visits[selection.index]
+      : (track.visits || []).find(v => v.buoy === buoyIdx);
+    setInput(els.buoyRounding, visit ? normalizePassSide(visit.side) : normalizePassSide(sel.rounding));
     setInput(els.buoyOptimalSpeed, sel.optimalSpeed ?? 30);
   }
   setInput(els.buoyX, sel.x);
@@ -1355,14 +1477,17 @@ function refreshStats() {
   const s = trackStats(track);
   const area = s.bbox ? `${Math.round(s.bbox.w)} × ${Math.round(s.bbox.h)} m` : '–';
   let legsHtml = '';
-  if (hasGeo(track) && s.legDistances.length) {
-    legsHtml = '<br>Legs (ground): ' + s.legDistances
-      .map(l => `<b>${l.from}→${l.to}: ${l.groundM.toFixed(0)} m</b>`)
+  if (s.legDistances.length) {
+    legsHtml = '<br>Legs' + (hasGeo(track) ? ' (ground)' : '') + ': ' + s.legDistances
+      .map(l => {
+        const m = hasGeo(track) ? l.groundM : l.trackM;
+        return `<b>${l.from}→${l.to}: ${m.toFixed(1)} m</b>`;
+      })
       .join(', ');
   }
   const lineCount = (track.racingLines || []).filter(l => l.points?.length >= 2).length;
   els.stats.innerHTML =
-    `Turn buoys: <b>${s.turnCount}</b> &nbsp; Markers: <b>${s.markerCount}</b><br>` +
+    `Turn buoys: <b>${s.turnCount}</b> &nbsp; Course turns: <b>${s.visitCount}</b> &nbsp; Markers: <b>${s.markerCount}</b><br>` +
     `Lap length: <b>${Math.round(s.lapLengthGroundM)} m</b>` +
     (hasGeo(track) ? ' <span style="color:var(--muted)">(ground)</span>' : '') + '<br>' +
     `Gate width: <b>${s.gateWidthM.toFixed(0)} m</b><br>` +
@@ -1417,42 +1542,64 @@ els.selDirection.addEventListener('change', () => {
 });
 
 els.buoyType.addEventListener('change', () => {
-  const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
+  const idx = selectedBuoyIndex();
+  const sel = idx != null ? track.buoys[idx] : null;
   if (!sel) return;
   pushUndo();
+  const wasTurn = sel.type !== 'marker';
   sel.type = els.buoyType.value;
   if (sel.type === 'turn' && !sel.rounding) sel.rounding = 'right';
+  if (wasTurn && sel.type === 'marker') {
+    track.visits = (track.visits || []).filter(v => v.buoy !== idx);
+  } else if (!wasTurn && sel.type === 'turn') {
+    if (!track.visits) track.visits = [];
+    track.visits.push({ buoy: idx, side: 'right' });
+  }
   commit();
 });
 els.buoyRounding.addEventListener('change', () => {
-  const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
-  if (!sel) return;
+  const idx = selectedBuoyIndex();
+  if (idx == null) return;
   pushUndo();
-  sel.rounding = normalizeRounding(els.buoyRounding.value);
+  const side = normalizePassSide(els.buoyRounding.value);
+  if (selection?.kind === 'visit' && track.visits[selection.index]) {
+    track.visits[selection.index].side = side;
+  } else {
+    const visit = (track.visits || []).find(v => v.buoy === idx);
+    if (visit) visit.side = side;
+    track.buoys[idx].rounding = (side === '360-left' || side === '360-right' || side === '360')
+      ? 'right' : side;
+  }
   commit();
 });
 els.buoyOptimalSpeed.addEventListener('change', () => {
-  const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
+  const idx = selectedBuoyIndex();
+  const sel = idx != null ? track.buoys[idx] : null;
   if (!sel) return;
   pushUndo();
   sel.optimalSpeed = Number(els.buoyOptimalSpeed.value) || 30;
   commit();
 });
 els.buoyX.addEventListener('change', () => {
-  const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
+  const idx = selectedBuoyIndex();
+  const sel = idx != null ? track.buoys[idx] : null;
   if (!sel) return;
   pushUndo();
   sel.x = Number(els.buoyX.value) || 0;
   commit();
 });
 els.buoyY.addEventListener('change', () => {
-  const sel = selection?.kind === 'buoy' ? track.buoys[selection.index] : null;
+  const idx = selectedBuoyIndex();
+  const sel = idx != null ? track.buoys[idx] : null;
   if (!sel) return;
   pushUndo();
   sel.y = Number(els.buoyY.value) || 0;
   commit();
 });
 els.btnDeleteBuoy.addEventListener('click', deleteSelectedBuoy);
+if (els.btnAddVisit) {
+  els.btnAddVisit.addEventListener('click', () => setMode('addVisit'));
+}
 
 // --- Geo controls ---
 els.chkGeoMap.addEventListener('change', () => setGeoOn(els.chkGeoMap.checked));
@@ -1769,14 +1916,11 @@ function posterStatItems() {
 }
 
 function posterBuoyOrderText() {
-  let n = 0;
-  const parts = [];
-  track.buoys.forEach(b => {
-    if (b.type === 'marker') return;
-    n += 1;
-    parts.push(`${n} ${normalizeRounding(b.rounding) === 'right' ? 'Right' : 'Left'}`);
-  });
-  return parts.join('  \u00B7  ');
+  ensureVisits(track);
+  return (track.visits || []).map((v, i) => {
+    const n = physicalBuoyNumber(track, v.buoy);
+    return `${i + 1} Buoy #${n} ${passSideLabel(v.side)}`;
+  }).join('  \u00B7  ');
 }
 
 // Draws a heading in the script font, returns the new cursor y.
@@ -2397,7 +2541,7 @@ function renderPresetsMenu(items) {
   parts.push('<div class="menu-sep"></div>');
   parts.push('<div class="menu-actions">');
   parts.push('<button type="button" class="menu-item" data-action="save">Save current track…</button>');
-  parts.push('<button type="button" class="menu-item" data-action="export">Export current as JSON backup</button>');
+  parts.push('<button type="button" class="menu-item" data-action="export">Export JSON backup\u2026</button>');
   parts.push('</div>');
   presetsMenu.innerHTML = parts.join('');
 }
@@ -2580,9 +2724,8 @@ presetsMenu.addEventListener('click', async e => {
     const where = hasGeo(track) ? ' (with map location)' : ' (no map location yet)';
     alert(`Saved “${trimmed}” to Tracks${where}.`);
   } else if (action === 'export') {
-    const json = JSON.stringify(serializeTrack(track), null, 2);
-    downloadFile(`${trackSlug() || 'track'}.track.json`, 'application/json', json);
     closePresetsMenu();
+    openExportModal();
   }
 });
 
@@ -2617,10 +2760,84 @@ function downloadFile(filename, mime, content) {
   URL.revokeObjectURL(url);
 }
 
-document.getElementById('btnExport').addEventListener('click', () => {
-  const json = JSON.stringify(serializeTrack(track), null, 2);
-  downloadFile(`${trackSlug()}.track.json`, 'application/json', json);
+const exportModal = document.getElementById('exportModal');
+const exportCountryWrap = document.getElementById('exportCountryWrap');
+const exportCountrySel = document.getElementById('exportCountry');
+
+function closeExportModal() {
+  exportModal.classList.remove('open');
+}
+
+function exportScope() {
+  return document.querySelector('input[name="exportScope"]:checked')?.value || 'current';
+}
+
+function refreshExportModal() {
+  const saved = loadUserTrackPresets();
+  const countries = groupPresetsByCountry(saved).filter(g => g.code);
+  const countryLabel = document.getElementById('exportCountryChoice');
+  const allLabel = document.getElementById('exportAllChoice');
+  countryLabel.classList.toggle('is-disabled', !countries.length);
+  allLabel.classList.toggle('is-disabled', !saved.length);
+  document.querySelector('input[name="exportScope"][value="country"]').disabled = !countries.length;
+  document.querySelector('input[name="exportScope"][value="all"]').disabled = !saved.length;
+
+  exportCountrySel.innerHTML = countries.map(g => {
+    const flag = countryFlagEmoji(g.code);
+    const n = g.presets.length;
+    const label = `${flag ? flag + ' ' : ''}${g.name} (${n})`;
+    return `<option value="${escHtml(g.code)}">${escHtml(label)}</option>`;
+  }).join('');
+
+  const scope = exportScope();
+  if ((scope === 'country' && !countries.length) || (scope === 'all' && !saved.length)) {
+    document.querySelector('input[name="exportScope"][value="current"]').checked = true;
+  }
+  exportCountryWrap.classList.toggle('show', exportScope() === 'country' && countries.length);
+}
+
+function openExportModal() {
+  refreshExportModal();
+  exportModal.classList.add('open');
+}
+
+function downloadExport() {
+  const scope = exportScope();
+  if (scope === 'current') {
+    const json = JSON.stringify(serializeTrack(track), null, 2);
+    downloadFile(`${trackSlug() || 'track'}.track.json`, 'application/json', json);
+    closeExportModal();
+    return;
+  }
+  const saved = loadUserTrackPresets();
+  let presets = saved;
+  let slug = 'all';
+  if (scope === 'country') {
+    const code = exportCountrySel.value;
+    const group = groupPresetsByCountry(saved).find(g => g.code === code);
+    presets = group ? group.presets : [];
+    slug = (group?.name || code || 'country').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'country';
+  }
+  if (!presets.length) {
+    alert('No saved tracks to export for that choice.');
+    return;
+  }
+  const json = JSON.stringify(exportTrackLibrary(presets), null, 2);
+  downloadFile(`efoil-tracks-${slug}.json`, 'application/json', json);
+  closeExportModal();
+}
+
+document.getElementById('btnExport').addEventListener('click', openExportModal);
+document.getElementById('exportDownload').addEventListener('click', downloadExport);
+document.getElementById('exportClose').addEventListener('click', closeExportModal);
+exportModal.addEventListener('click', e => {
+  if (e.target === exportModal) closeExportModal();
 });
+document.querySelectorAll('input[name="exportScope"]').forEach(radio => {
+  radio.addEventListener('change', refreshExportModal);
+});
+exportCountrySel.addEventListener('click', e => e.stopPropagation());
+exportCountrySel.addEventListener('mousedown', e => e.stopPropagation());
 
 document.getElementById('btnImport').addEventListener('click', () => els.importFile.click());
 els.importFile.addEventListener('change', async e => {
@@ -2629,13 +2846,31 @@ els.importFile.addEventListener('change', async e => {
   if (!file) return;
   try {
     const parsed = JSON.parse(await file.text());
-    const { errors } = validateTrack(parsed);
+    const imported = parseTrackImport(parsed);
+    if (imported.errors.length) {
+      alert('Could not import:\n' + imported.errors.join('\n'));
+      return;
+    }
+    if (imported.type === 'library') {
+      const result = mergeImportedTrackPresets(imported.entries);
+      refreshPresetsMenu();
+      if (!result.imported) {
+        alert(result.skipped
+          ? 'Nothing new to import — those tracks are already in Saved tracks.'
+          : 'No valid tracks found in this file.');
+        return;
+      }
+      const extra = result.skipped ? `\n${result.skipped} already saved and skipped.` : '';
+      alert(`Imported ${result.imported} track${result.imported === 1 ? '' : 's'} into Saved tracks.${extra}`);
+      return;
+    }
+    const { errors } = validateTrack(imported.track);
     if (errors.length) {
       alert('Could not import track:\n' + errors.join('\n'));
       return;
     }
     pushUndo();
-    track = withDefaults(parsed);
+    track = withDefaults(imported.track);
     selection = null;
     if (hasGeo(track) !== geoOn) setGeoOn(hasGeo(track));
     clearActiveSavedTrack();
