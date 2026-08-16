@@ -2266,6 +2266,10 @@ function zoomStopTitle(index) {
 }
 
 function nextZoomHint() {
+  const last = ZOOM_STOPS_M.length - 1;
+  if (zoomStopIndex === last && 'ontouchstart' in window) {
+    return 'pinch out · world map';
+  }
   const next = (zoomStopIndex + 1) % ZOOM_STOPS_M.length;
   const m = ZOOM_STOPS_M[next] || 0;
   if (!m) return 'Z · race zoom';
@@ -3948,7 +3952,8 @@ const touchControls = {
             nudgeZoomStop(-1);
             this.pinchFired = true;
         } else if (ratio < 1 / 1.18) {
-            nudgeZoomStop(1);
+            // Already at 5 km: pinch out further opens the world atlas.
+            if (!nudgeZoomStop(1)) requestAtlas();
             this.pinchFired = true;
         }
         return true;

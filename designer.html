@@ -126,6 +126,11 @@
       border-radius: 6px; padding: 5px 8px; font-size: 13px; width: 130px;
     }
     .section textarea { width: 100%; resize: vertical; min-height: 44px; font-family: inherit; }
+    .section textarea.tall { min-height: 72px; }
+    .fieldLabel {
+      display: block; color: var(--muted); font-size: 11px;
+      letter-spacing: 0.8px; text-transform: uppercase; margin: 8px 0 4px;
+    }
     .row input[type="checkbox"] { accent-color: var(--accent); }
 
     #buoyList { display: flex; flex-direction: column; gap: 3px; }
@@ -281,7 +286,18 @@
       <div class="section">
         <h3>Track info</h3>
         <div class="row"><label>Author</label><input id="trackAuthor" type="text" spellcheck="false"></div>
-        <textarea id="trackNotes" placeholder="Notes for riders (briefing info, rules...)"></textarea>
+        <label class="fieldLabel">Race notes</label>
+        <textarea id="trackNotes" placeholder="Event notes for the briefing (course character, reminders…)"></textarea>
+      </div>
+
+      <div class="section">
+        <h3>Start technique</h3>
+        <label class="fieldLabel">Timetrial</label>
+        <textarea id="startTimetrial" placeholder="Flying start in groups of 5 waiting for their turn in the water"></textarea>
+        <label class="fieldLabel">Elimination</label>
+        <textarea id="startElimination" class="tall" placeholder="Start on belly, yellow flag up 15s time, green flag up 5s time, countdown 5 4 3 2 1, both flags down GO!"></textarea>
+        <label class="fieldLabel">Notes</label>
+        <textarea id="startNotes" class="tall" placeholder="Rider not allowed to stand up before crossing startline, one failed start per rider allowed with a restart, otherwise DNS."></textarea>
       </div>
 
       <div class="section">

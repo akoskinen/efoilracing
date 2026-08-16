@@ -10,6 +10,7 @@
 // {
 //   schemaVersion: 3,
 //   name, author, notes,
+//   startTechnique: { timetrial, elimination, notes },  // optional briefing copy
 //   scale: 4,                          // meters -> pixels in the simulator
 //   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'left'|'right',
 //             apexRadius, optimalSpeed }],
@@ -128,6 +129,7 @@ export function migrateTrackSchema(track) {
   }
   ensureVisits(track);
   track.schemaVersion = TRACK_SCHEMA_VERSION;
+  ensureStartTechnique(track);
   return track;
 }
 
@@ -934,6 +936,56 @@ export function chaseRacingLine(track) {
     null;
 }
 
+export function ensureStartTechnique(track) {
+  if (!track.startTechnique || typeof track.startTechnique !== 'object') {
+    track.startTechnique = { timetrial: '', elimination: '', notes: '' };
+  } else {
+    if (typeof track.startTechnique.timetrial !== 'string') track.startTechnique.timetrial = '';
+    if (typeof track.startTechnique.elimination !== 'string') track.startTechnique.elimination = '';
+    if (typeof track.startTechnique.notes !== 'string') track.startTechnique.notes = '';
+  }
+  return track.startTechnique;
+}
+
+/** First visible racing line (chase if that variant is visible). */
+export function visibleRacingLine(track) {
+  const lines = track?.racingLines || [];
+  const vis = lines.filter(l => l && l.visible !== false);
+  if (!vis.length) return null;
+  return vis.find(l => l.chase) || vis[0];
+}
+
+export function nominalLapTimeSec(track) {
+  const line = visibleRacingLine(track);
+  if (!line?.ghost) return null;
+  const t = Number(line.ghost.lapTime);
+  if (Number.isFinite(t) && t > 0) return t;
+  const frames = line.ghost.frames;
+  const last = frames?.[frames.length - 1];
+  const t2 = Number(last?.t ?? last?.time);
+  return Number.isFinite(t2) && t2 > 0 ? t2 : null;
+}
+
+function polylineLengthM(track, pts) {
+  if (!pts || pts.length < 2) return null;
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    if (!Number.isFinite(a?.x) || !Number.isFinite(b?.x)) continue;
+    d += hasGeo(track)
+      ? groundDistanceMeters(track.geo, a.x, a.y, b.x, b.y)
+      : Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return d > 0 ? d : null;
+}
+
+/** Real-world length of the visible line variant (ghost path, else simplified line). */
+export function nominalLapDistanceM(track) {
+  const line = visibleRacingLine(track);
+  if (!line) return null;
+  return polylineLengthM(track, line.ghost?.frames) ?? polylineLengthM(track, line.points);
+}
+
 export function ghostFromRacingLine(line) {
   if (!line?.ghost?.frames?.length) return null;
   const frames = expandGhostFrames(line.ghost.frames);
@@ -1031,6 +1083,14 @@ export function serializeTrack(track) {
         return o;
       });
     if (lines.length) out.racingLines = lines;
+  }
+  const st = track.startTechnique;
+  if (st && (String(st.timetrial || '').trim() || String(st.elimination || '').trim() || String(st.notes || '').trim())) {
+    out.startTechnique = {
+      timetrial: String(st.timetrial || ''),
+      elimination: String(st.elimination || ''),
+      notes: String(st.notes || '')
+    };
   }
   return out;
 }

@@ -20,7 +20,8 @@ import {
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
   geoFromSavedEntry, placeFromTrack, normalizeRounding, migrateTrackSchema,
   ensureVisits, normalizePassSide, passSideLabel, physicalBuoyNumber,
-  groupPresetsByCountry, exportTrackLibrary, parseTrackImport, mergeImportedTrackPresets
+  groupPresetsByCountry, exportTrackLibrary, parseTrackImport, mergeImportedTrackPresets,
+  ensureStartTechnique, nominalLapTimeSec, nominalLapDistanceM
 } from './trackSchema.js';
 
 // --- DOM ---
@@ -32,6 +33,9 @@ const els = {
   trackName: document.getElementById('trackName'),
   trackAuthor: document.getElementById('trackAuthor'),
   trackNotes: document.getElementById('trackNotes'),
+  startTimetrial: document.getElementById('startTimetrial'),
+  startElimination: document.getElementById('startElimination'),
+  startNotes: document.getElementById('startNotes'),
   chkSameStartFinish: document.getElementById('chkSameStartFinish'),
   chkDirectional: document.getElementById('chkDirectional'),
   chkDirectionalFinish: document.getElementById('chkDirectionalFinish'),
@@ -1229,6 +1233,10 @@ function refreshUI() {
   setInput(els.trackName, track.name);
   setInput(els.trackAuthor, track.author);
   setInput(els.trackNotes, track.notes);
+  const st = ensureStartTechnique(track);
+  setInput(els.startTimetrial, st.timetrial);
+  setInput(els.startElimination, st.elimination);
+  setInput(els.startNotes, st.notes);
 
   const gate = track.gate;
   setInput(els.chkSameStartFinish, gate.sameStartFinish !== false);
@@ -1513,6 +1521,18 @@ function refreshWarnings() {
 els.trackName.addEventListener('input', () => { track.name = els.trackName.value; saveDraft(track); });
 els.trackAuthor.addEventListener('input', () => { track.author = els.trackAuthor.value; saveDraft(track); });
 els.trackNotes.addEventListener('input', () => { track.notes = els.trackNotes.value; saveDraft(track); });
+els.startTimetrial.addEventListener('input', () => {
+  ensureStartTechnique(track).timetrial = els.startTimetrial.value;
+  saveDraft(track);
+});
+els.startElimination.addEventListener('input', () => {
+  ensureStartTechnique(track).elimination = els.startElimination.value;
+  saveDraft(track);
+});
+els.startNotes.addEventListener('input', () => {
+  ensureStartTechnique(track).notes = els.startNotes.value;
+  saveDraft(track);
+});
 
 els.chkSameStartFinish.addEventListener('change', () => {
   pushUndo();
@@ -1739,7 +1759,7 @@ document.getElementById('btnExportCsv').addEventListener('click', () => {
 
 // --- Race briefing poster export (PNG) ---
 // Renders the track map at high resolution with a semi-transparent briefing
-// panel: title, author, course stats, buoy order, race notes and a
+// panel: title, author, nominal laptime, start technique, race notes and a
 // scan-to-ride QR code. Satellite imagery is composited in when the track
 // is geo-anchored.
 
@@ -1892,35 +1912,47 @@ function wrapPosterText(pctx, text, maxW) {
   return lines;
 }
 
-function fmtCourseLength(m) {
-  return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
+function briefingField(el, stored) {
+  const typed = ((el && el.value) || stored || '').trim();
+  if (typed) return typed;
+  return ((el && el.placeholder) || '').trim();
 }
 
-function fmtLatLng(origin) {
-  const lat = origin.lat, lng = origin.lng;
-  return `${Math.abs(lat).toFixed(4)}\u00B0${lat >= 0 ? 'N' : 'S'} ${Math.abs(lng).toFixed(4)}\u00B0${lng >= 0 ? 'E' : 'W'}`;
+function syncBriefingCopyFromSidebar() {
+  if (els.trackNotes) track.notes = els.trackNotes.value;
+  const st = ensureStartTechnique(track);
+  st.timetrial = briefingField(els.startTimetrial, st.timetrial);
+  st.elimination = briefingField(els.startElimination, st.elimination);
+  st.notes = briefingField(els.startNotes, st.notes);
+  return st;
+}
+
+function canEncodePosterQr(text) {
+  try {
+    const qr = qrcode(0, 'L');
+    qr.addData(text);
+    qr.make();
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function fmtNominalLaptime(sec) {
+  return `${sec.toFixed(2)}s`;
+}
+
+function fmtLapDistance(m) {
+  return `${Math.round(m)} m`;
 }
 
 function posterStatItems() {
-  const stats = trackStats(track);
-  const gate = track.gate;
-  const items = [
-    ['Course length', stats.lapLengthM > 0 ? fmtCourseLength(stats.lapLengthGroundM) : '\u2014'],
-    ['Turn buoys', String(stats.turnCount) + (stats.markerCount ? ` +${stats.markerCount} markers` : '')],
-    ['Gate', stats.gateWidthM
-      ? `${Math.round(stats.gateWidthM)} m ${gate?.sameStartFinish !== false ? 'start/finish' : 'start'}`
-      : '\u2014']
+  const t = nominalLapTimeSec(track);
+  const d = nominalLapDistanceM(track);
+  return [
+    ['Nominal laptime', t != null ? fmtNominalLaptime(t) : '\u2014'],
+    ['Lap distance', d != null ? fmtLapDistance(d) : '\u2014']
   ];
-  if (hasGeo(track)) items.push(['Location', fmtLatLng(track.geo.origin)]);
-  return items;
-}
-
-function posterBuoyOrderText() {
-  ensureVisits(track);
-  return (track.visits || []).map((v, i) => {
-    const n = physicalBuoyNumber(track, v.buoy);
-    return `${i + 1} Buoy #${n} ${passSideLabel(v.side)}`;
-  }).join('  \u00B7  ');
 }
 
 // Draws a heading in the script font, returns the new cursor y.
@@ -1967,7 +1999,7 @@ function drawPosterBody(pctx, text, x, y, maxW, maxBottom) {
 
 function drawPosterStats(pctx, x, y, maxW) {
   const items = posterStatItems();
-  const colW = maxW / 2;
+  const colW = items.length === 1 ? maxW : maxW / 2;
   const rowH = 44;
   items.forEach((item, i) => {
     const cx = x + (i % 2) * colW;
@@ -1984,6 +2016,37 @@ function drawPosterStats(pctx, x, y, maxW) {
     pctx.fillText(item[1], cx, cy + 32);
   });
   return y + Math.ceil(items.length / 2) * rowH + 2;
+}
+
+function drawPosterSubhead(pctx, text, x, y) {
+  pctx.font = '10px -apple-system, Helvetica, sans-serif';
+  pctx.fillStyle = 'rgba(160,190,210,0.9)';
+  pctx.textAlign = 'left';
+  pctx.textBaseline = 'alphabetic';
+  try { pctx.letterSpacing = '1.5px'; } catch (err) { /* older canvas */ }
+  pctx.fillText(String(text).toUpperCase(), x, y + 11);
+  try { pctx.letterSpacing = '0px'; } catch (err) { /* older canvas */ }
+  return y + 16;
+}
+
+function drawPosterStartTechnique(pctx, x, y, maxW, maxBottom) {
+  const st = ensureStartTechnique(track);
+  const blocks = [
+    ['Timetrial', (st.timetrial || '').trim()],
+    ['Elimination', (st.elimination || '').trim()],
+    ['Notes', (st.notes || '').trim()]
+  ].filter(b => b[1]);
+  if (!blocks.length) return y;
+  y = drawPosterHeading(pctx, 'Start technique', x, y, 20);
+  const n = blocks.length;
+  blocks.forEach((block, i) => {
+    const remain = maxBottom - y;
+    if (remain < 22) return;
+    const blockEnd = y + remain / (n - i);
+    y = drawPosterSubhead(pctx, block[0], x, y + (i ? 6 : 2));
+    y = drawPosterBody(pctx, block[1], x, y, maxW, Math.min(maxBottom, blockEnd));
+  });
+  return y;
 }
 
 // Renders the QR code with the vendored qrcode lib. Returns true on success.
@@ -2077,31 +2140,32 @@ function drawPosterPanel(pctx, panel, shareUrl) {
   pctx.stroke();
 
   const notesText = (track.notes || '').trim();
-  const orderText = posterBuoyOrderText();
+  const qrOk = canEncodePosterQr(shareUrl);
 
   if (!wide) {
-    // Left column: single flow, QR pinned to the bottom
+    // Left column: start technique first, then race notes; footer pinned to the bottom
     const x = panel.x + pad;
     const maxW = panel.w - pad * 2;
     let y = drawPosterTitle(pctx, x, panel.y + pad, maxW);
     y = drawPosterStats(pctx, x, y, maxW);
 
     const qrSize = 96;
-    const qrTop = panel.y + panel.h - pad - qrSize;
+    const footerH = qrOk ? qrSize : 22;
+    const contentBottom = panel.y + panel.h - pad - footerH - 8;
+    const afterStats = y + 8;
+    const room = Math.max(0, contentBottom - afterStats);
+    const startBottom = notesText ? afterStats + Math.max(room * 0.58, room - 130) : contentBottom;
 
-    if (orderText) {
-      y = drawPosterHeading(pctx, 'Course', x, y + 6, 20);
-      y = drawPosterBody(pctx, orderText, x, y, maxW, Math.min(y + 80, qrTop - 16));
-    }
+    y = drawPosterStartTechnique(pctx, x, afterStats, maxW, startBottom);
     if (notesText) {
-      y = drawPosterHeading(pctx, 'Race notes', x, y + 10, 20);
-      drawPosterBody(pctx, notesText, x, y, maxW, qrTop - 16);
+      y = drawPosterHeading(pctx, 'Race notes', x, y + 8, 20);
+      drawPosterBody(pctx, notesText, x, y, maxW, contentBottom);
     }
 
-    const hasQr = drawPosterQr(pctx, shareUrl, x, qrTop, qrSize);
+    const qrTop = panel.y + panel.h - pad - footerH;
     pctx.textAlign = 'left';
     pctx.textBaseline = 'alphabetic';
-    if (hasQr) {
+    if (qrOk && drawPosterQr(pctx, shareUrl, x, qrTop, qrSize)) {
       pctx.font = `16px ${TITLE_FONT}`;
       pctx.fillStyle = '#8fd8f5';
       pctx.fillText('Scan to ride this track', x + qrSize + 16, qrTop + 38);
@@ -2111,12 +2175,12 @@ function drawPosterPanel(pctx, panel, shareUrl) {
     } else {
       pctx.font = `18px ${TITLE_FONT}`;
       pctx.fillStyle = '#8fd8f5';
-      pctx.fillText('Design & ride at efoil.racing', x, qrTop + qrSize - 8);
+      pctx.fillText('Design & ride at efoil.racing', x, qrTop + footerH - 4);
     }
     return;
   }
 
-  // Bottom band: three columns — title/stats, course/notes, QR
+  // Bottom band: three columns — title/stats, start technique + notes, QR
   const x1 = panel.x + pad;
   const col1W = 330;
   const qrSize = 128;
@@ -2129,17 +2193,16 @@ function drawPosterPanel(pctx, panel, shareUrl) {
   drawPosterStats(pctx, x1, y1, col1W);
 
   let y2 = panel.y + pad;
-  if (orderText) {
-    y2 = drawPosterHeading(pctx, 'Course', x2, y2, 20);
-    y2 = drawPosterBody(pctx, orderText, x2, y2, col2W, Math.min(y2 + 62, bottom));
-  }
+  const col2Room = bottom - y2;
+  const startBottom = notesText ? y2 + Math.max(col2Room * 0.58, col2Room - 90) : bottom;
+  y2 = drawPosterStartTechnique(pctx, x2, y2, col2W, startBottom);
   if (notesText) {
     y2 = drawPosterHeading(pctx, 'Race notes', x2, y2 + 8, 20);
     drawPosterBody(pctx, notesText, x2, y2, col2W, bottom);
   }
 
   const qrY = panel.y + pad + 6;
-  const hasQr = drawPosterQr(pctx, shareUrl, x3, qrY, qrSize);
+  const hasQr = qrOk && drawPosterQr(pctx, shareUrl, x3, qrY, qrSize);
   pctx.textAlign = 'center';
   pctx.textBaseline = 'alphabetic';
   if (hasQr) {
@@ -2158,6 +2221,8 @@ function drawPosterPanel(pctx, panel, shareUrl) {
 }
 
 async function renderBriefingPoster() {
+  syncBriefingCopyFromSidebar();
+  saveDraft(track);
   await ensurePacifico();
 
   const W = POSTER_W, H = POSTER_H, M = POSTER_MARGIN;
