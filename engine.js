@@ -1120,7 +1120,23 @@ function atlasPinchZoomToCurrent() {
   closeAtlas();
 }
 
+function contactsAreViewPinch(points) {
+  if (!points || points.length !== 2) return false;
+  const w = window.innerWidth;
+  const a = points[0], b = points[1];
+  const left = w * 0.25;
+  const right = w * 0.75;
+  if (a.x < left || a.x > right || b.x < left || b.x > right) return false;
+  // Two-thumb racing sits on opposite halves and is far apart — never a pinch.
+  const split = (a.x - w / 2) * (b.x - w / 2) < 0;
+  const dist = Math.hypot(a.x - b.x, a.y - b.y);
+  if (split && dist > w * 0.28) return false;
+  return true;
+}
+
 function handleAtlasPinch() {
+  const pts = [...atlas.pointers.values()];
+  if (!contactsAreViewPinch(pts)) return;
   const cd = atlasPointerCenterAndDist();
   if (cd.dist < 8) return;
   if (atlas.pinchStartDist < 8) {
@@ -4063,6 +4079,14 @@ const touchControls = {
         this.pinchFired = false;
     },
 
+    isViewPinch(touches) {
+        if (!touches || touches.length !== 2) return false;
+        return contactsAreViewPinch([
+            { x: touches[0].clientX, y: touches[0].clientY },
+            { x: touches[1].clientX, y: touches[1].clientY }
+        ]);
+    },
+
     handlePinch(e) {
         const dist = this.pinchDistance(e.touches);
         if (dist < 8) return true;
@@ -4083,6 +4107,46 @@ const touchControls = {
             this.pinchFired = true;
         }
         return true;
+    },
+
+    clearRacingKeys() {
+        Object.keys(this.activeZones).forEach(zone => {
+            this.activeZones[zone] = false;
+        });
+        keys['ArrowLeft'] = false;
+        keys['ArrowRight'] = false;
+        keys['ArrowUp'] = false;
+        keys['ArrowDown'] = false;
+    },
+
+    applyRacingTouches(touches) {
+        Object.keys(this.activeZones).forEach(zone => {
+            this.activeZones[zone] = false;
+        });
+        for (let i = 0; i < touches.length; i++) {
+            const touch = touches[i];
+            this.activeZones[this.getZone(touch.clientX, touch.clientY)] = true;
+        }
+        if (this.activeZones.leftUpper) {
+            keys['ArrowLeft'] = true;
+            keys['ArrowRight'] = false;
+        } else if (this.activeZones.leftLower) {
+            keys['ArrowLeft'] = false;
+            keys['ArrowRight'] = true;
+        } else {
+            keys['ArrowLeft'] = false;
+            keys['ArrowRight'] = false;
+        }
+        if (this.activeZones.rightUpper) {
+            keys['ArrowUp'] = true;
+            keys['ArrowDown'] = false;
+        } else if (this.activeZones.rightLower) {
+            keys['ArrowUp'] = false;
+            keys['ArrowDown'] = true;
+        } else {
+            keys['ArrowUp'] = false;
+            keys['ArrowDown'] = false;
+        }
     },
 
     handleAtlasTouch(e) {
@@ -4153,50 +4217,13 @@ const touchControls = {
             return;
         }
 
-        if (e.touches.length >= 2) {
-            Object.keys(this.activeZones).forEach(zone => {
-                this.activeZones[zone] = false;
-            });
-            keys['ArrowLeft'] = false;
-            keys['ArrowRight'] = false;
-            keys['ArrowUp'] = false;
-            keys['ArrowDown'] = false;
+        if (this.isViewPinch(e.touches)) {
+            this.clearRacingKeys();
             this.handlePinch(e);
             return;
         }
         this.resetPinch();
-
-        Object.keys(this.activeZones).forEach(zone => {
-            this.activeZones[zone] = false;
-        });
-
-        for (let i = 0; i < e.touches.length; i++) {
-            const touch = e.touches[i];
-            const zone = this.getZone(touch.clientX, touch.clientY);
-            this.activeZones[zone] = true;
-        }
-
-        if (this.activeZones.leftUpper) {
-            keys['ArrowLeft'] = true;
-            keys['ArrowRight'] = false;
-        } else if (this.activeZones.leftLower) {
-            keys['ArrowLeft'] = false;
-            keys['ArrowRight'] = true;
-        } else {
-            keys['ArrowLeft'] = false;
-            keys['ArrowRight'] = false;
-        }
-
-        if (this.activeZones.rightUpper) {
-            keys['ArrowUp'] = true;
-            keys['ArrowDown'] = false;
-        } else if (this.activeZones.rightLower) {
-            keys['ArrowUp'] = false;
-            keys['ArrowDown'] = true;
-        } else {
-            keys['ArrowUp'] = false;
-            keys['ArrowDown'] = false;
-        }
+        this.applyRacingTouches(e.touches);
     },
 
     handleTouchEnd(e) {
@@ -4260,50 +4287,36 @@ if (atlasEls.hud && typeof PointerEvent === 'undefined') {
 
 function drawTouchZones() {
     if (!('ontouchstart' in window)) return;
-    
+
     const width = canvas.width;
     const height = canvas.height;
     const midX = width / 2;
+    const z = touchControls.activeZones;
 
     ctx.save();
-    ctx.globalAlpha *= 0.01;
-    
-    // Left side zones
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(midX, 0);
-    ctx.lineTo(0, height);
-    ctx.closePath();
-    ctx.fillStyle = touchControls.activeZones.leftUpper ? '#fff' : '#666';
-    ctx.fill();
+    const fillZone = (path, active) => {
+        ctx.beginPath();
+        path();
+        ctx.closePath();
+        ctx.fillStyle = active ? 'rgba(127, 212, 255, 0.10)' : 'rgba(255,255,255,0.015)';
+        ctx.fill();
+    };
+    fillZone(() => { ctx.moveTo(0, 0); ctx.lineTo(midX, 0); ctx.lineTo(0, height); }, z.leftUpper);
+    fillZone(() => { ctx.moveTo(0, height); ctx.lineTo(midX, 0); ctx.lineTo(midX, height); }, z.leftLower);
+    fillZone(() => { ctx.moveTo(width, 0); ctx.lineTo(midX, 0); ctx.lineTo(width, height); }, z.rightUpper);
+    fillZone(() => { ctx.moveTo(width, height); ctx.lineTo(midX, 0); ctx.lineTo(midX, height); }, z.rightLower);
 
+    ctx.strokeStyle = 'rgba(127, 212, 255, 0.42)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([7, 6]);
     ctx.beginPath();
+    ctx.moveTo(midX, 0);
+    ctx.lineTo(midX, height);
     ctx.moveTo(0, height);
     ctx.lineTo(midX, 0);
-    ctx.lineTo(midX, height);
-    ctx.closePath();
-    ctx.fillStyle = touchControls.activeZones.leftLower ? '#fff' : '#666';
-    ctx.fill();
-
-    // Right side zones - mirrored from left side
-    // Upper right (accelerate)
-    ctx.beginPath();
-    ctx.moveTo(width, 0);
-    ctx.lineTo(midX, 0);
+    ctx.moveTo(midX, 0);
     ctx.lineTo(width, height);
-    ctx.closePath();
-    ctx.fillStyle = touchControls.activeZones.rightUpper ? '#fff' : '#666';
-    ctx.fill();
-
-    // Lower right (decelerate)
-    ctx.beginPath();
-    ctx.moveTo(width, height);
-    ctx.lineTo(midX, 0);
-    ctx.lineTo(midX, height);
-    ctx.closePath();
-    ctx.fillStyle = touchControls.activeZones.rightLower ? '#fff' : '#666';
-    ctx.fill();
-
+    ctx.stroke();
     ctx.restore();
 }
 
