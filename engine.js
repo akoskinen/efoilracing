@@ -4286,35 +4286,23 @@ if (atlasEls.hud && typeof PointerEvent === 'undefined') {
 }
 
 function drawTouchZones() {
+    if (atlas.open) return;
     if (!('ontouchstart' in window)) return;
 
     const width = canvas.width;
     const height = canvas.height;
     const midX = width / 2;
-    const z = touchControls.activeZones;
 
+    // One dashed split: left thumb crosses it for left/right, right thumb for faster/slower.
     ctx.save();
-    const fillZone = (path, active) => {
-        ctx.beginPath();
-        path();
-        ctx.closePath();
-        ctx.fillStyle = active ? 'rgba(127, 212, 255, 0.10)' : 'rgba(255,255,255,0.015)';
-        ctx.fill();
-    };
-    fillZone(() => { ctx.moveTo(0, 0); ctx.lineTo(midX, 0); ctx.lineTo(0, height); }, z.leftUpper);
-    fillZone(() => { ctx.moveTo(0, height); ctx.lineTo(midX, 0); ctx.lineTo(midX, height); }, z.leftLower);
-    fillZone(() => { ctx.moveTo(width, 0); ctx.lineTo(midX, 0); ctx.lineTo(width, height); }, z.rightUpper);
-    fillZone(() => { ctx.moveTo(width, height); ctx.lineTo(midX, 0); ctx.lineTo(midX, height); }, z.rightLower);
-
-    ctx.strokeStyle = 'rgba(127, 212, 255, 0.42)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([7, 6]);
+    ctx.strokeStyle = 'rgba(127, 212, 255, 0.55)';
+    ctx.lineWidth = 1.25;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.setLineDash([8, 7]);
     ctx.beginPath();
-    ctx.moveTo(midX, 0);
-    ctx.lineTo(midX, height);
     ctx.moveTo(0, height);
     ctx.lineTo(midX, 0);
-    ctx.moveTo(midX, 0);
     ctx.lineTo(width, height);
     ctx.stroke();
     ctx.restore();
