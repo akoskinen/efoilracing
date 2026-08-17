@@ -1376,11 +1376,7 @@ function setAtlasOpen(on) {
   canvas.style.cursor = '';
   if (atlasEls.hud) atlasEls.hud.style.cursor = '';
   if (atlasEls.hint) {
-    atlasEls.hint.textContent = on
-      ? (('ontouchstart' in window)
-        ? 'T · current course'
-        : 'T or Esc · current course')
-      : 'T world map';
+    atlasEls.hint.title = on ? 'Return to current course (T)' : 'World map (T)';
   }
   resetAtlasPointers();
   if (on) {
@@ -1822,13 +1818,27 @@ function onAtlasPointerUp(e) {
   if (tap && tap.id === e.pointerId) atlas.tap = null;
 }
 
-if (atlasEls.hint) {
-  atlasEls.hint.addEventListener('click', e => {
+function bindChromeTap(el, fn) {
+  if (!el) return;
+  let last = 0;
+  const fire = e => {
     e.preventDefault();
     e.stopPropagation();
-    requestAtlas();
+    const now = performance.now();
+    if (now - last < 400) return;
+    last = now;
+    fn(e);
+  };
+  el.addEventListener('click', fire);
+  el.addEventListener('pointerup', e => {
+    if (e.pointerType === 'mouse') return;
+    fire(e);
   });
+  el.addEventListener('touchend', fire, { passive: false });
 }
+
+bindChromeTap(atlasEls.hint, () => requestAtlas());
+bindChromeTap(document.getElementById('fullscreenBtn'), () => toggleFullScreen());
 
 if (atlasEls.layoutsBtn) {
   atlasEls.layoutsBtn.addEventListener('click', e => {
@@ -2100,48 +2110,7 @@ window.toggleFullScreen = toggleFullScreen;
 
 // --- Fullscreen Button ---
 function createFullscreenButton() {
-  const button = document.createElement('div');
-  button.id = 'fullscreen-button';
-  button.innerHTML = '[ ]';
-  button.title = 'Toggle Fullscreen';
-  
-  // Add CSS for the button
-  const style = document.createElement('style');
-  style.textContent = `
-    #fullscreen-button {
-      position: fixed;
-      top: 15px;
-      right: 15px;
-      color: rgba(255, 255, 255, 0.5);
-      font-family: monospace;
-      font-size: 16px;
-      padding: 5px 8px;
-      cursor: pointer;
-      z-index: 1000;
-      border-radius: 4px;
-      user-select: none;
-      transition: all 0.2s ease;
-    }
-    
-    #fullscreen-button:hover {
-      color: rgba(255, 255, 255, 0.9);
-      transform: scale(1.1);
-    }
-  `;
-  document.head.appendChild(style);
-  
-  // Add click handler
-  button.addEventListener('click', () => {
-    toggleFullScreen();
-  });
-  
-  // Add to document
-  document.body.appendChild(button);
-  
-  // Set initial state
   updateFullscreenButtonState();
-  
-  // Add fullscreen change listener
   document.addEventListener('fullscreenchange', updateFullscreenButtonState);
   document.addEventListener('webkitfullscreenchange', updateFullscreenButtonState);
   document.addEventListener('mozfullscreenchange', updateFullscreenButtonState);
@@ -2149,16 +2118,11 @@ function createFullscreenButton() {
 }
 
 function updateFullscreenButtonState() {
-  const button = document.getElementById('fullscreen-button');
+  const button = document.getElementById('fullscreenBtn');
   if (!button) return;
-  
-  if (document.fullscreenElement) {
-    button.innerHTML = '[ x ]';
-    button.title = 'Exit Fullscreen (Esc)';
-  } else {
-    button.innerHTML = '[ ]';
-    button.title = 'Enter Fullscreen';
-  }
+  const on = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  button.textContent = on ? 'F Exit Fullscreen' : 'F Fullscreen';
+  button.title = on ? 'Exit fullscreen (F or Esc)' : 'Enter fullscreen (F)';
 }
 
 // --- Game Physics and Control Variables ---
@@ -2959,6 +2923,12 @@ document.addEventListener('keydown', function(e) {
 
   if (atlasEls.confirm.classList.contains('open')) {
     if (e.key === 'Escape') keepRacingFromAtlasConfirm();
+    return;
+  }
+
+  if (e.key === 'f' || e.key === 'F') {
+    e.preventDefault();
+    toggleFullScreen();
     return;
   }
 

@@ -94,16 +94,41 @@
 	  font-size: 14px;
 	  text-shadow: 0 1px 3px #000;
 	}
-	#atlasHint {
-	  display: inline-block;
-	  margin-top: 6px;
-	  color: #7fd4ff;
-	  text-decoration: none;
+	#viewChrome {
+	  position: fixed;
+	  top: 10px;
+	  right: 10px;
+	  z-index: 1000;
+	  display: flex;
+	  align-items: center;
+	  gap: 2px;
+	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	  font-size: 13px;
 	  text-shadow: 0 1px 3px #000;
-	  cursor: pointer;
+	  pointer-events: auto;
+	  touch-action: manipulation;
 	}
-	#atlasHint:hover { text-decoration: underline; }
+	#viewChrome a,
+	#viewChrome button {
+	  color: #7fd4ff;
+	  background: transparent;
+	  border: none;
+	  padding: 12px 10px;
+	  margin: 0;
+	  font: inherit;
+	  text-decoration: none;
+	  cursor: pointer;
+	  -webkit-tap-highlight-color: rgba(127, 212, 255, 0.25);
+	  touch-action: manipulation;
+	  user-select: none;
+	}
+	#viewChrome a:hover,
+	#viewChrome button:hover { text-decoration: underline; }
+	#viewChrome .viewChromeSep {
+	  color: rgba(255,255,255,0.45);
+	  padding: 0 2px;
+	  pointer-events: none;
+	}
 
 	#atlasHud {
 	  position: absolute;
@@ -255,7 +280,11 @@
   <!-- Ride / atlas chrome -->
   <div id="rideChrome">
 	<a id="designerLink" href="designer.html">Design a track &rarr;</a>
-	<a id="atlasHint" href="#">T world map</a>
+  </div>
+  <div id="viewChrome">
+	<a id="atlasHint" href="#">T World Map</a>
+	<span class="viewChromeSep" aria-hidden="true">•</span>
+	<button type="button" id="fullscreenBtn">F Fullscreen</button>
   </div>
   <div id="atlasHud">
 	<div id="atlasCard"></div>
