@@ -106,9 +106,13 @@
 	  inset: 0;
 	  z-index: 5;
 	  pointer-events: none;
+	  touch-action: none;
 	  display: none;
 	}
-	body.atlas-open #atlasHud { display: block; }
+	body.atlas-open #atlasHud {
+	  display: block;
+	  pointer-events: auto;
+	}
 	#lapTimeDisplay, #speedDisplay, #bankAngleDisplay,
 	#lapHistory, #ghostInfo, #ghostControls {
 	  opacity: 1;

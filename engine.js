@@ -874,6 +874,7 @@ const rideHudEls = [
 ].filter(Boolean);
 const ATLAS_DOT_R = 9;
 const ATLAS_HIT_R = 22;
+const ATLAS_HIT_R_TOUCH = 48;
 const atlasEls = {
   hud: document.getElementById('atlasHud'),
   card: document.getElementById('atlasCard'),
@@ -895,7 +896,11 @@ const atlas = {
   usedTouch: false,
   ignoreClickUntil: 0,
   concealing: false,
-  pendingFrom: null
+  pendingFrom: null,
+  pointers: new Map(),
+  pinchStartDist: 0,
+  pinchFired: false,
+  tap: null
 };
 
 function escAtlas(s) {
@@ -1069,7 +1074,7 @@ function pinOpacity(pin, index, now) {
 
 function hitAtlasPin(sx, sy) {
   let best = null;
-  let bestD = ATLAS_HIT_R;
+  let bestD = atlas.usedTouch ? ATLAS_HIT_R_TOUCH : ATLAS_HIT_R;
   atlas.pins.forEach((pin, i) => {
     if (pinOpacity(pin, i, performance.now()) < 0.4) return;
     const p = atlasLatLngToScreen(pin.lat, pin.lng, atlas.view);
@@ -1080,6 +1085,55 @@ function hitAtlasPin(sx, sy) {
     }
   });
   return best;
+}
+
+function atlasPinsInteractive() {
+  if (atlas.anim && atlas.anim.toZoom < atlas.anim.fromZoom - 0.2) return false;
+  return atlas.pins.some((pin, i) => pinOpacity(pin, i, performance.now()) >= 0.4);
+}
+
+function atlasChromeTarget(el) {
+  return !!(el && el.closest && el.closest('#atlasCard, #atlasLayouts, #atlasLayoutsBtn, #atlasEmpty, #atlasConfirm'));
+}
+
+function resetAtlasPointers() {
+  atlas.pointers.clear();
+  atlas.pinchStartDist = 0;
+  atlas.pinchFired = false;
+  atlas.tap = null;
+}
+
+function atlasPointerCenterAndDist() {
+  const pts = [...atlas.pointers.values()];
+  if (pts.length < 2) return { dist: 0, x: 0, y: 0 };
+  const a = pts[0], b = pts[1];
+  return {
+    dist: Math.hypot(a.x - b.x, a.y - b.y),
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2
+  };
+}
+
+function atlasPinchZoomToCurrent() {
+  if (!atlas.open || atlas.concealing) return;
+  if (atlas.anim && atlas.anim.toZoom > atlas.anim.fromZoom + 0.2) return;
+  closeAtlas();
+}
+
+function handleAtlasPinch() {
+  const cd = atlasPointerCenterAndDist();
+  if (cd.dist < 8) return;
+  if (atlas.pinchStartDist < 8) {
+    atlas.pinchStartDist = cd.dist;
+    return;
+  }
+  if (atlas.pinchFired) return;
+  const ratio = cd.dist / atlas.pinchStartDist;
+  // Same as race: spread (pinch out) zooms in — here, back to the pulsating current course.
+  if (ratio > 1.18) {
+    atlas.pinchFired = true;
+    atlasPinchZoomToCurrent();
+  }
 }
 
 function closeAtlasCards() {
@@ -1282,7 +1336,15 @@ function setAtlasOpen(on) {
   atlas.open = on;
   document.body.classList.toggle('atlas-open', on);
   canvas.style.cursor = '';
-  if (atlasEls.hint) atlasEls.hint.textContent = on ? 'T or Esc to return' : 'T world map';
+  if (atlasEls.hud) atlasEls.hud.style.cursor = '';
+  if (atlasEls.hint) {
+    atlasEls.hint.textContent = on
+      ? (('ontouchstart' in window)
+        ? 'Pinch out · current course · tap a country'
+        : 'T or Esc to return')
+      : 'T world map';
+  }
+  resetAtlasPointers();
   if (on) {
     setRideHudOpacity(0);
     return;
@@ -1378,6 +1440,7 @@ function closeAtlas() {
   if (!atlas.open) return;
   hideAtlasConfirm();
   closeAtlasCards();
+  resetAtlasPointers();
   const to = cameraLatLngZoom();
   if (!hasGeo(currentTrack)) {
     setAtlasOpen(false);
@@ -1410,6 +1473,7 @@ function requestAtlas() {
 
 function diveToPreset(preset) {
   if (!preset?.track) return;
+  resetAtlasPointers();
   const key = savedTrackKey(preset.id);
   registerCustomTrack(key, trackFromPreset(preset));
   closeAtlasCards();
@@ -1630,8 +1694,10 @@ function onAtlasMove(e) {
   const { x, y } = atlasPointerPos(e);
   const pin = hitAtlasPin(x, y);
   atlas.hoverKey = pin ? pin.key : null;
-  canvas.style.cursor = pin ? 'pointer' : '';
-  if (pin && atlas.selectedKey !== pin.key) showAtlasCountry(pin);
+  const pointer = pin ? 'pointer' : '';
+  canvas.style.cursor = pointer;
+  if (atlasEls.hud) atlasEls.hud.style.cursor = pointer;
+  if (pin && pin.presets.length > 1 && atlas.selectedKey !== pin.key) showAtlasCountry(pin);
 }
 
 function onAtlasClick(e) {
@@ -1648,6 +1714,7 @@ function onAtlasClick(e) {
     showAtlasCountry(pin);
     return;
   }
+  if (!atlasPinsInteractive()) return;
   if (atlas.selectedKey) {
     closeAtlasCards();
     return;
@@ -1659,6 +1726,57 @@ function onAtlasTap(clientX, clientY) {
   atlas.usedTouch = true;
   atlas.ignoreClickUntil = performance.now() + 600;
   onAtlasClick({ clientX, clientY });
+}
+
+function onAtlasPointerDown(e) {
+  if (!atlas.open) return;
+  if (atlasEls.confirm.classList.contains('open')) return;
+  if (atlasChromeTarget(e.target)) return;
+  e.preventDefault();
+  atlas.usedTouch = e.pointerType === 'touch' || e.pointerType === 'pen';
+  atlas.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  if (atlas.pointers.size >= 2) {
+    atlas.tap = null;
+    const cd = atlasPointerCenterAndDist();
+    atlas.pinchStartDist = cd.dist;
+    atlas.pinchFired = false;
+    return;
+  }
+  atlas.tap = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+}
+
+function onAtlasPointerMove(e) {
+  if (!atlas.open) return;
+  if (!atlas.pointers.has(e.pointerId)) {
+    if (e.pointerType !== 'touch' && !atlasChromeTarget(e.target)) onAtlasMove(e);
+    return;
+  }
+  atlas.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (atlas.pointers.size >= 2) {
+    atlas.tap = null;
+    handleAtlasPinch();
+    return;
+  }
+  if (atlas.tap && atlas.tap.id === e.pointerId) {
+    const d = Math.hypot(e.clientX - atlas.tap.x, e.clientY - atlas.tap.y);
+    if (d > 16) atlas.tap.moved = true;
+  } else if (e.pointerType !== 'touch') {
+    onAtlasMove(e);
+  }
+}
+
+function onAtlasPointerUp(e) {
+  if (!atlas.open) return;
+  const tap = atlas.tap;
+  const wasTap = tap && tap.id === e.pointerId && !tap.moved && atlas.pointers.size <= 1 && !atlas.pinchFired;
+  atlas.pointers.delete(e.pointerId);
+  if (atlas.pointers.size < 2) {
+    atlas.pinchStartDist = 0;
+    atlas.pinchFired = false;
+  }
+  if (wasTap) onAtlasTap(tap.x, tap.y);
+  if (tap && tap.id === e.pointerId) atlas.tap = null;
 }
 
 if (atlasEls.layoutsBtn) {
@@ -1687,6 +1805,14 @@ document.getElementById('atlasConfirmYes')?.addEventListener('click', () => {
   openAtlas();
 });
 document.getElementById('atlasConfirmNo')?.addEventListener('click', keepRacingFromAtlasConfirm);
+
+if (atlasEls.hud) {
+  const opts = { passive: false };
+  atlasEls.hud.addEventListener('pointerdown', onAtlasPointerDown, opts);
+  atlasEls.hud.addEventListener('pointermove', onAtlasPointerMove, opts);
+  atlasEls.hud.addEventListener('pointerup', onAtlasPointerUp);
+  atlasEls.hud.addEventListener('pointercancel', onAtlasPointerUp);
+}
 
 canvas.addEventListener('mousemove', onAtlasMove);
 canvas.addEventListener('click', onAtlasClick);
@@ -3959,6 +4085,48 @@ const touchControls = {
         return true;
     },
 
+    handleAtlasTouch(e) {
+        if (atlasEls.confirm.classList.contains('open')) return;
+        atlas.usedTouch = true;
+        atlas.pointers.clear();
+        for (let i = 0; i < e.touches.length; i++) {
+            const t = e.touches[i];
+            atlas.pointers.set(t.identifier, { x: t.clientX, y: t.clientY });
+        }
+        if (e.touches.length >= 2) {
+            atlas.tap = null;
+            handleAtlasPinch();
+            return;
+        }
+        if (e.type === 'touchstart' && e.touches.length === 1) {
+            const t = e.touches[0];
+            atlas.tap = { id: t.identifier, x: t.clientX, y: t.clientY, moved: false };
+            atlas.pinchStartDist = 0;
+            atlas.pinchFired = false;
+            return;
+        }
+        if (atlas.tap && e.touches.length === 1) {
+            const t = e.touches[0];
+            if (Math.hypot(t.clientX - atlas.tap.x, t.clientY - atlas.tap.y) > 16) {
+                atlas.tap.moved = true;
+            }
+        }
+    },
+
+    handleAtlasTouchEnd(e) {
+        const tap = atlas.tap;
+        for (let i = 0; i < e.changedTouches.length; i++) {
+            atlas.pointers.delete(e.changedTouches[i].identifier);
+        }
+        if (e.touches.length < 2) {
+            atlas.pinchStartDist = 0;
+            atlas.pinchFired = false;
+        }
+        const endedTap = tap && e.touches.length === 0 && !tap.moved && !atlas.pinchFired;
+        if (endedTap) onAtlasTap(tap.x, tap.y);
+        if (e.touches.length === 0) atlas.tap = null;
+    },
+
     getZone(x, y) {
         const width = window.innerWidth;
         const height = window.innerHeight;
@@ -3981,10 +4149,7 @@ const touchControls = {
         e.preventDefault();
 
         if (atlas.open) {
-            if (e.type === 'touchstart' && e.touches.length === 1) {
-                const t = e.touches[0];
-                onAtlasTap(t.clientX, t.clientY);
-            }
+            this.handleAtlasTouch(e);
             return;
         }
 
@@ -4035,6 +4200,10 @@ const touchControls = {
     },
 
     handleTouchEnd(e) {
+        if (atlas.open) {
+            this.handleAtlasTouchEnd(e);
+            return;
+        }
         if (e.touches.length < 2) {
             this.resetPinch();
         }
@@ -4064,6 +4233,29 @@ document.addEventListener('gesturestart', (e) => {
 // Initialize touch controls if device supports touch
 if ('ontouchstart' in window) {
     touchControls.init();
+}
+
+if (atlasEls.hud && typeof PointerEvent === 'undefined') {
+    const opts = { passive: false };
+    atlasEls.hud.addEventListener('touchstart', e => {
+        if (!atlas.open || atlasChromeTarget(e.target)) return;
+        e.preventDefault();
+        touchControls.handleAtlasTouch(e);
+    }, opts);
+    atlasEls.hud.addEventListener('touchmove', e => {
+        if (!atlas.open || atlasChromeTarget(e.target)) return;
+        e.preventDefault();
+        touchControls.handleAtlasTouch(e);
+    }, opts);
+    atlasEls.hud.addEventListener('touchend', e => {
+        if (!atlas.open) return;
+        e.preventDefault();
+        touchControls.handleAtlasTouchEnd(e);
+    }, opts);
+    atlasEls.hud.addEventListener('touchcancel', e => {
+        if (!atlas.open) return;
+        touchControls.handleAtlasTouchEnd(e);
+    }, opts);
 }
 
 function drawTouchZones() {
