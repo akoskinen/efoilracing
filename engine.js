@@ -1378,8 +1378,8 @@ function setAtlasOpen(on) {
   if (atlasEls.hint) {
     atlasEls.hint.textContent = on
       ? (('ontouchstart' in window)
-        ? 'Pinch out · current course · tap a country for tracks'
-        : 'T or Esc to return')
+        ? 'T · current course'
+        : 'T or Esc · current course')
       : 'T world map';
   }
   resetAtlasPointers();
@@ -1820,6 +1820,14 @@ function onAtlasPointerUp(e) {
     }
   }
   if (tap && tap.id === e.pointerId) atlas.tap = null;
+}
+
+if (atlasEls.hint) {
+  atlasEls.hint.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    requestAtlas();
+  });
 }
 
 if (atlasEls.layoutsBtn) {
@@ -3606,15 +3614,17 @@ function polylinePointAt(pts, dist) {
 function racingLineFitsView(pts) {
   if (!pts || pts.length < 2 || !canvas.width || !canvas.height) return true;
   const s = followCam.scale || 1;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const tx = followCam.tx;
+  const ty = followCam.ty;
+  const pad = Math.max(56, Math.min(canvas.width, canvas.height) * 0.14);
   for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
+    const sx = p.x * s + tx;
+    const sy = p.y * s + ty;
+    if (sx < pad || sy < pad || sx > canvas.width - pad || sy > canvas.height - pad) {
+      return false;
+    }
   }
-  const pad = 96 / s;
-  return (maxX - minX) <= canvas.width / s - pad && (maxY - minY) <= canvas.height / s - pad;
+  return true;
 }
 
 function introLineCameraFocus(intro) {

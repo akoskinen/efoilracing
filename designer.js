@@ -144,6 +144,10 @@ function withDefaults(t) {
     if (line.visible == null) line.visible = true;
     if (!line.points) line.points = [];
   });
+  if (t.racingLines.length && !t.racingLines.some(l => l.chase)) {
+    const recorded = t.racingLines.find(l => l.points?.length >= 2) || t.racingLines[0];
+    recorded.chase = true;
+  }
   return t;
 }
 
@@ -1318,9 +1322,10 @@ function rebuildLineList() {
     item.appendChild(vis);
 
     const chase = document.createElement('button');
-    chase.className = 'mini';
+    chase.className = 'mini' + (line.chase ? ' chase-on' : '');
     chase.textContent = line.chase ? '\u2605' : '\u2606';
     chase.title = line.chase ? 'Default chase ghost' : 'Set as chase ghost';
+    chase.setAttribute('aria-pressed', line.chase ? 'true' : 'false');
     chase.addEventListener('click', () => {
       pushUndo();
       track.racingLines.forEach(l => { l.chase = false; });
