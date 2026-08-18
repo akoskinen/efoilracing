@@ -1819,6 +1819,8 @@ function onAtlasPointerUp(e) {
 }
 
 function bindChromeTap(el, fn) {
+  // HUD on top of a full-screen racing canvas: click-only handlers fail on
+  // touch (the canvas eats the gesture). Fire on pointer/touch down as well.
   if (!el) return;
   let last = 0;
   const fire = e => {
@@ -1829,12 +1831,14 @@ function bindChromeTap(el, fn) {
     last = now;
     fn(e);
   };
+  // Mouse: click. Touch: fire on down so a canvas under the HUD cannot steal the gesture.
   el.addEventListener('click', fire);
-  el.addEventListener('pointerup', e => {
+  el.addEventListener('pointerdown', e => {
+    if (e.button) return;
     if (e.pointerType === 'mouse') return;
     fire(e);
   });
-  el.addEventListener('touchend', fire, { passive: false });
+  el.addEventListener('touchstart', fire, { passive: false });
 }
 
 bindChromeTap(atlasEls.hint, () => requestAtlas());
@@ -1842,6 +1846,13 @@ bindChromeTap(document.getElementById('fullscreenBtn'), () => toggleFullScreen()
 bindChromeTap(document.getElementById('pathBtn'), () => {
   if (trackHasRacingLines(currentTrack)) setShowRacingLines(!showRacingLines);
 });
+
+const viewChrome = document.getElementById('viewChrome');
+if (viewChrome) {
+  ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(type => {
+    viewChrome.addEventListener(type, e => e.stopPropagation(), true);
+  });
+}
 
 if (atlasEls.layoutsBtn) {
   atlasEls.layoutsBtn.addEventListener('click', e => {
@@ -4321,6 +4332,9 @@ const touchControls = {
     },
 
     handleTouch(e) {
+        if (e.target && e.target.closest && e.target.closest('#viewChrome, #rideChrome, #atlasConfirm, #ghostControls, #ghostInfo')) {
+            return;
+        }
         e.preventDefault();
 
         if (atlas.open) {
@@ -4359,8 +4373,9 @@ const touchControls = {
     }
 };
 
-// Prevent default touch behaviors
+// Prevent default touch behaviors (do not swallow HUD chrome taps)
 document.addEventListener('touchmove', (e) => {
+    if (e.target && e.target.closest && e.target.closest('#viewChrome, #rideChrome, #atlasCard, #atlasLayouts, #atlasConfirm, #ghostControls')) return;
     e.preventDefault();
 }, { passive: false });
 

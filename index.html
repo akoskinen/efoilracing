@@ -112,7 +112,9 @@
 	#viewChrome .viewChromeRow {
 	  display: flex;
 	  align-items: center;
+	  justify-content: flex-end;
 	  gap: 2px;
+	  width: 100%;
 	}
 	#viewChrome a,
 	#viewChrome button {
@@ -121,12 +123,18 @@
 	  border: none;
 	  padding: 12px 10px;
 	  margin: 0;
+	  min-height: 44px;
 	  font: inherit;
 	  text-decoration: none;
 	  cursor: pointer;
 	  -webkit-tap-highlight-color: rgba(127, 212, 255, 0.25);
 	  touch-action: manipulation;
 	  user-select: none;
+	  pointer-events: auto;
+	}
+	#pathBtn {
+	  width: 100%;
+	  text-align: right;
 	}
 	#viewChrome a:hover,
 	#viewChrome button:hover { text-decoration: underline; }

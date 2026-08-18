@@ -26,7 +26,7 @@ This note captures **what shipped** after Milestone 5 and **why** the atlas came
 
 `atlasViewLookingAt(lat, lng, zoom, screenX, screenY)` sets the view so that lat/lng sits on a given screen pixel. Dive: `fromScreen` = current pin/start on the atlas, `toScreen` = canvas center. Pull-out: stay centered on the ride look-at.
 
-Empty ocean click, Esc, or T again returns to the current course (mid-lap T asks first).
+Empty ocean click, Esc, or T again returns to the current course (mid-lap T asks first). Top-right HUD (**T World Map**, **F Fullscreen**, **P Show/Hide Path**) is tap-sized and uses `bindChromeTap` so the racing canvas cannot steal the finger press. Any new overlay control on the sim must work the same way on a touchscreen, not only with a mouse.
 
 ## Atlas tiles (smooth LOD)
 

@@ -28,7 +28,11 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | **Z** | Cycle zoom: race → **1 km** → **5 km** → race |
 | P | Toggle racing line |
 | G | Keep racing against the current ghost |
-| T | World atlas (Esc or T again returns) |
+| **T** | World atlas (Esc or T again returns). Top-right **T World Map** |
+| **F** | Fullscreen. Top-right **F Fullscreen** |
+| **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** |
+
+HUD chrome (T / F / P) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
 
 **Race zoom** uses an edge dead-zone follow camera (the rider stays in frame without wrapping the world). **1 km** and **5 km** ease the rider to the center of the viewport — a quick **Z Z** (out then back) is also a smooth recenter.
 
