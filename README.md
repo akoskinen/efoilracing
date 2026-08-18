@@ -27,7 +27,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | Arrows / IJKL | Steer and throttle |
 | **Z** | Cycle zoom: race → **1 km** → **5 km** → race |
 | **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** |
-| G | Keep racing against the current ghost. Top-left **Customize ghost** |
+| G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map** |
 | **F** | Fullscreen. Top-right **F Fullscreen** |
 
@@ -39,7 +39,7 @@ HUD chrome (T / F / P, and **Customize ghost**) must work with a **finger** as w
 
 On geo tracks, satellite tiles **stream around the camera** and prefetch along heading/speed so panning and zoom-out should not flash empty water. Lower-zoom parents fill in while higher-zoom tiles load.
 
-The top-left telemetry block starts with the **current ghost** (your previous lap by default). **Customize ghost** sits under Design a track / ← Back to Designer and hides Keep / Export / Choose file / Use previous lap. Import a **ghost JSON** or a **session CSV** there (Choose file / drop). If a geo track is already selected, GPS is projected through that track’s origin. Otherwise a temporary session map is created.
+The top-left telemetry block starts with the **current ghost** (your previous lap by default). **Customize ghost** sits under Design a track / ← Back to Designer and hides **G Keep current ghost** (toggles to **G Use previous lap**), Export, and Choose file. Tap outside the panel to dismiss it. Import a **ghost JSON** or a **session CSV** there (Choose file / drop). If a geo track is already selected, GPS is projected through that track’s origin. Otherwise a temporary session map is created.
 
 ## Designer
 

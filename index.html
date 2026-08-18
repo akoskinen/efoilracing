@@ -120,26 +120,30 @@
 	  gap: 0;
 	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	  font-size: 13px;
+	  line-height: 1.35;
 	  text-shadow: 0 1px 3px #000;
-	  pointer-events: auto;
+	  pointer-events: none;
 	  touch-action: manipulation;
 	}
 	#viewChrome .viewChromeRow {
 	  display: flex;
-	  align-items: center;
+	  align-items: baseline;
 	  justify-content: flex-end;
 	  gap: 2px;
-	  width: 100%;
+	  width: auto;
+	  min-height: 0;
 	}
 	#viewChrome a,
 	#viewChrome button {
+	  position: relative;
 	  color: #7fd4ff;
 	  background: transparent;
 	  border: none;
-	  padding: 12px 10px;
+	  padding: 1px 6px;
 	  margin: 0;
-	  min-height: 44px;
+	  min-height: 0;
 	  font: inherit;
+	  line-height: 1.35;
 	  text-decoration: none;
 	  cursor: pointer;
 	  -webkit-tap-highlight-color: rgba(127, 212, 255, 0.25);
@@ -147,8 +151,18 @@
 	  user-select: none;
 	  pointer-events: auto;
 	}
+	/* Keep a ~44px tap target without a blank row between F and P. */
+	#viewChrome a::after,
+	#viewChrome button::after {
+	  content: '';
+	  position: absolute;
+	  top: -12px;
+	  right: -8px;
+	  bottom: -12px;
+	  left: -8px;
+	}
 	#pathBtn {
-	  width: 100%;
+	  width: auto;
 	  text-align: right;
 	}
 	#viewChrome a:hover,
@@ -294,12 +308,11 @@
 	<a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
 	<button type="button" class="hudLink" id="customizeGhostBtn" aria-expanded="false">Customize ghost</button>
 	<div id="ghostCustomize">
-	  <button type="button" class="hudLink" id="keepGhostBtn">Keep this ghost</button>
+	  <button type="button" class="hudLink" id="keepGhostBtn">G Keep current ghost</button>
 	  <button type="button" class="hudLink" id="exportGhostBtn">Export ghost</button>
 	  <button type="button" class="hudLink" id="chooseFileBtn">Choose file</button>
 	  <span id="fileLabel">ghost JSON or session CSV</span>
 	  <input type="file" id="importGhostFile" accept=".json,.csv,application/json,text/csv" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
-	  <button type="button" class="hudLink" id="clearGhostBtn">Use previous lap</button>
 	</div>
   </div>
   <div id="viewChrome">

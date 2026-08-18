@@ -1832,14 +1832,14 @@ function bindChromeTap(el, fn) {
     last = now;
     fn(e);
   };
-  // Mouse: click. Touch: fire on down so a canvas under the HUD cannot steal the gesture.
-  el.addEventListener('click', fire);
+  // Capture so an ancestor cannot swallow the tap before the control sees it.
+  el.addEventListener('click', fire, true);
   el.addEventListener('pointerdown', e => {
     if (e.button) return;
     if (e.pointerType === 'mouse') return;
     fire(e);
-  });
-  el.addEventListener('touchstart', fire, { passive: false });
+  }, true);
+  el.addEventListener('touchstart', fire, { passive: false, capture: true });
 }
 
 bindChromeTap(atlasEls.hint, () => requestAtlas());
@@ -1852,26 +1852,15 @@ bindChromeTap(document.getElementById('customizeGhostBtn'), () => {
   setGhostCustomizeOpen(!panel?.classList.contains('open'));
 });
 bindChromeTap(document.getElementById('keepGhostBtn'), () => {
-  setKeepCurrentGhost(!keepCurrentGhost);
+  toggleKeepCurrentGhost();
 });
 
-const viewChrome = document.getElementById('viewChrome');
-if (viewChrome) {
-  ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(type => {
-    viewChrome.addEventListener(type, e => e.stopPropagation(), true);
-  });
-}
-// Bubble only — a capture stop on the column would swallow taps on the
-// designer link and Customize ghost controls before bindChromeTap ran.
-const rideChrome = document.getElementById('rideChrome');
-if (rideChrome) {
-  ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(type => {
-    rideChrome.addEventListener(type, e => {
-      if (e.target?.closest?.('a[href]')) return;
-      e.stopPropagation();
-    });
-  });
-}
+document.addEventListener('pointerdown', e => {
+  const panel = document.getElementById('ghostCustomize');
+  if (!panel?.classList.contains('open')) return;
+  if (e.target?.closest?.('#ghostCustomize, #customizeGhostBtn')) return;
+  setGhostCustomizeOpen(false);
+}, true);
 
 if (atlasEls.layoutsBtn) {
   atlasEls.layoutsBtn.addEventListener('click', e => {
@@ -1933,12 +1922,17 @@ function setKeepCurrentGhost(on) {
   updateKeepGhostButton();
 }
 
+function toggleKeepCurrentGhost() {
+  if (keepCurrentGhost) restorePreviousLapGhost();
+  else setKeepCurrentGhost(true);
+}
+
 function updateKeepGhostButton() {
   const btn = document.getElementById('keepGhostBtn');
   if (!btn) return;
-  btn.textContent = keepCurrentGhost ? 'Keeping this ghost' : 'Keep this ghost';
+  btn.textContent = keepCurrentGhost ? 'G Use previous lap' : 'G Keep current ghost';
   btn.title = keepCurrentGhost
-    ? 'New laps will not replace this ghost (G)'
+    ? 'Race your previous lap again (G)'
     : 'Hold this ghost instead of using your previous lap (G)';
 }
 
@@ -3035,9 +3029,9 @@ document.addEventListener('keydown', function(e) {
     }
   }
 
-  // Toggle 'G' to keep racing against the current ghost
+  // Toggle 'G' to keep the current ghost, or restore the previous lap
   if (e.key === 'g' || e.key === 'G') {
-    setKeepCurrentGhost(!keepCurrentGhost);
+    toggleKeepCurrentGhost();
   }
 
   // Press 'T' for the world atlas
@@ -3906,7 +3900,6 @@ function gameLoop(timestamp) {
 // --- Ghost Export / Import Controls ---
 const exportGhostBtn  = document.getElementById('exportGhostBtn');
 const importGhostFile = document.getElementById('importGhostFile');
-const clearGhostBtn   = document.getElementById('clearGhostBtn');
 
 bindChromeTap(exportGhostBtn, () => {
   if (!ghostDataMap.size) {
@@ -4109,8 +4102,6 @@ function restorePreviousLapGhost() {
   }
   updateGhostStats();
 }
-
-bindChromeTap(clearGhostBtn, restorePreviousLapGhost);
 
 function applyDefaultSavedTrack() {
   const params = new URLSearchParams(window.location.search);
