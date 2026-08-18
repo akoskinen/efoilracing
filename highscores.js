@@ -504,7 +504,11 @@ export class HighScoreManager {
           
           // Set flags
           window.showGhost = true;
-          window.keepCurrentGhost = true;
+          if (typeof window.setKeepCurrentGhost === 'function') {
+            window.setKeepCurrentGhost(true);
+          } else {
+            window.keepCurrentGhost = true;
+          }
           
           // Force ghost to show on next lap
           window.ghostWakeTrail = [];  // Clear any old wake trail

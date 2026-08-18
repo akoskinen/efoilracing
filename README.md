@@ -27,11 +27,11 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | Arrows / IJKL | Steer and throttle |
 | **Z** | Cycle zoom: race → **1 km** → **5 km** → race |
 | **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** |
-| G | Keep racing against the current ghost |
+| G | Keep racing against the current ghost. Top-left **Customize ghost** |
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map** |
 | **F** | Fullscreen. Top-right **F Fullscreen** |
 
-HUD chrome (T / F / P) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
+HUD chrome (T / F / P, and **Customize ghost**) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
 
 **Race zoom** uses an edge dead-zone follow camera (the rider stays in frame without wrapping the world). **1 km** and **5 km** ease the rider to the center of the viewport — a quick **Z Z** (out then back) is also a smooth recenter.
 
@@ -39,7 +39,7 @@ HUD chrome (T / F / P) must work with a **finger** as well as a mouse. The race 
 
 On geo tracks, satellite tiles **stream around the camera** and prefetch along heading/speed so panning and zoom-out should not flash empty water. Lower-zoom parents fill in while higher-zoom tiles load.
 
-Import a **ghost JSON** or a **session CSV** (Choose File / drop). If a geo track is already selected, GPS is projected through that track’s origin. Otherwise a temporary session map is created.
+The top-left telemetry block starts with the **current ghost** (your previous lap by default). **Customize ghost** sits under Design a track / ← Back to Designer and hides Keep / Export / Choose file / Use previous lap. Import a **ghost JSON** or a **session CSV** there (Choose file / drop). If a geo track is already selected, GPS is projected through that track’s origin. Otherwise a temporary session map is created.
 
 ## Designer
 

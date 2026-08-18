@@ -31,7 +31,7 @@
 	#speedDisplay { bottom: 50px; font-size: 14px; font-family: Helvetica, sans-serif; font-weight: 300; }
 	#bankAngleDisplay { bottom: 20px; font-size: 14px; font-family: Helvetica, sans-serif; font-weight: 300; }
 
-	/* Lap history */
+	/* Lap history (legacy DOM list; live telemetry is canvas, top-left) */
 	#lapHistory {
 	  position: absolute;
 	  top: 80px;
@@ -44,41 +44,7 @@
 	  font-size: 14px;
 	  width: 220px;
 	  visibility: hidden;
-	}
-	
-	/* Ghost Import/Export Controls */
-	#ghostControls {
-	  position: absolute;
-	  bottom: 20px;
-	  left: 20px;
-	  background: rgba(0, 0, 0, 0.7);
-	  padding: 10px;
-	  border-radius: 8px;
-	  font-size: 14px;
-	}
-	#ghostControls button,
-	#ghostControls input[type="file"] {
-	  display: block;
-	  margin: 6px 0;
-	}
-	
-	/* Ghost info (checkboxes + stats), kept clear of the export panel */
-	#ghostInfo {
-	  position: absolute;
-	  bottom: 20px;
-	  left: 290px;
-	  color: #fff;
-	  font-family: monospace;
-	  font-size: 14px;
-	  line-height: 1.45;
-	  text-shadow: 1px 1px 2px #000;
-	}
-	#ghostStats {
-	  display: block;
-	  margin-top: 2px;
-	}
-	#ghostStats .ghost-time {
-	  display: block;
+	  pointer-events: none;
 	}
 
 	#rideChrome {
@@ -86,12 +52,61 @@
 	  top: 16px;
 	  left: 16px;
 	  z-index: 6;
+	  display: flex;
+	  flex-direction: column;
+	  align-items: flex-start;
+	  gap: 0;
+	  pointer-events: none;
 	}
-	#designerLink {
+	#rideChrome .hudLink,
+	#rideChrome #ghostCustomize {
+	  pointer-events: auto;
+	}
+	#rideChrome .hudLink {
 	  display: inline-block;
 	  color: #7fd4ff;
-	  text-decoration: none;
+	  background: transparent;
+	  border: none;
+	  padding: 10px 0;
+	  margin: 0;
+	  min-height: 44px;
+	  font-family: sans-serif;
 	  font-size: 14px;
+	  text-decoration: none;
+	  text-shadow: 0 1px 3px #000;
+	  cursor: pointer;
+	  text-align: left;
+	  -webkit-tap-highlight-color: rgba(127, 212, 255, 0.25);
+	  touch-action: manipulation;
+	  user-select: none;
+	  pointer-events: auto;
+	}
+	#rideChrome .hudLink:hover { text-decoration: underline; }
+	#ghostCustomize {
+	  display: none;
+	  flex-direction: column;
+	  align-items: stretch;
+	  gap: 2px;
+	  margin-top: 4px;
+	  padding: 8px 12px 10px;
+	  min-width: 200px;
+	  background: rgba(12, 18, 24, 0.78);
+	  backdrop-filter: blur(16px);
+	  -webkit-backdrop-filter: blur(16px);
+	  border: 1px solid rgba(255,255,255,0.14);
+	  border-radius: 12px;
+	  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+	  pointer-events: auto;
+	}
+	#ghostCustomize.open { display: flex; }
+	#ghostCustomize .hudLink {
+	  width: 100%;
+	  padding: 10px 4px;
+	}
+	#fileLabel {
+	  color: rgba(255,255,255,0.55);
+	  font-size: 12px;
+	  padding: 4px;
 	  text-shadow: 0 1px 3px #000;
 	}
 	#viewChrome {
@@ -157,17 +172,16 @@
 	  pointer-events: none;
 	}
 	#lapTimeDisplay, #speedDisplay, #bankAngleDisplay,
-	#lapHistory, #ghostInfo, #ghostControls {
+	#lapHistory {
 	  opacity: 1;
 	}
 	body.atlas-open #lapTimeDisplay,
 	body.atlas-open #speedDisplay,
 	body.atlas-open #bankAngleDisplay,
 	body.atlas-open #lapHistory,
-	body.atlas-open #ghostInfo,
-	body.atlas-open #ghostControls {
-	  opacity: 0;
-	  pointer-events: none;
+	body.atlas-open #customizeGhostBtn,
+	body.atlas-open #ghostCustomize {
+	  display: none;
 	}
 
 	#atlasCard, #atlasLayouts, #atlasEmpty, #atlasConfirm {
@@ -271,29 +285,22 @@
   <!-- Lap history -->
   <div id="lapHistory"></div>
 
-  <!-- Ghost Info -->
-  <div id="ghostInfo">
-    <label id="racingLineToggleRow">
-      <input type="checkbox" id="showRacingLines" checked> show racing line
-    </label>
-    <br>
-    <label>
-      <input type="checkbox" id="keepGhost"> keep racing against this ghost:
-    </label>
-    <div id="ghostStats">No ghost loaded</div>
-  </div>
-
-  <!-- Ghost controls -->
-  <div id="ghostControls" style="position: absolute; bottom: 20px; left: 20px; padding: 10px; background-color: rgba(0,0,0,0.5); border: 1px dashed rgba(255,255,255,0.3); transition: background-color 0.2s;">
-	<button id="exportGhostBtn">Export Ghost</button><br>
-	<input type="file" id="importGhostFile" accept=".json,.csv,application/json,text/csv" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
-	<button id="chooseFileBtn">Choose File</button> <span id="fileLabel">ghost JSON or session CSV</span><br>
-	<button id="clearGhostBtn">Clear Ghost</button>
-  </div>
+  <!-- Line-variant select is mounted here when a track has several ghosts -->
+  <div id="ghostInfo" hidden></div>
+  <div id="ghostStats" hidden></div>
 
   <!-- Ride / atlas chrome -->
   <div id="rideChrome">
-	<a id="designerLink" href="designer.html">Design a track &rarr;</a>
+	<a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
+	<button type="button" class="hudLink" id="customizeGhostBtn" aria-expanded="false">Customize ghost</button>
+	<div id="ghostCustomize">
+	  <button type="button" class="hudLink" id="keepGhostBtn">Keep this ghost</button>
+	  <button type="button" class="hudLink" id="exportGhostBtn">Export ghost</button>
+	  <button type="button" class="hudLink" id="chooseFileBtn">Choose file</button>
+	  <span id="fileLabel">ghost JSON or session CSV</span>
+	  <input type="file" id="importGhostFile" accept=".json,.csv,application/json,text/csv" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
+	  <button type="button" class="hudLink" id="clearGhostBtn">Use previous lap</button>
+	</div>
   </div>
   <div id="viewChrome">
 	<div class="viewChromeRow">

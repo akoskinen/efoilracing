@@ -872,8 +872,8 @@ const rideHudEls = [
   document.getElementById('speedDisplay'),
   document.getElementById('bankAngleDisplay'),
   document.getElementById('lapHistory'),
-  document.getElementById('ghostInfo'),
-  document.getElementById('ghostControls')
+  document.getElementById('customizeGhostBtn'),
+  document.getElementById('ghostCustomize')
 ].filter(Boolean);
 const ATLAS_DOT_R = 9;
 const ATLAS_HIT_R = 22;
@@ -1373,6 +1373,7 @@ function getRideIntro(now) {
 function setAtlasOpen(on) {
   atlas.open = on;
   document.body.classList.toggle('atlas-open', on);
+  if (on) setGhostCustomizeOpen(false);
   canvas.style.cursor = '';
   if (atlasEls.hud) atlasEls.hud.style.cursor = '';
   if (atlasEls.hint) {
@@ -1846,11 +1847,29 @@ bindChromeTap(document.getElementById('fullscreenBtn'), () => toggleFullScreen()
 bindChromeTap(document.getElementById('pathBtn'), () => {
   if (trackHasRacingLines(currentTrack)) setShowRacingLines(!showRacingLines);
 });
+bindChromeTap(document.getElementById('customizeGhostBtn'), () => {
+  const panel = document.getElementById('ghostCustomize');
+  setGhostCustomizeOpen(!panel?.classList.contains('open'));
+});
+bindChromeTap(document.getElementById('keepGhostBtn'), () => {
+  setKeepCurrentGhost(!keepCurrentGhost);
+});
 
 const viewChrome = document.getElementById('viewChrome');
 if (viewChrome) {
   ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(type => {
     viewChrome.addEventListener(type, e => e.stopPropagation(), true);
+  });
+}
+// Bubble only — a capture stop on the column would swallow taps on the
+// designer link and Customize ghost controls before bindChromeTap ran.
+const rideChrome = document.getElementById('rideChrome');
+if (rideChrome) {
+  ['pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(type => {
+    rideChrome.addEventListener(type, e => {
+      if (e.target?.closest?.('a[href]')) return;
+      e.stopPropagation();
+    });
   });
 }
 
@@ -1905,16 +1924,29 @@ function trackHasRacingLines(track) {
 
 function setShowRacingLines(on) {
   showRacingLines = !!on;
-  const cb = document.getElementById('showRacingLines');
-  if (cb) cb.checked = showRacingLines;
   updatePathButtonState();
 }
 
 function setKeepCurrentGhost(on) {
   keepCurrentGhost = !!on;
   window.keepCurrentGhost = keepCurrentGhost;
-  const cb = document.getElementById('keepGhost');
-  if (cb) cb.checked = keepCurrentGhost;
+  updateKeepGhostButton();
+}
+
+function updateKeepGhostButton() {
+  const btn = document.getElementById('keepGhostBtn');
+  if (!btn) return;
+  btn.textContent = keepCurrentGhost ? 'Keeping this ghost' : 'Keep this ghost';
+  btn.title = keepCurrentGhost
+    ? 'New laps will not replace this ghost (G)'
+    : 'Hold this ghost instead of using your previous lap (G)';
+}
+
+function setGhostCustomizeOpen(on) {
+  const panel = document.getElementById('ghostCustomize');
+  const btn = document.getElementById('customizeGhostBtn');
+  if (panel) panel.classList.toggle('open', !!on);
+  if (btn) btn.setAttribute('aria-expanded', on ? 'true' : 'false');
 }
 
 function updatePathButtonState() {
@@ -1928,8 +1960,6 @@ function updatePathButtonState() {
 }
 
 function updateRacingLineToggleVisibility() {
-  const row = document.getElementById('racingLineToggleRow');
-  if (row) row.style.display = trackHasRacingLines(currentTrack) ? '' : 'none';
   updatePathButtonState();
 }
 
@@ -1966,13 +1996,13 @@ function updateLineGhostSelector(track) {
     if (sel) sel.remove();
     return;
   }
-  const host = document.getElementById('ghostInfo');
+  const host = document.getElementById('ghostCustomize') || document.getElementById('ghostInfo');
   if (!host) return;
   if (!sel) {
     sel = document.createElement('select');
     sel.id = 'lineGhostSelect';
-    sel.style.cssText = 'display:block; margin-top:4px; font-size:12px; max-width:220px;';
-    host.appendChild(sel);
+    sel.style.cssText = 'display:block; margin:6px 0; font-size:14px; min-height:44px; width:100%; background:#1d242b; color:#fff; border:1px solid rgba(255,255,255,0.2); border-radius:8px;';
+    host.insertBefore(sel, host.firstChild);
     sel.addEventListener('change', () => {
       const line = currentTrack.racingLines.find(l => l.id === sel.value);
       if (!line) return;
@@ -3470,41 +3500,55 @@ function drawTrack(intro) {
   drawTimingLines();
 }
 
+function telemetryTopY() {
+  const btn = document.getElementById('customizeGhostBtn');
+  const link = document.getElementById('designerLink');
+  const btnVisible = btn && getComputedStyle(btn).display !== 'none';
+  const el = btnVisible ? btn : link;
+  if (!el) return 88;
+  return el.getBoundingClientRect().bottom + 20;
+}
+
 function drawTelemetry() {
   ctx.save();
-    ctx.font = '14px monospace';
+  ctx.font = '14px monospace';
   ctx.fillStyle = '#fff';
-  let x = 20, y = 88;
-    
-    ctx.fillText(`${currentTrack.name} Telemetry:`, x, y);
-  y += 20;
-    
-    const trackLaps = lapsMap.get(currentTrackKey) || [];
-    
-    if (trackLaps.length === 0) {
-        ctx.fillText('No laps recorded', x, y);
-    } else {
-        trackLaps.forEach((lap, idx) => {
-    // Calculate correct lap number: newest lap (idx 0) should have highest number
-    const lapNumber = trackLaps.length - idx;
-    ctx.fillText(`Lap ${lapNumber}:`, x, y);
-    y += 18;
-            if (lap.collided) {
-                ctx.fillText(`  Time:   ${lap.finalTime.toFixed(2)} s  (+${penaltySeconds}s penalty!)`, x, y);
-            } else {
-    ctx.fillText(`  Time:   ${lap.finalTime.toFixed(2)} s`, x, y);
-            }
-    y += 18;
-    ctx.fillText(`  Dist:   ${lap.distance.toFixed(1)} m`, x, y);
-    y += 18;
-    ctx.fillText(`  TopSpd: ${lap.topSpeed.toFixed(1)} km/h`, x, y);
-    y += 18;
-    ctx.fillText(`  MinSpd: ${lap.minSpeed.toFixed(1)} km/h`, x, y);
-    y += 18;
-    ctx.fillText(`  AvgSpd: ${lap.avgSpeed.toFixed(1)} km/h`, x, y);
-    y += 24;
-  });
-    }
+  let x = 20, y = telemetryTopY();
+
+  const ghostLine = ghostHudLines();
+  ctx.fillText(ghostLine.title, x, y);
+  y += 18;
+  if (ghostLine.detail) {
+    ctx.fillText(ghostLine.detail, x, y);
+    y += 22;
+  } else {
+    y += 4;
+  }
+
+  const trackLaps = lapsMap.get(currentTrackKey) || [];
+  if (trackLaps.length === 0) {
+    ctx.fillText('No laps recorded', x, y);
+  } else {
+    trackLaps.forEach((lap, idx) => {
+      const lapNumber = trackLaps.length - idx;
+      ctx.fillText(`Lap ${lapNumber}:`, x, y);
+      y += 18;
+      if (lap.collided) {
+        ctx.fillText(`  Time:   ${lap.finalTime.toFixed(2)} s  (+${penaltySeconds}s penalty!)`, x, y);
+      } else {
+        ctx.fillText(`  Time:   ${lap.finalTime.toFixed(2)} s`, x, y);
+      }
+      y += 18;
+      ctx.fillText(`  Dist:   ${lap.distance.toFixed(1)} m`, x, y);
+      y += 18;
+      ctx.fillText(`  TopSpd: ${lap.topSpeed.toFixed(1)} km/h`, x, y);
+      y += 18;
+      ctx.fillText(`  MinSpd: ${lap.minSpeed.toFixed(1)} km/h`, x, y);
+      y += 18;
+      ctx.fillText(`  AvgSpd: ${lap.avgSpeed.toFixed(1)} km/h`, x, y);
+      y += 24;
+    });
+  }
   ctx.restore();
 }
 
@@ -3864,8 +3908,8 @@ const exportGhostBtn  = document.getElementById('exportGhostBtn');
 const importGhostFile = document.getElementById('importGhostFile');
 const clearGhostBtn   = document.getElementById('clearGhostBtn');
 
-exportGhostBtn.addEventListener('click', () => {
-  if (!ghostDataMap.size > 0) {
+bindChromeTap(exportGhostBtn, () => {
+  if (!ghostDataMap.size) {
     alert('No ghost data to export yet. Complete at least one lap.');
     return;
   }
@@ -3887,46 +3931,46 @@ function calculateAverageSpeed(distance, time) {
     return (distance / time) * 3.6; // Convert m/s to km/h
 }
 
+function ghostHudWho() {
+  if (!currentGhost) return '—';
+  if (currentGhost.lineName) return currentGhost.lineName;
+  if (currentGhost.riderLabel) return currentGhost.riderLabel;
+  if (currentGhost.name) return currentGhost.name;
+  if (keepCurrentGhost) return 'kept';
+  return 'previous lap';
+}
+
+function ghostHudLines() {
+  if (!currentGhost) {
+    return { title: 'Ghost  —', detail: '' };
+  }
+  const lastFrame = currentGhost.frames?.[currentGhost.frames.length - 1];
+  const time = lastFrame?.finalLapTime ?? currentGhost.time ?? lastFrame?.time;
+  let avgSpeed = 0;
+  if (currentGhost.avgSpeed !== undefined) {
+    avgSpeed = currentGhost.avgSpeed;
+  } else if (currentGhost.frames?.[0]?.avgSpeedKmh !== undefined) {
+    avgSpeed = lastFrame?.avgSpeedKmh || 0;
+  } else if (currentGhost.distance && time > 0) {
+    avgSpeed = calculateAverageSpeed(currentGhost.distance, time);
+  }
+  const timeStr = Number.isFinite(time) ? `${time.toFixed(2)} s` : '—';
+  const speedStr = Number.isFinite(avgSpeed) ? `${avgSpeed.toFixed(1)} km/h` : '';
+  return {
+    title: `Ghost  ${ghostHudWho()}`,
+    detail: speedStr ? `  ${timeStr}   ${speedStr}` : `  ${timeStr}`
+  };
+}
+
 function updateGhostStats() {
     const statsElement = document.getElementById('ghostStats');
-    if (!currentGhost) {
-        statsElement.textContent = `No ghost for ${currentTrack.name}`;
-        return;
+    const lines = ghostHudLines();
+    if (statsElement) {
+      statsElement.textContent = lines.detail
+        ? `${lines.title} ${lines.detail.trim()}`
+        : lines.title;
     }
-
-    // Get the lap time and recorded average speed if available
-    const lastFrame = currentGhost.frames[currentGhost.frames.length - 1];
-    const time = lastFrame.finalLapTime ?? currentGhost.time ?? lastFrame.time;
-    let avgSpeed = 0;
-    
-    // Try to get the average speed from stored ghost data
-    if (currentGhost.avgSpeed !== undefined) {
-        // Use pre-calculated average speed if available
-        avgSpeed = currentGhost.avgSpeed;
-    } else if (currentGhost.frames && currentGhost.frames.length > 0) {
-        // If not available, try to calculate from frame data if possible
-        // First check if frames have speed data
-        if (currentGhost.frames[0].avgSpeedKmh !== undefined) {
-            // Use the last frame's average speed
-            const lastFrame = currentGhost.frames[currentGhost.frames.length - 1];
-            avgSpeed = lastFrame.avgSpeedKmh || 0;
-        } else {
-            // Fall back to distance/time calculation as a last resort
-            const distance = currentGhost.distance;
-            if (distance && distance > 0) {
-                avgSpeed = calculateAverageSpeed(distance, time);
-            }
-        }
-    }
-    
-    const prefix = currentGhost.lineName || currentTrack.name;
-    statsElement.replaceChildren();
-    const nameLine = document.createElement('span');
-    nameLine.textContent = `${prefix} Ghost`;
-    const timeLine = document.createElement('span');
-    timeLine.className = 'ghost-time';
-    timeLine.textContent = `Time: ${time.toFixed(2)}s, Avg Speed: ${avgSpeed.toFixed(1)} km/h`;
-    statsElement.append(nameLine, timeLine);
+    updateKeepGhostButton();
 }
 
 function applyImportedGhost(ghost, message) {
@@ -4044,37 +4088,29 @@ importGhostFile.addEventListener('change', async (e) => {
 });
 
 const chooseFileBtn = document.getElementById('chooseFileBtn');
-if (chooseFileBtn) {
-  chooseFileBtn.addEventListener('click', () => importGhostFile.click());
-}
-// Update the checkbox handler
-const showRacingLinesCheckbox = document.getElementById('showRacingLines');
-if (showRacingLinesCheckbox) {
-  showRacingLinesCheckbox.addEventListener('change', function(e) {
-    setShowRacingLines(e.target.checked);
-  });
+if (chooseFileBtn && importGhostFile) {
+  bindChromeTap(chooseFileBtn, () => importGhostFile.click());
 }
 
-document.getElementById('keepGhost').addEventListener('change', function(e) {
-  setKeepCurrentGhost(e.target.checked);
-});
-
-// Update the clear button handler
-clearGhostBtn.addEventListener('click', () => {
-  ghostDataMap.clear();
-  ghostWakeTrail = [];
+function restorePreviousLapGhost() {
   setKeepCurrentGhost(false);
-  // Set currentGhost to null to fully clear it
-  currentGhost = null; 
-  showGhost = false;
-  // Update checkbox
-  const showGhostCheckbox = document.getElementById('showGhost');
-  if (showGhostCheckbox) {
-    showGhostCheckbox.checked = false;
+  ghostWakeTrail = [];
+  if (lastValidGhost) {
+    currentGhost = lastValidGhost;
+    ghostDataMap.set(currentTrackKey, lastValidGhost);
+    showGhost = true;
+  } else if (currentTrack?.racingLines?.some(l => l.ghost?.frames?.length)) {
+    applyChaseGhostFromTrack(currentTrack);
+  } else {
+    currentGhost = null;
+    showGhost = false;
+    const showGhostCheckbox = document.getElementById('showGhost');
+    if (showGhostCheckbox) showGhostCheckbox.checked = false;
   }
   updateGhostStats();
-  alert('Ghost data cleared.');
-});
+}
+
+bindChromeTap(clearGhostBtn, restorePreviousLapGhost);
 
 function applyDefaultSavedTrack() {
   const params = new URLSearchParams(window.location.search);
@@ -4108,26 +4144,25 @@ if (!loadUserTrackPresets().length && !bootParams.has('data') && bootParams.get(
 }
 
 // Add drag and drop event handlers
-const ghostControlsDiv = document.getElementById('ghostControls');
+const ghostControlsDiv = document.getElementById('ghostCustomize');
 
-// Prevent default drag behaviors
+if (ghostControlsDiv) {
 ghostControlsDiv.addEventListener('dragover', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    ghostControlsDiv.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+    ghostControlsDiv.style.borderColor = 'rgba(90, 180, 255, 0.9)';
 });
 
 ghostControlsDiv.addEventListener('dragleave', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    ghostControlsDiv.style.backgroundColor = 'transparent';
+    ghostControlsDiv.style.borderColor = '';
 });
 
-// Handle the drop
 ghostControlsDiv.addEventListener('drop', async (e) => {
     e.preventDefault();
     e.stopPropagation();
-    ghostControlsDiv.style.backgroundColor = 'transparent';
+    ghostControlsDiv.style.borderColor = '';
 
     const file = e.dataTransfer.files[0];
     if (!file) return;
@@ -4171,6 +4206,7 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
         alert('Failed to read file: ' + (err?.message || err));
     }
 });
+}
 
 // Add near other initialization code
 const touchControls = {
@@ -4332,7 +4368,7 @@ const touchControls = {
     },
 
     handleTouch(e) {
-        if (e.target && e.target.closest && e.target.closest('#viewChrome, #rideChrome, #atlasConfirm, #ghostControls, #ghostInfo')) {
+        if (e.target && e.target.closest && e.target.closest('#viewChrome, #rideChrome, #atlasConfirm, #ghostCustomize')) {
             return;
         }
         e.preventDefault();
@@ -4375,7 +4411,7 @@ const touchControls = {
 
 // Prevent default touch behaviors (do not swallow HUD chrome taps)
 document.addEventListener('touchmove', (e) => {
-    if (e.target && e.target.closest && e.target.closest('#viewChrome, #rideChrome, #atlasCard, #atlasLayouts, #atlasConfirm, #ghostControls')) return;
+    if (e.target && e.target.closest && e.target.closest('#viewChrome, #rideChrome, #atlasCard, #atlasLayouts, #atlasConfirm, #ghostCustomize')) return;
     e.preventDefault();
 }, { passive: false });
 
@@ -4598,6 +4634,7 @@ requestAnimationFrame(gameLoop);
 window.currentTrackKey = currentTrackKey;
 window.trackConfigs = trackConfigs;
 window.updateGhostStats = updateGhostStats;
+window.setKeepCurrentGhost = setKeepCurrentGhost;
 window.keepCurrentGhost = keepCurrentGhost;
 window.ghostDataMap = ghostDataMap;
 window.startLap = startLap; // Expose startLap function
