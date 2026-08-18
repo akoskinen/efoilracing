@@ -2930,9 +2930,11 @@ function completeLap() {
     
     // Add lap to history
     const historyDiv = document.getElementById('lapHistory');
-    const lapEntry = document.createElement('div');
-    lapEntry.innerHTML = `Lap: ${lapTimeStr}s | Top: ${topSpeedKmh.toFixed(1)} | Avg: ${avgSpeedKmh.toFixed(1)} | Min: ${minSpeedKmh.toFixed(1)} km/h${collidedThisLap ? ` (+${penaltySeconds}s penalty!)` : ''}`;
-    historyDiv.insertBefore(lapEntry, historyDiv.firstChild);
+    if (historyDiv) {
+      const lapEntry = document.createElement('div');
+      lapEntry.innerHTML = `Lap: ${currentLapTime.toFixed(2)}s | Top: ${topSpeedKmh.toFixed(1)} | Avg: ${avgSpeedKmh.toFixed(1)} | Min: ${minSpeedKmh.toFixed(1)} km/h${collidedThisLap ? ` (+${penaltySeconds}s penalty!)` : ''}`;
+      historyDiv.insertBefore(lapEntry, historyDiv.firstChild);
+    }
     
     // Set lap to inactive before any potential game pause
     lapActive = false;
