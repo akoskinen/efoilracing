@@ -754,13 +754,59 @@ const AudioManager = {
 AudioManager.init();
 
 // --- Canvas Resize ---
-function resizeCanvas() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  computeBuoys();
-  resetFollowCamera();
+function canvasLayoutSize() {
+  const w = canvas.clientWidth || window.innerWidth;
+  const h = canvas.clientHeight || window.innerHeight;
+  return { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
 }
-window.addEventListener('resize', resizeCanvas);
+
+function placeWorldPointOnScreen(wx, wy, screenX, screenY) {
+  const s = followCam.scale || 1;
+  followCam.tx = screenX - wx * s;
+  followCam.ty = screenY - wy * s;
+}
+
+function resizeCanvas(opts = {}) {
+  const { w, h } = canvasLayoutSize();
+  if (!opts.force && Math.abs(w - canvas.width) < 2 && Math.abs(h - canvas.height) < 2) return;
+
+  const hadSize = canvas.width > 0 && canvas.height > 0;
+  const meters = hadSize ? pixelToTrackMeters(pos.x, pos.y) : null;
+  const prevMeters = hadSize ? pixelToTrackMeters(prevPos.x, prevPos.y) : null;
+  const s = followCam.scale || 1;
+  const screenX = hadSize ? pos.x * s + followCam.tx : w / 2;
+  const screenY = hadSize ? pos.y * s + followCam.ty : h / 2;
+  const sxFrac = hadSize ? screenX / canvas.width : 0.5;
+  const syFrac = hadSize ? screenY / canvas.height : 0.5;
+
+  canvas.width = w;
+  canvas.height = h;
+  computeBuoys();
+
+  if (meters && Number.isFinite(meters.x) && Number.isFinite(meters.y)) {
+    const p = trackMetersToPixel(meters.x, meters.y);
+    pos.x = p.x;
+    pos.y = p.y;
+    if (prevMeters && Number.isFinite(prevMeters.x)) {
+      const q = trackMetersToPixel(prevMeters.x, prevMeters.y);
+      prevPos.x = q.x;
+      prevPos.y = q.y;
+    } else {
+      prevPos.x = p.x;
+      prevPos.y = p.y;
+    }
+  }
+
+  if (opts.snapCamera || !hadSize) {
+    resetFollowCamera();
+    return;
+  }
+  placeWorldPointOnScreen(pos.x, pos.y, sxFrac * w, syFrac * h);
+}
+window.addEventListener('resize', () => resizeCanvas());
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => resizeCanvas());
+}
 
 function savedTrackKey(id) {
   return 'saved_' + id;
@@ -4185,7 +4231,7 @@ function applyDefaultSavedTrack() {
 
 // --- Initialization ---
 hydrateSavedTracks();
-resizeCanvas();
+resizeCanvas({ force: true, snapCamera: true });
 
 // Parse URL parameters before initializing player position
 parseURLParams();
@@ -4275,6 +4321,10 @@ const touchControls = {
     },
     pinchStartDist: 0,
     pinchFired: false,
+    // Latched until every finger is up. Two-thumb racing must not become a
+    // pinch when one thumb lifts and lands again nearby.
+    gestureMode: null,
+    raceLocked: false,
 
     init() {
         canvas.addEventListener('touchstart', this.handleTouch.bind(this), { passive: false });
@@ -4292,6 +4342,23 @@ const touchControls = {
     resetPinch() {
         this.pinchStartDist = 0;
         this.pinchFired = false;
+    },
+
+    latchGesture(touches) {
+        if (this.raceLocked) {
+            this.gestureMode = 'race';
+            return;
+        }
+        if (touches && touches.length >= 2) {
+            if (this.isViewPinch(touches)) {
+                this.gestureMode = 'pinch';
+            } else {
+                this.gestureMode = 'race';
+                this.raceLocked = true;
+            }
+            return;
+        }
+        if (!this.gestureMode) this.gestureMode = 'race';
     },
 
     isViewPinch(touches) {
@@ -4435,11 +4502,14 @@ const touchControls = {
             return;
         }
 
-        if (this.isViewPinch(e.touches)) {
+        this.latchGesture(e.touches);
+
+        if (this.gestureMode === 'pinch') {
             this.clearRacingKeys();
-            this.handlePinch(e);
+            if (e.touches.length === 2) this.handlePinch(e);
             return;
         }
+
         this.resetPinch();
         this.applyRacingTouches(e.touches);
     },
@@ -4453,6 +4523,9 @@ const touchControls = {
             this.resetPinch();
         }
         if (e.touches.length === 0) {
+            this.gestureMode = null;
+            this.raceLocked = false;
+            this.resetPinch();
             Object.keys(this.activeZones).forEach(zone => {
                 this.activeZones[zone] = false;
             });
@@ -4473,6 +4546,12 @@ document.addEventListener('touchmove', (e) => {
 }, { passive: false });
 
 document.addEventListener('gesturestart', (e) => {
+    e.preventDefault();
+});
+document.addEventListener('gesturechange', (e) => {
+    e.preventDefault();
+});
+document.addEventListener('gestureend', (e) => {
     e.preventDefault();
 });
 
