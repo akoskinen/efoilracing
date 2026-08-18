@@ -39,7 +39,7 @@ HUD chrome (T / F / P, and **Customize ghost**) must work with a **finger** as w
 
 On geo tracks, satellite tiles **stream around the camera** and prefetch along heading/speed so panning and zoom-out should not flash empty water. Lower-zoom parents fill in while higher-zoom tiles load.
 
-The top-left stack is **Back to Designer**, then the **ghost** block (previous lap by default, with a yellow behind/ahead delta while you race), then **Customize ghost**, then your recorded laps. **Customize ghost** hides **G Keep current ghost** (toggles to **G Use previous lap**), Export, and Choose file. Tap outside the panel to dismiss it. Import a **ghost JSON** or a **session CSV** there (Choose file / drop). If a geo track is already selected, GPS is projected through that track’s origin. Otherwise a temporary session map is created.
+The top-left stack is **Back to Designer**, then the **ghost** block (previous lap by default, with a green ahead / yellow behind delta while you race), then **Customize ghost**, then your recorded laps. **Customize ghost** hides **G Keep current ghost** (toggles to **G Use previous lap**), Export, and Choose file. Tap outside the panel to dismiss it. Import a **ghost JSON** or a **session CSV** there (Choose file / drop). If a geo track is already selected, GPS is projected through that track’s origin. Otherwise a temporary session map is created.
 
 ## Designer
 
