@@ -914,9 +914,7 @@ let rideIntroT0 = 0;
 let rideIntroFrame = null;
 let introCamReturning = false;
 const rideHudEls = [
-  document.getElementById('lapTimeDisplay'),
-  document.getElementById('speedDisplay'),
-  document.getElementById('bankAngleDisplay'),
+  document.getElementById('rideMeter'),
   document.getElementById('lapHistory'),
   document.getElementById('ghostHud'),
   document.getElementById('customizeGhostBtn'),
@@ -2928,9 +2926,7 @@ function completeLap() {
     if (trackLaps.length > 4) trackLaps.pop(); // Keep only last 4 laps
     
     // Update display with penalty if applicable
-    const lapTimeStr = currentLapTime.toFixed(3);
-    const penaltyText = collidedThisLap ? ` (+${penaltySeconds}s penalty!)` : '';
-    document.getElementById('lapTimeDisplay').innerText = `Laptime: ${lapTimeStr}${penaltyText}`;
+    updateLapTimeDisplay();
     
     // Add lap to history
     const historyDiv = document.getElementById('lapHistory');
@@ -3348,8 +3344,7 @@ function update(dt){
   AudioManager.ensureWindPlaying();
   AudioManager.sounds.wind.volume = speed / maxSpeed;
   
-  document.getElementById('speedDisplay').innerText    = `Speed: ${speedKmh.toFixed(1)} km/h`;
-  document.getElementById('bankAngleDisplay').innerText= `Bank: ${bankAngleDeg.toFixed(0)}°`;
+  updateRideMeter(speedKmh);
 
   // Update ghost stats with the correct average speed
   if (currentGhost && showGhost) {
@@ -4745,10 +4740,44 @@ function resetTrack() {
     ghostWakeTrail = [];
 }
 
+function formatLapClock(sec) {
+    const t = Math.max(0, Number(sec) || 0);
+    const m = Math.floor(t / 60);
+    const s = t - m * 60;
+    return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
+}
+
+function updateRideMeter(speedKmh) {
+    const bankEl = document.getElementById('bankAngleDisplay');
+    if (bankEl) {
+      const bank = Math.round(bankAngleDeg);
+      bankEl.textContent = `${bank}°`;
+    }
+    const speedEl = document.getElementById('speedDisplay');
+    if (speedEl) speedEl.textContent = (Number(speedKmh) || 0).toFixed(1);
+    const bar = document.getElementById('speedBar');
+    const fill = document.getElementById('speedBarFill');
+    if (bar && fill) {
+      const pct = Math.max(0, Math.min(1, speed / maxSpeed));
+      fill.style.width = `${pct * 100}%`;
+      fill.style.backgroundSize = `${bar.clientWidth}px 100%`;
+    }
+    updateLapTimeDisplay();
+}
+
 function updateLapTimeDisplay() {
-    const lapTimeStr = currentLapTime.toFixed(2);
-    const penaltyText = collidedThisLap ? ` (+${penaltySeconds}s penalty!)` : '';
-    document.getElementById('lapTimeDisplay').innerText = `Laptime: ${lapTimeStr}${penaltyText}`;
+    const lapEl = document.getElementById('lapTimeDisplay');
+    if (lapEl) lapEl.textContent = formatLapClock(currentLapTime);
+    const penEl = document.getElementById('lapTimePenalty');
+    if (penEl) {
+      if (collidedThisLap && penaltySeconds) {
+        penEl.textContent = `+${penaltySeconds}s penalty`;
+        penEl.style.display = '';
+      } else {
+        penEl.textContent = '';
+        penEl.style.display = 'none';
+      }
+    }
 }
 
 // Export these for highscores.js before constructing HighScoreManager so the
