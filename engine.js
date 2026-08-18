@@ -1839,6 +1839,9 @@ function bindChromeTap(el, fn) {
 
 bindChromeTap(atlasEls.hint, () => requestAtlas());
 bindChromeTap(document.getElementById('fullscreenBtn'), () => toggleFullScreen());
+bindChromeTap(document.getElementById('pathBtn'), () => {
+  if (trackHasRacingLines(currentTrack)) setShowRacingLines(!showRacingLines);
+});
 
 if (atlasEls.layoutsBtn) {
   atlasEls.layoutsBtn.addEventListener('click', e => {
@@ -1893,6 +1896,7 @@ function setShowRacingLines(on) {
   showRacingLines = !!on;
   const cb = document.getElementById('showRacingLines');
   if (cb) cb.checked = showRacingLines;
+  updatePathButtonState();
 }
 
 function setKeepCurrentGhost(on) {
@@ -1902,9 +1906,20 @@ function setKeepCurrentGhost(on) {
   if (cb) cb.checked = keepCurrentGhost;
 }
 
+function updatePathButtonState() {
+  const button = document.getElementById('pathBtn');
+  const row = document.getElementById('pathChromeRow');
+  const hasPath = trackHasRacingLines(currentTrack);
+  if (row) row.style.display = hasPath ? '' : 'none';
+  if (!button) return;
+  button.textContent = showRacingLines ? 'P Hide Path' : 'P Show Path';
+  button.title = showRacingLines ? 'Hide racing line (P)' : 'Show racing line (P)';
+}
+
 function updateRacingLineToggleVisibility() {
   const row = document.getElementById('racingLineToggleRow');
   if (row) row.style.display = trackHasRacingLines(currentTrack) ? '' : 'none';
+  updatePathButtonState();
 }
 
 function installTrackRacingGhosts(trackKey, track) {

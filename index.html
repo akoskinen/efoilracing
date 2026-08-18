@@ -100,13 +100,19 @@
 	  right: 10px;
 	  z-index: 1000;
 	  display: flex;
-	  align-items: center;
-	  gap: 2px;
+	  flex-direction: column;
+	  align-items: flex-end;
+	  gap: 0;
 	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	  font-size: 13px;
 	  text-shadow: 0 1px 3px #000;
 	  pointer-events: auto;
 	  touch-action: manipulation;
+	}
+	#viewChrome .viewChromeRow {
+	  display: flex;
+	  align-items: center;
+	  gap: 2px;
 	}
 	#viewChrome a,
 	#viewChrome button {
@@ -282,9 +288,14 @@
 	<a id="designerLink" href="designer.html">Design a track &rarr;</a>
   </div>
   <div id="viewChrome">
-	<a id="atlasHint" href="#">T World Map</a>
-	<span class="viewChromeSep" aria-hidden="true">•</span>
-	<button type="button" id="fullscreenBtn">F Fullscreen</button>
+	<div class="viewChromeRow">
+	  <a id="atlasHint" href="#">T World Map</a>
+	  <span class="viewChromeSep" aria-hidden="true">•</span>
+	  <button type="button" id="fullscreenBtn">F Fullscreen</button>
+	</div>
+	<div class="viewChromeRow" id="pathChromeRow">
+	  <button type="button" id="pathBtn">P Hide Path</button>
+	</div>
   </div>
   <div id="atlasHud">
 	<div id="atlasCard"></div>
