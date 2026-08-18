@@ -4648,3 +4648,4 @@ function debugDirectionalCrossing() {
 
 // Create fullscreen button
 createFullscreenButton();
+updatePathButtonState();
