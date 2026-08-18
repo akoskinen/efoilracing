@@ -872,6 +872,7 @@ const rideHudEls = [
   document.getElementById('speedDisplay'),
   document.getElementById('bankAngleDisplay'),
   document.getElementById('lapHistory'),
+  document.getElementById('ghostHud'),
   document.getElementById('customizeGhostBtn'),
   document.getElementById('ghostCustomize')
 ].filter(Boolean);
@@ -2354,6 +2355,8 @@ let ghostStats = {
 
 // Add ghost wake trail array
 let ghostWakeTrail = [];
+let ghostDeltaSearchIdx = 0;
+let ghostDeltaGhost = null;
 
 // Add a variable to store the current ghost separately from the last completed lap
 let currentGhost = null;
@@ -2785,6 +2788,7 @@ function startLap(){
   
   // Clear ghost wake trail
   ghostWakeTrail = [];
+  ghostDeltaSearchIdx = 0;
   
   // Initialize ghost if available
   if (showGhost || ghostDataMap.has(currentTrackKey)) {
@@ -3500,24 +3504,15 @@ function telemetryTopY() {
   const btnVisible = btn && getComputedStyle(btn).display !== 'none';
   const el = btnVisible ? btn : link;
   if (!el) return 88;
-  return el.getBoundingClientRect().bottom + 20;
+  return el.getBoundingClientRect().bottom + 22;
 }
 
 function drawTelemetry() {
+  updateGhostStats();
   ctx.save();
   ctx.font = '14px monospace';
   ctx.fillStyle = '#fff';
   let x = 20, y = telemetryTopY();
-
-  const ghostLine = ghostHudLines();
-  ctx.fillText(ghostLine.title, x, y);
-  y += 18;
-  if (ghostLine.detail) {
-    ctx.fillText(ghostLine.detail, x, y);
-    y += 22;
-  } else {
-    y += 4;
-  }
 
   const trackLaps = lapsMap.get(currentTrackKey) || [];
   if (trackLaps.length === 0) {
@@ -3933,35 +3928,106 @@ function ghostHudWho() {
   return 'previous lap';
 }
 
+function ghostFrameSpeedStats(ghost) {
+  if (!ghost) return { top: 0, min: 0 };
+  if (ghost._hudSpeeds) return ghost._hudSpeeds;
+  let top = 0;
+  let min = Infinity;
+  const frames = ghost.frames || [];
+  for (let i = 0; i < frames.length; i++) {
+    const s = frames[i].speedKmh;
+    if (!Number.isFinite(s)) continue;
+    if (s > top) top = s;
+    if (s < min) min = s;
+  }
+  ghost._hudSpeeds = { top, min: min === Infinity ? 0 : min };
+  return ghost._hudSpeeds;
+}
+
+function ghostHudBodyLines(ghost) {
+  if (!ghost) return [];
+  const lastFrame = ghost.frames?.[ghost.frames.length - 1];
+  const time = lastFrame?.finalLapTime ?? ghost.time ?? lastFrame?.time;
+  let avgSpeed = 0;
+  if (ghost.avgSpeed !== undefined) {
+    avgSpeed = ghost.avgSpeed;
+  } else if (ghost.frames?.[0]?.avgSpeedKmh !== undefined) {
+    avgSpeed = lastFrame?.avgSpeedKmh || 0;
+  } else if (ghost.distance && time > 0) {
+    avgSpeed = calculateAverageSpeed(ghost.distance, time);
+  }
+  const speeds = ghostFrameSpeedStats(ghost);
+  const lines = [];
+  if (Number.isFinite(time)) lines.push(`  Time:   ${time.toFixed(2)} s`);
+  if (Number.isFinite(ghost.distance)) lines.push(`  Dist:   ${ghost.distance.toFixed(1)} m`);
+  if (speeds.top > 0) lines.push(`  TopSpd: ${speeds.top.toFixed(1)} km/h`);
+  if (speeds.min > 0) lines.push(`  MinSpd: ${speeds.min.toFixed(1)} km/h`);
+  if (Number.isFinite(avgSpeed) && avgSpeed > 0) lines.push(`  AvgSpd: ${avgSpeed.toFixed(1)} km/h`);
+  return lines;
+}
+
+function ghostTimeDeltaSec() {
+  const frames = currentGhost?.frames;
+  if (!frames?.length) return NaN;
+  if (ghostDeltaGhost !== currentGhost) {
+    ghostDeltaGhost = currentGhost;
+    ghostDeltaSearchIdx = 0;
+  }
+  if (!lapActive) return 0;
+  const me = pixelToTrackMeters(pos.x, pos.y);
+  const n = frames.length;
+  const start = Math.max(0, ghostDeltaSearchIdx - 40);
+  const end = Math.min(n - 1, ghostDeltaSearchIdx + 120);
+  let bestI = ghostDeltaSearchIdx;
+  let bestD = Infinity;
+  for (let i = start; i <= end; i++) {
+    const dx = frames[i].x - me.x;
+    const dy = frames[i].y - me.y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) {
+      bestD = d;
+      bestI = i;
+    }
+  }
+  ghostDeltaSearchIdx = bestI;
+  return currentLapTime - (frames[bestI].time || 0);
+}
+
+function formatGhostDelta(sec) {
+  if (!Number.isFinite(sec)) return '';
+  const abs = Math.abs(sec);
+  if (abs < 0.005) return '0.00s ahead of ghost';
+  if (sec > 0) return `${sec.toFixed(2)}s behind ghost`;
+  return `${abs.toFixed(2)}s ahead of ghost`;
+}
+
 function ghostHudLines() {
   if (!currentGhost) {
-    return { title: 'Ghost  —', detail: '' };
+    return { title: 'Ghost: —', body: '', delta: '' };
   }
-  const lastFrame = currentGhost.frames?.[currentGhost.frames.length - 1];
-  const time = lastFrame?.finalLapTime ?? currentGhost.time ?? lastFrame?.time;
-  let avgSpeed = 0;
-  if (currentGhost.avgSpeed !== undefined) {
-    avgSpeed = currentGhost.avgSpeed;
-  } else if (currentGhost.frames?.[0]?.avgSpeedKmh !== undefined) {
-    avgSpeed = lastFrame?.avgSpeedKmh || 0;
-  } else if (currentGhost.distance && time > 0) {
-    avgSpeed = calculateAverageSpeed(currentGhost.distance, time);
-  }
-  const timeStr = Number.isFinite(time) ? `${time.toFixed(2)} s` : '—';
-  const speedStr = Number.isFinite(avgSpeed) ? `${avgSpeed.toFixed(1)} km/h` : '';
   return {
-    title: `Ghost  ${ghostHudWho()}`,
-    detail: speedStr ? `  ${timeStr}   ${speedStr}` : `  ${timeStr}`
+    title: `Ghost: ${ghostHudWho()}`,
+    body: ghostHudBodyLines(currentGhost).join('\n'),
+    delta: formatGhostDelta(ghostTimeDeltaSec())
   };
 }
 
 function updateGhostStats() {
-    const statsElement = document.getElementById('ghostStats');
     const lines = ghostHudLines();
+    const titleEl = document.getElementById('ghostHudTitle');
+    const bodyEl = document.getElementById('ghostHudBody');
+    const deltaEl = document.getElementById('ghostHudDelta');
+    if (titleEl) titleEl.textContent = lines.title;
+    if (bodyEl) bodyEl.textContent = lines.body;
+    if (deltaEl) {
+      deltaEl.textContent = lines.delta;
+      deltaEl.style.display = lines.delta ? '' : 'none';
+    }
+    const statsElement = document.getElementById('ghostStats');
     if (statsElement) {
-      statsElement.textContent = lines.detail
-        ? `${lines.title} ${lines.detail.trim()}`
-        : lines.title;
+      statsElement.textContent = [lines.title, lines.body, lines.delta]
+        .filter(Boolean)
+        .join(' ');
     }
     updateKeepGhostButton();
 }

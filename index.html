@@ -55,7 +55,7 @@
 	  display: flex;
 	  flex-direction: column;
 	  align-items: flex-start;
-	  gap: 0;
+	  gap: 10px;
 	  pointer-events: none;
 	}
 	#rideChrome .hudLink,
@@ -81,13 +81,38 @@
 	  user-select: none;
 	  pointer-events: auto;
 	}
+	#designerLink.hudLink {
+	  position: relative;
+	  padding: 2px 0;
+	  min-height: 0;
+	}
+	#designerLink.hudLink::after {
+	  content: '';
+	  position: absolute;
+	  top: -12px;
+	  right: -8px;
+	  bottom: -4px;
+	  left: -8px;
+	}
 	#rideChrome .hudLink:hover { text-decoration: underline; }
+	#ghostHud {
+	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	  font-size: 14px;
+	  line-height: 18px;
+	  color: #fff;
+	  text-shadow: 1px 1px 2px #000;
+	  pointer-events: none;
+	  white-space: pre;
+	}
+	#ghostHudDelta {
+	  color: #ffd54a;
+	  margin-top: 2px;
+	}
 	#ghostCustomize {
 	  display: none;
 	  flex-direction: column;
 	  align-items: stretch;
 	  gap: 2px;
-	  margin-top: 4px;
 	  padding: 8px 12px 10px;
 	  min-width: 200px;
 	  background: rgba(12, 18, 24, 0.78);
@@ -117,7 +142,7 @@
 	  display: flex;
 	  flex-direction: column;
 	  align-items: flex-end;
-	  gap: 0;
+	  gap: 10px;
 	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	  font-size: 13px;
 	  line-height: 1.35;
@@ -194,7 +219,8 @@
 	body.atlas-open #bankAngleDisplay,
 	body.atlas-open #lapHistory,
 	body.atlas-open #customizeGhostBtn,
-	body.atlas-open #ghostCustomize {
+	body.atlas-open #ghostCustomize,
+	body.atlas-open #ghostHud {
 	  display: none;
 	}
 
@@ -306,6 +332,11 @@
   <!-- Ride / atlas chrome -->
   <div id="rideChrome">
 	<a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
+	<div id="ghostHud">
+	  <div id="ghostHudTitle">Ghost: —</div>
+	  <div id="ghostHudBody"></div>
+	  <div id="ghostHudDelta"></div>
+	</div>
 	<button type="button" class="hudLink" id="customizeGhostBtn" aria-expanded="false">Customize ghost</button>
 	<div id="ghostCustomize">
 	  <button type="button" class="hudLink" id="keepGhostBtn">G Keep current ghost</button>
