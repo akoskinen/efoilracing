@@ -4037,21 +4037,23 @@ function ghostTimeDeltaSec() {
 }
 
 function formatGhostDelta(sec) {
-  if (!Number.isFinite(sec)) return '';
+  if (!Number.isFinite(sec)) return { text: '', kind: '' };
   const abs = Math.abs(sec);
-  if (abs < 0.005) return '0.00s ahead of ghost';
-  if (sec > 0) return `${sec.toFixed(2)}s behind ghost`;
-  return `${abs.toFixed(2)}s ahead of ghost`;
+  if (abs < 0.005) return { text: '0.00s ahead of ghost', kind: 'ahead' };
+  if (sec > 0) return { text: `${sec.toFixed(2)}s behind ghost`, kind: 'behind' };
+  return { text: `${abs.toFixed(2)}s ahead of ghost`, kind: 'ahead' };
 }
 
 function ghostHudLines() {
   if (!currentGhost) {
-    return { title: 'Ghost: —', body: '', delta: '' };
+    return { title: 'Ghost: —', body: '', delta: '', deltaKind: '' };
   }
+  const delta = formatGhostDelta(ghostTimeDeltaSec());
   return {
     title: `Ghost: ${ghostHudWho()}`,
     body: ghostHudBodyLines(currentGhost).join('\n'),
-    delta: formatGhostDelta(ghostTimeDeltaSec())
+    delta: delta.text,
+    deltaKind: delta.kind
   };
 }
 
@@ -4065,6 +4067,8 @@ function updateGhostStats() {
     if (deltaEl) {
       deltaEl.textContent = lines.delta;
       deltaEl.style.display = lines.delta ? '' : 'none';
+      deltaEl.classList.toggle('ahead', lines.deltaKind === 'ahead');
+      deltaEl.classList.toggle('behind', lines.deltaKind === 'behind');
     }
     const statsElement = document.getElementById('ghostStats');
     if (statsElement) {
