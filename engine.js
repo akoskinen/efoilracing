@@ -4769,7 +4769,10 @@ function updateRideMeter(speedKmh) {
 
 function updateLapTimeDisplay() {
     const lapEl = document.getElementById('lapTimeDisplay');
-    if (lapEl) lapEl.textContent = formatLapClock(currentLapTime);
+    if (lapEl) {
+      lapEl.textContent = formatLapClock(currentLapTime);
+      lapEl.classList.toggle('invalid', !!collidedThisLap);
+    }
     const penEl = document.getElementById('lapTimePenalty');
     if (penEl) {
       if (collidedThisLap && penaltySeconds) {
