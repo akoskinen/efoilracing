@@ -918,7 +918,8 @@ const rideHudEls = [
   document.getElementById('lapHistory'),
   document.getElementById('ghostHud'),
   document.getElementById('customizeGhostBtn'),
-  document.getElementById('ghostCustomize')
+  document.getElementById('ghostCustomize'),
+  document.getElementById('brandMark')
 ].filter(Boolean);
 const ATLAS_DOT_R = 9;
 const ATLAS_HIT_R = 22;
@@ -2638,11 +2639,11 @@ function drawZoomHint() {
   if (now < zoomHintUntil) {
     ctx.globalAlpha *= Math.min(1, (zoomHintUntil - now) / 400);
     ctx.fillStyle = '#fff';
-    ctx.fillText(`${zoomStopTitle(zoomStopIndex)}  (Z)`, canvas.width / 2, 42);
+    ctx.fillText(`${zoomStopTitle(zoomStopIndex)}  (Z)`, canvas.width / 2, 168);
   } else {
     ctx.globalAlpha *= 0.45;
     ctx.fillStyle = '#fff';
-    ctx.fillText(nextZoomHint(), canvas.width / 2, 22);
+    ctx.fillText(nextZoomHint(), canvas.width / 2, 155);
   }
   ctx.restore();
 }

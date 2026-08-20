@@ -23,6 +23,18 @@
 	  background: #222;
 	  touch-action: none;
 	}
+	#brandMark {
+	  position: absolute;
+	  top: 40px;
+	  left: 50%;
+	  transform: translateX(-50%);
+	  height: 100px;
+	  width: auto;
+	  z-index: 8;
+	  pointer-events: none;
+	  user-select: none;
+	  -webkit-user-select: none;
+	}
 	/* Bottom-center speedometer + laptime */
 	#rideMeter {
 	  position: absolute;
@@ -286,7 +298,8 @@
 	body.atlas-open #lapHistory,
 	body.atlas-open #customizeGhostBtn,
 	body.atlas-open #ghostCustomize,
-	body.atlas-open #ghostHud {
+	body.atlas-open #ghostHud,
+	body.atlas-open #brandMark {
 	  display: none;
 	}
 
@@ -382,6 +395,7 @@
   <audio id="collisionAudio" src="collision.wav" preload="auto"></audio>
 
   <canvas id="gameCanvas"></canvas>
+  <img id="brandMark" src="img/efoil-racing-mark.gif" alt="eFoil Racing" width="650" height="488">
 
   <!-- Bottom-center speedometer + laptime -->
   <div id="rideMeter">
