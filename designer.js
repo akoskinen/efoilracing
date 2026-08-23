@@ -1550,7 +1550,7 @@ function refreshBuoyColorLegend() {
   const scheme = normalizeBuoyColorScheme(track.buoyColorScheme);
   els.buoyColorLegend.textContent = scheme === 'league'
     ? 'League: Left orange · Right white · Neutral yellow · 360° blue'
-    : 'Nautical: Left red · Right green · Neutral yellow · 360° blue';
+    : 'Nautical: Left green · Right red · Neutral yellow · 360° blue';
 }
 
 els.trackName.addEventListener('input', () => { track.name = els.trackName.value; saveDraft(track); });

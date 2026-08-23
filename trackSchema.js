@@ -99,8 +99,8 @@ export function storedRounding(side) {
 
 export const BUOY_COLOR_SCHEMES = {
   nautical: {
-    left: '#c62828',
-    right: '#2e7d32',
+    left: '#2e7d32',
+    right: '#c62828',
     neutral: '#ffd54a',
     '360': '#1565c0'
   },
