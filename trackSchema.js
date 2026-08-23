@@ -12,10 +12,11 @@
 //   name, author, notes,
 //   startTechnique: { timetrial, elimination, notes },  // optional briefing copy
 //   scale: 4,                          // meters -> pixels in the simulator
-//   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'left'|'right',
+//   buoyColorScheme: 'nautical'|'league',  // turn-buoy paint by pass side
+//   buoys: [{ x, y, type: 'turn'|'marker', rounding: 'left'|'right'|'neutral',
 //             apexRadius, optimalSpeed }],
-//   visits: [{ buoy: 0, side: 'left'|'right'|'360-left'|'360-right' }],
-//             buoy = index into buoys; side = path on that side, or 360 wrap direction.
+//   visits: [{ buoy: 0, side: 'left'|'right'|'neutral'|'360-left'|'360-right' }],
+//             buoy = index into buoys; side = path on that side, either side, or 360 wrap.
 //   gate: {
 //     sameStartFinish: true,
 //     directional: false,              // ALL crossings must match `direction`
@@ -53,17 +54,19 @@ export function isDeclarativeTrack(track) {
 /**
  * Which side of the buoy the rider passes.
  * Right = path on the buoy's right; Left = path on the buoy's left.
- * Legacy port = path on the right (buoy on the rider's left); starboard = left.
+ * Neutral = either side. Legacy port = path on the right; starboard = left.
  */
 export function normalizeRounding(rounding) {
   if (rounding === 'right' || rounding === 'port') return 'right';
   if (rounding === 'left' || rounding === 'starboard') return 'left';
+  if (rounding === 'neutral') return 'neutral';
   return 'left';
 }
 
 export function normalizePassSide(side) {
   if (side === '360-left') return '360-left';
   if (side === '360-right' || side === '360' || side === 'full') return '360-right';
+  if (side === 'neutral' || side === 'either') return 'neutral';
   return normalizeRounding(side);
 }
 
@@ -76,14 +79,71 @@ export function passSideLabel(side) {
   const s = normalizePassSide(side);
   if (s === '360-left') return '360° Left';
   if (s === '360-right') return '360° Right';
+  if (s === 'neutral') return 'Neutral';
   return s === 'right' ? 'Right' : 'Left';
 }
 
 export function flipPassSide(side) {
   const s = normalizePassSide(side);
+  if (s === 'neutral') return 'neutral';
   if (s === '360-right') return '360-left';
   if (s === '360-left') return '360-right';
   return s === 'right' ? 'left' : 'right';
+}
+
+/** Persist left/right/neutral; 360 visits keep a left/right rounding fallback. */
+export function storedRounding(side) {
+  const s = normalizePassSide(side);
+  return is360Pass(s) ? 'right' : s;
+}
+
+export const BUOY_COLOR_SCHEMES = {
+  nautical: {
+    left: '#c62828',
+    right: '#2e7d32',
+    neutral: '#ffd54a',
+    '360': '#1565c0'
+  },
+  league: {
+    left: '#ff8c00',
+    right: '#ffffff',
+    neutral: '#ffd54a',
+    '360': '#1565c0'
+  }
+};
+export const MARKER_BUOY_FILL = '#FF8800';
+
+export function normalizeBuoyColorScheme(scheme) {
+  return scheme === 'league' ? 'league' : 'nautical';
+}
+
+export function passSideColorKey(side) {
+  const s = normalizePassSide(side);
+  if (is360Pass(s)) return '360';
+  if (s === 'neutral') return 'neutral';
+  return s === 'right' ? 'right' : 'left';
+}
+
+/** Color role for a physical turn buoy: any 360 visit wins, else the first visit. */
+export function buoyColorSide(track, buoyIndex) {
+  const visits = (track?.visits || []).filter(v => v.buoy === buoyIndex);
+  const spin = visits.find(v => is360Pass(v.side));
+  if (spin) return normalizePassSide(spin.side);
+  if (visits.length) return normalizePassSide(visits[0].side);
+  const rounding = track?.buoys?.[buoyIndex]?.rounding;
+  return rounding ? normalizePassSide(rounding) : 'left';
+}
+
+export function turnBuoyPaint(scheme, side) {
+  const name = normalizeBuoyColorScheme(scheme);
+  const key = passSideColorKey(side);
+  const fill = BUOY_COLOR_SCHEMES[name][key];
+  const light = key === 'neutral' || (name === 'league' && key === 'right');
+  return {
+    fill,
+    stroke: light ? '#222' : '#fff',
+    label: light ? '#222' : '#fff'
+  };
 }
 
 /** 1-based number among turn buoys (markers skipped). */
@@ -208,6 +268,7 @@ export function createDefaultTrack(name = 'New Track') {
     author: '',
     notes: '',
     scale: 4,
+    buoyColorScheme: 'nautical',
     buoys: [
       { x: 150, y: 30,  type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
       { x: 150, y: 110, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
@@ -276,6 +337,7 @@ export function createOfficialSpeedtrack() {
       'Timing line at #1, parallel to #2–#3. ' +
       'Theoretical line ~325 m, target lap ~30 s @ ~39 km/h.',
     scale: 4,
+    buoyColorScheme: 'nautical',
     buoys: [
       { x: p1.x, y: p1.y, type: 'turn', rounding: 'right', apexRadius: 40, optimalSpeed: 30 },
       { x: p2.x, y: p2.y, type: 'turn', rounding: 'left', apexRadius: 40, optimalSpeed: 30 },
@@ -323,8 +385,7 @@ export function flipTrackLayout(track) {
   (track.buoys || []).forEach(buoy => {
     buoy.x = fx(buoy.x);
     if (buoy.type !== 'marker') {
-      const side = normalizePassSide(buoy.rounding);
-      buoy.rounding = is360Pass(side) ? flipPassSide(side) : (side === 'right' ? 'left' : 'right');
+      buoy.rounding = storedRounding(flipPassSide(buoy.rounding));
     }
   });
   (track.visits || []).forEach(v => {
@@ -800,7 +861,7 @@ export function normalizeTrack(track) {
     } else {
       turnCounter += 1;
       b.turnIndex = turnCounter;
-      b.rounding = normalizeRounding(b.rounding);
+      b.rounding = storedRounding(b.rounding);
       b.aliases = (track.visits || [])
         .map((v, vi) => v.buoy === i ? vi + 1 : null)
         .filter(n => n != null);
@@ -1016,13 +1077,14 @@ export function serializeTrack(track) {
     author: track.author || '',
     notes: track.notes || '',
     scale: track.scale || 4,
+    buoyColorScheme: normalizeBuoyColorScheme(track.buoyColorScheme),
     buoys: (track.buoys || []).map((b, i) => {
       const o = { x: r1(b.x), y: r1(b.y) };
       if (b.type === 'marker') o.type = 'marker';
       else {
         const first = (track.visits || []).find(v => v.buoy === i);
-        const side = first ? normalizePassSide(first.side) : normalizeRounding(b.rounding);
-        o.rounding = is360Pass(side) ? 'right' : side;
+        const side = first ? normalizePassSide(first.side) : normalizePassSide(b.rounding);
+        o.rounding = storedRounding(side);
       }
       if (b.apexRadius != null && b.apexRadius !== 40) o.apexRadius = b.apexRadius;
       if (b.optimalSpeed != null) o.optimalSpeed = b.optimalSpeed;

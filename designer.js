@@ -18,8 +18,9 @@ import {
   BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
   deleteUserTrackPreset, getTrackPresetById,
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
-  geoFromSavedEntry, placeFromTrack, normalizeRounding, migrateTrackSchema,
+  geoFromSavedEntry, placeFromTrack, migrateTrackSchema,
   ensureVisits, normalizePassSide, passSideLabel, physicalBuoyNumber,
+  storedRounding, normalizeBuoyColorScheme, buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   groupPresetsByCountry, exportTrackLibrary, parseTrackImport, mergeImportedTrackPresets,
   ensureStartTechnique, nominalLapTimeSec, nominalLapDistanceM
 } from './trackSchema.js';
@@ -32,6 +33,8 @@ const wrap = document.getElementById('canvasWrap');
 const els = {
   trackName: document.getElementById('trackName'),
   trackAuthor: document.getElementById('trackAuthor'),
+  buoyColorScheme: document.getElementById('buoyColorScheme'),
+  buoyColorLegend: document.getElementById('buoyColorLegend'),
   trackNotes: document.getElementById('trackNotes'),
   startTimetrial: document.getElementById('startTimetrial'),
   startElimination: document.getElementById('startElimination'),
@@ -131,7 +134,7 @@ function withDefaults(t) {
   ensureVisits(t);
   (t.buoys || []).forEach(b => {
     if (b.type !== 'marker') b.type = 'turn';
-    if (b.type === 'turn') b.rounding = normalizeRounding(b.rounding);
+    if (b.type === 'turn') b.rounding = storedRounding(b.rounding);
     if (b.apexRadius == null) b.apexRadius = 40;
     if (b.type === 'turn' && b.optimalSpeed == null) b.optimalSpeed = 30;
   });
@@ -148,6 +151,7 @@ function withDefaults(t) {
     const recorded = t.racingLines.find(l => l.points?.length >= 2) || t.racingLines[0];
     recorded.chase = true;
   }
+  t.buoyColorScheme = normalizeBuoyColorScheme(t.buoyColorScheme);
   return t;
 }
 
@@ -483,16 +487,19 @@ function drawBuoys() {
 
     if (isTurn) drawVisitHints(i, p, r);
 
+    const paint = isTurn
+      ? turnBuoyPaint(track.buoyColorScheme, buoyColorSide(track, i))
+      : { fill: MARKER_BUOY_FILL, stroke: '#fff', label: '#222' };
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = isTurn ? '#FFE44D' : '#FF8800';
+    ctx.fillStyle = paint.fill;
     ctx.fill();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = paint.stroke;
     ctx.stroke();
 
     if (isTurn) {
-      ctx.fillStyle = '#222';
+      ctx.fillStyle = paint.label;
       ctx.font = 'bold 11px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -635,6 +642,18 @@ function drawPassSideHint(buoyIndex, p, r, side, color = '#fff', visitIndex = nu
 
   if (side === '360-left' || side === '360-right' || side === '360') {
     draw360Hint(p, r, fwd, side !== '360-left', color);
+    return;
+  }
+
+  if (side === 'neutral') {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
     return;
   }
 
@@ -1236,6 +1255,8 @@ function setInput(el, value) {
 function refreshUI() {
   setInput(els.trackName, track.name);
   setInput(els.trackAuthor, track.author);
+  setInput(els.buoyColorScheme, normalizeBuoyColorScheme(track.buoyColorScheme));
+  refreshBuoyColorLegend();
   setInput(els.trackNotes, track.notes);
   const st = ensureStartTechnique(track);
   setInput(els.startTimetrial, st.timetrial);
@@ -1435,6 +1456,7 @@ function rebuildBuoyList() {
     const tag = document.createElement('span');
     tag.className = 'tag turn';
     tag.textContent = String(i + 1);
+    tag.style.color = turnBuoyPaint(track.buoyColorScheme, v.side).fill;
     item.appendChild(tag);
 
     const coords = document.createElement('span');
@@ -1523,8 +1545,23 @@ function refreshWarnings() {
 }
 
 // --- Sidebar input handlers ---
+function refreshBuoyColorLegend() {
+  if (!els.buoyColorLegend) return;
+  const scheme = normalizeBuoyColorScheme(track.buoyColorScheme);
+  els.buoyColorLegend.textContent = scheme === 'league'
+    ? 'League: Left orange · Right white · Neutral yellow · 360° blue'
+    : 'Nautical: Left red · Right green · Neutral yellow · 360° blue';
+}
+
 els.trackName.addEventListener('input', () => { track.name = els.trackName.value; saveDraft(track); });
 els.trackAuthor.addEventListener('input', () => { track.author = els.trackAuthor.value; saveDraft(track); });
+if (els.buoyColorScheme) {
+  els.buoyColorScheme.addEventListener('change', () => {
+    pushUndo();
+    track.buoyColorScheme = normalizeBuoyColorScheme(els.buoyColorScheme.value);
+    commit();
+  });
+}
 els.trackNotes.addEventListener('input', () => { track.notes = els.trackNotes.value; saveDraft(track); });
 els.startTimetrial.addEventListener('input', () => {
   ensureStartTechnique(track).timetrial = els.startTimetrial.value;
@@ -1592,8 +1629,7 @@ els.buoyRounding.addEventListener('change', () => {
   } else {
     const visit = (track.visits || []).find(v => v.buoy === idx);
     if (visit) visit.side = side;
-    track.buoys[idx].rounding = (side === '360-left' || side === '360-right' || side === '360')
-      ? 'right' : side;
+    track.buoys[idx].rounding = storedRounding(side);
   }
   commit();
 });
@@ -1705,10 +1741,10 @@ function geoWaypoints() {
   const pts = [];
   const ll = (x, y) => metersToLatLng(track.geo, x, y);
   let turnNo = 0, markerNo = 0;
-  track.buoys.forEach(b => {
+  track.buoys.forEach((b, i) => {
     if (b.type !== 'marker') {
       turnNo += 1;
-      pts.push({ name: `Turn ${turnNo} (pass ${normalizeRounding(b.rounding)})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
+      pts.push({ name: `Turn ${turnNo} (pass ${passSideLabel(buoyColorSide(track, i))})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
     } else {
       markerNo += 1;
       pts.push({ name: `Marker ${markerNo}`, type: 'marker', x: b.x, y: b.y, ...ll(b.x, b.y) });

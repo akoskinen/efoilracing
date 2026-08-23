@@ -287,6 +287,13 @@
       <div class="section">
         <h3>Track info</h3>
         <div class="row"><label>Author</label><input id="trackAuthor" type="text" spellcheck="false"></div>
+        <div class="row"><label title="How turn buoys are painted from pass side">Buoy colors</label>
+          <select id="buoyColorScheme" title="Nautical: left red, right green. League: left orange, right white. Neutral is yellow and 360° is blue in both.">
+            <option value="nautical">Nautical</option>
+            <option value="league">League</option>
+          </select>
+        </div>
+        <div id="buoyColorLegend" style="color:var(--muted); font-size:12px; line-height:1.45; margin:-2px 0 8px;"></div>
         <label class="fieldLabel">Race notes</label>
         <textarea id="trackNotes" placeholder="Event notes for the briefing (course character, reminders…)"></textarea>
       </div>
@@ -358,7 +365,7 @@
           <button id="btnAddVisit" class="secondary" style="width:100%;" title="Click a turn buoy to add another pass">+ Add a turn</button>
         </div>
         <div style="color:var(--muted); font-size:12px; line-height:1.45; margin-top:6px;">
-          Yellow numbers are visit order. The same buoy can appear more than once. 360° Left/Right is a full wrap.
+          Yellow numbers are visit order. The same buoy can appear more than once. Neutral is either side. 360° Left/Right is a full wrap.
         </div>
       </div>
 
@@ -371,9 +378,10 @@
           </select>
         </div>
         <div class="row" id="rowRounding"><label title="Which side of the buoy the rider passes">Pass side</label>
-          <select id="buoyRounding" title="Right = path on the buoy's right; Left = path on the buoy's left; 360° = full wrap in that direction">
+          <select id="buoyRounding" title="Right = path on the buoy's right; Left = path on the buoy's left; Neutral = either side; 360° = full wrap in that direction">
             <option value="left">Left</option>
             <option value="right">Right</option>
+            <option value="neutral">Neutral</option>
             <option value="360-left">360° Left</option>
             <option value="360-right">360° Right</option>
           </select>

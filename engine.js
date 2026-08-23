@@ -14,6 +14,7 @@ import {
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
   RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost,
   createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
+  buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
 } from './trackSchema.js';
 
@@ -203,7 +204,7 @@ function computeBuoys() {
 
   // 1) Build intermediate buoy positions in LOCAL canvas pixels (no trackOffset).
   // trackOffset is applied only after centroid centering for non-geo tracks.
-  const rawBuoyData = currentTrack.buoys.map(b => {
+  const rawBuoyData = currentTrack.buoys.map((b, i) => {
     const p = trackMetersToLocalPixel(b.x, b.y);
     return {
       px: p.x,
@@ -211,7 +212,8 @@ function computeBuoys() {
       turnIndex: b.turnIndex ?? null,
       aliases: b.aliases ?? [],
       apexRadius: b.apexRadius ?? 20,
-      optimalSpeed: b.optimalSpeed
+      optimalSpeed: b.optimalSpeed,
+      passSide: buoyColorSide(currentTrack, i)
     };
   });
 
@@ -248,7 +250,8 @@ function computeBuoys() {
     turnIndex: b.turnIndex,
     aliases: b.aliases,
     apexRadius: b.apexRadius,
-    optimalSpeed: b.optimalSpeed
+    optimalSpeed: b.optimalSpeed,
+    passSide: b.passSide
   }));
 
   // 6) Compute timing system
@@ -3439,22 +3442,25 @@ function drawWake(){
   }
 }
 
-function drawBuoyDot(x, y, isTurn) {
+function drawBuoyDot(x, y, isTurn, passSide) {
+  const paint = isTurn
+    ? turnBuoyPaint(currentTrack.buoyColorScheme, passSide)
+    : { fill: MARKER_BUOY_FILL, stroke: '#fff' };
   withWorldMarker(x, y, () => {
     const r = isTurn ? 8 : 4;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, 2 * Math.PI);
-    ctx.fillStyle = isTurn ? '#FFE44D' : '#FF8800';
+    ctx.fillStyle = paint.fill;
     ctx.fill();
     ctx.lineWidth = isTurn ? 2 : 1.5;
-    ctx.strokeStyle = '#fff';
+    ctx.strokeStyle = paint.stroke;
     ctx.stroke();
   });
 }
 
 function drawOneBuoy(b) {
   const isTurn = b.turnIndex != null;
-  drawBuoyDot(b.x, b.y, isTurn);
+  drawBuoyDot(b.x, b.y, isTurn, b.passSide);
   if (isTurn) {
     withWorldMarker(b.x, b.y, () => {
       ctx.font = '12px sans-serif';
@@ -3467,7 +3473,7 @@ function drawOneBuoy(b) {
       pixelToTrackMeters(b.x, b.y).x,
       pixelToTrackMeters(b.x, b.y).y + currentTrack.trackSeparation
     );
-    drawBuoyDot(parallel.x, parallel.y, isTurn);
+    drawBuoyDot(parallel.x, parallel.y, isTurn, b.passSide);
   }
 }
 
