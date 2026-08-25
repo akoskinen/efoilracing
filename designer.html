@@ -135,11 +135,24 @@
 
     #buoyList { display: flex; flex-direction: column; gap: 3px; }
     .buoyItem {
-      display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+      display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+      min-height: 44px;
       background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
       cursor: pointer; font-size: 13px;
+      user-select: none; -webkit-user-select: none;
+      touch-action: pan-y;
     }
     .buoyItem.selected { border-color: var(--accent); background: rgba(54,182,229,0.12); }
+    .buoyItem.dragging { opacity: 0.45; }
+    .buoyItem.drop-target { box-shadow: inset 0 2px 0 var(--accent); }
+    .buoyItem .dragHandle {
+      display: flex; align-items: center; gap: 6px;
+      min-width: 52px; min-height: 44px; margin: -6px 0 -6px -8px; padding: 6px 4px 6px 8px;
+      cursor: grab; touch-action: none;
+    }
+    .buoyItem .grip {
+      color: var(--muted); font-size: 13px; line-height: 1;
+    }
     .buoyItem .tag { font-weight: 700; width: 24px; text-align: center; }
     .buoyItem .tag.turn { color: #ffe44d; }
     .buoyItem .tag.marker { color: #ff9d4d; }
@@ -280,7 +293,7 @@
     <div id="canvasWrap">
       <div id="geoMap"></div>
       <canvas id="designCanvas"></canvas>
-      <div id="hint">Scroll to zoom &middot; drag empty water to pan &middot; P racing line &middot; D distances &middot; Add a turn, then click a buoy &middot; Delete removes the selected turn</div>
+      <div id="hint">Scroll to zoom &middot; drag empty water to pan &middot; P racing line &middot; D distances &middot; drag course order to reorder &middot; Delete removes the selected turn</div>
     </div>
 
     <div id="sidebar">
@@ -365,7 +378,7 @@
           <button id="btnAddVisit" class="secondary" style="width:100%;" title="Click a turn buoy to add another pass">+ Add a turn</button>
         </div>
         <div style="color:var(--muted); font-size:12px; line-height:1.45; margin-top:6px;">
-          Yellow numbers are visit order. The same buoy can appear more than once. Neutral is either side. 360° Left/Right is a full wrap.
+          Numbers are course order — drag to reorder. A mark reused later keeps its first number (yellow extras). Neutral is either side. 360° Left/Right is a full wrap.
         </div>
       </div>
 

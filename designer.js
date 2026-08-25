@@ -19,7 +19,8 @@ import {
   deleteUserTrackPreset, getTrackPresetById,
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
   geoFromSavedEntry, placeFromTrack, migrateTrackSchema,
-  ensureVisits, normalizePassSide, passSideLabel, physicalBuoyNumber,
+  ensureVisits, normalizePassSide, passSideLabel,
+  firstVisitNumber, visitNumbersForBuoy,
   storedRounding, normalizeBuoyColorScheme, buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   groupPresetsByCountry, exportTrackLibrary, parseTrackImport, mergeImportedTrackPresets,
   ensureStartTechnique, nominalLapTimeSec, nominalLapDistanceM
@@ -79,6 +80,7 @@ let mode = 'select'; // select | addTurn | addMarker | gateStart | gateFinish | 
 let selection = null; // { kind:'buoy', index } | null
 let showDistanceLegs = true;
 let drag = null;
+let suppressVisitClick = false;
 let undoStack = [];
 let geoOn = false;
 let map = null; // Leaflet map, created lazily
@@ -375,26 +377,35 @@ function drawGridLines(topLeft, botRight, step, color, labels = false) {
   }
 }
 
-function turnBuoys() {
-  return track.buoys.filter(b => b.type !== 'marker');
-}
-
 function drawSequenceLine() {
   if (!poster && !showDistanceLegs) return;
-  const turns = turnBuoys();
-  if (turns.length < 2) return;
+  ensureVisits(track);
+  const visits = track.visits || [];
+  if (visits.length < 2) return;
+  const pts = visits.map(v => track.buoys[v.buoy]).filter(b => b && Number.isFinite(b.x));
+  if (pts.length < 2) return;
+
+  const sameMark = (a, b) => a === b || (a.x === b.x && a.y === b.y);
+  const close = !sameMark(pts[0], pts[pts.length - 1]);
+  const legs = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (!sameMark(pts[i], pts[i + 1])) legs.push([pts[i], pts[i + 1]]);
+  }
+  if (close) legs.push([pts[pts.length - 1], pts[0]]);
+  if (!legs.length) return;
+
   ctx.save();
   ctx.strokeStyle = 'rgba(124,252,0,0.5)';
   ctx.lineWidth = 2;
   ctx.setLineDash([8, 6]);
-  ctx.beginPath();
-  turns.forEach((b, i) => {
-    const p = mToPx(b.x, b.y);
-    if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+  legs.forEach(([cur, next]) => {
+    const a = mToPx(cur.x, cur.y);
+    const b = mToPx(next.x, next.y);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
   });
-  const first = mToPx(turns[0].x, turns[0].y);
-  ctx.lineTo(first.x, first.y);
-  ctx.stroke();
   ctx.setLineDash([]);
 
   ctx.fillStyle = 'rgb(124,252,0)';
@@ -402,9 +413,7 @@ function drawSequenceLine() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  for (let i = 0; i < turns.length; i++) {
-    const cur = turns[i];
-    const next = turns[(i + 1) % turns.length];
+  legs.forEach(([cur, next]) => {
     const a = mToPx(cur.x, cur.y);
     const b = mToPx(next.x, next.y);
     const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -419,7 +428,7 @@ function drawSequenceLine() {
     const lx = mid.x - Math.sin(ang) * off;
     const ly = mid.y + Math.cos(ang) * off;
     ctx.fillText(`${distM.toFixed(1)} m`, lx, ly);
-  }
+  });
   ctx.restore();
 }
 
@@ -499,11 +508,19 @@ function drawBuoys() {
     ctx.stroke();
 
     if (isTurn) {
+      const visitsHere = visitNumbersForBuoy(track, i);
+      const label = visitsHere[0] ?? turnNo;
       ctx.fillStyle = paint.label;
       ctx.font = 'bold 11px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(turnNo), p.x, p.y + 0.5);
+      ctx.fillText(String(label), p.x, p.y + 0.5);
+      if (visitsHere.length > 1) {
+        ctx.fillStyle = '#ffe44d';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(visitsHere.slice(1).join('/'), p.x + r + 6, p.y + 0.5);
+      }
       ctx.textAlign = 'start';
       ctx.textBaseline = 'alphabetic';
     }
@@ -963,8 +980,7 @@ canvas.addEventListener('pointerdown', e => {
     if (hit?.kind === 'buoy' && track.buoys[hit.index].type !== 'marker') {
       pushUndo();
       if (!track.visits) track.visits = [];
-      track.visits.push({ buoy: hit.index, side: 'right' });
-      selection = { kind: 'visit', index: track.visits.length - 1 };
+      insertVisit(hit.index, 'right');
       setMode('select');
       commit();
     }
@@ -1092,9 +1108,7 @@ canvas.addEventListener('pointerup', e => {
           : { x: snap(m.x), y: snap(m.y), type: 'marker', apexRadius: 40 };
         track.buoys.push(buoy);
         if (mode === 'addTurn') {
-          if (!track.visits) track.visits = [];
-          track.visits.push({ buoy: track.buoys.length - 1, side: 'right' });
-          selection = { kind: 'visit', index: track.visits.length - 1 };
+          insertVisit(track.buoys.length - 1, 'right');
         } else {
           selection = { kind: 'buoy', index: track.buoys.length - 1 };
         }
@@ -1220,14 +1234,32 @@ function deleteSelectedVisit() {
   commit();
 }
 
-function moveVisit(index, delta) {
-  const target = index + delta;
-  if (target < 0 || target >= track.visits.length) return;
+function visitInsertIndex() {
+  if (selection?.kind === 'visit' && Number.isInteger(selection.index)) {
+    return Math.min(selection.index + 1, (track.visits || []).length);
+  }
+  return (track.visits || []).length;
+}
+
+function insertVisit(buoyIndex, side = 'right') {
+  if (!track.visits) track.visits = [];
+  const at = visitInsertIndex();
+  track.visits.splice(at, 0, { buoy: buoyIndex, side });
+  selection = { kind: 'visit', index: at };
+}
+
+function moveVisitTo(from, to) {
+  const n = track.visits.length;
+  if (from === to || from < 0 || to < 0 || from >= n || to >= n) return;
   pushUndo();
-  const [v] = track.visits.splice(index, 1);
-  track.visits.splice(target, 0, v);
-  selection = { kind: 'visit', index: target };
+  const [v] = track.visits.splice(from, 1);
+  track.visits.splice(to, 0, v);
+  selection = { kind: 'visit', index: to };
   commit();
+}
+
+function moveVisit(index, delta) {
+  moveVisitTo(index, index + delta);
 }
 
 function moveBuoy(index, delta) {
@@ -1452,25 +1484,31 @@ function rebuildBuoyList() {
   track.visits.forEach((v, i) => {
     const item = document.createElement('div');
     item.className = 'buoyItem' + (selection?.kind === 'visit' && selection.index === i ? ' selected' : '');
+    item.dataset.visitIndex = String(i);
+
+    const handle = document.createElement('span');
+    handle.className = 'dragHandle';
+    handle.title = 'Drag to reorder';
+    const grip = document.createElement('span');
+    grip.className = 'grip';
+    grip.setAttribute('aria-hidden', 'true');
+    grip.textContent = '\u2630';
+    handle.appendChild(grip);
 
     const tag = document.createElement('span');
     tag.className = 'tag turn';
     tag.textContent = String(i + 1);
     tag.style.color = turnBuoyPaint(track.buoyColorScheme, v.side).fill;
-    item.appendChild(tag);
+    handle.appendChild(tag);
+    item.appendChild(handle);
 
     const coords = document.createElement('span');
     coords.className = 'coords';
-    const n = physicalBuoyNumber(track, v.buoy);
-    coords.textContent = `Buoy #${n} \u00B7 ${passSideLabel(v.side)}`;
+    const first = firstVisitNumber(track, v.buoy);
+    const extra = first !== i + 1 ? ` \u00B7 same as ${first}` : '';
+    coords.textContent = `${passSideLabel(v.side)}${extra}`;
     item.appendChild(coords);
 
-    const up = document.createElement('button');
-    up.className = 'mini'; up.textContent = '\u25B2'; up.title = 'Earlier in course order';
-    up.addEventListener('click', ev => { ev.stopPropagation(); moveVisit(i, -1); });
-    const down = document.createElement('button');
-    down.className = 'mini'; down.textContent = '\u25BC'; down.title = 'Later in course order';
-    down.addEventListener('click', ev => { ev.stopPropagation(); moveVisit(i, 1); });
     const del = document.createElement('button');
     del.className = 'mini'; del.textContent = '\u2715'; del.title = 'Remove this turn';
     del.addEventListener('click', ev => {
@@ -1478,13 +1516,84 @@ function rebuildBuoyList() {
       selection = { kind: 'visit', index: i };
       deleteSelectedVisit();
     });
-    item.appendChild(up); item.appendChild(down); item.appendChild(del);
+    item.appendChild(del);
 
+    bindVisitDrag(handle, item, i);
     item.addEventListener('click', () => {
+      if (suppressVisitClick) {
+        suppressVisitClick = false;
+        return;
+      }
       selection = { kind: 'visit', index: i };
       refreshOnly();
     });
     els.buoyList.appendChild(item);
+  });
+}
+
+function visitIndexFromClientY(clientY) {
+  const items = [...els.buoyList.querySelectorAll('.buoyItem')];
+  if (!items.length) return 0;
+  for (let i = 0; i < items.length; i++) {
+    const r = items[i].getBoundingClientRect();
+    if (clientY < r.top + r.height / 2) return i;
+  }
+  return items.length - 1;
+}
+
+function bindVisitDrag(handle, item, index) {
+  handle.addEventListener('pointerdown', e => {
+    if (e.button != null && e.button !== 0) return;
+    const from = index;
+    const startY = e.clientY;
+    let dragging = false;
+    let to = from;
+
+    const clearMarks = () => {
+      item.classList.remove('dragging');
+      handle.style.touchAction = '';
+      els.buoyList.querySelectorAll('.buoyItem.drop-target').forEach(el => {
+        el.classList.remove('drop-target');
+      });
+    };
+
+    const onMove = ev => {
+      if (Math.abs(ev.clientY - startY) < 8 && !dragging) return;
+      if (!dragging) {
+        dragging = true;
+        try { handle.setPointerCapture(ev.pointerId); } catch (err) { /* ignore */ }
+        item.classList.add('dragging');
+        handle.style.touchAction = 'none';
+        selection = { kind: 'visit', index: from };
+        refreshBuoyProps();
+      }
+      ev.preventDefault();
+      to = visitIndexFromClientY(ev.clientY);
+      els.buoyList.querySelectorAll('.buoyItem').forEach((el, i) => {
+        el.classList.toggle('drop-target', i === to && i !== from);
+      });
+    };
+
+    const onUp = ev => {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      handle.removeEventListener('pointercancel', onUp);
+      try { handle.releasePointerCapture(ev.pointerId); } catch (err) { /* ignore */ }
+      const didDrag = dragging;
+      clearMarks();
+      if (didDrag) {
+        suppressVisitClick = true;
+        ev.preventDefault();
+        if (to !== from) moveVisitTo(from, to);
+      } else {
+        selection = { kind: 'visit', index: from };
+        refreshOnly();
+      }
+    };
+
+    handle.addEventListener('pointermove', onMove, { passive: false });
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
   });
 }
 
@@ -1614,8 +1723,7 @@ els.buoyType.addEventListener('change', () => {
   if (wasTurn && sel.type === 'marker') {
     track.visits = (track.visits || []).filter(v => v.buoy !== idx);
   } else if (!wasTurn && sel.type === 'turn') {
-    if (!track.visits) track.visits = [];
-    track.visits.push({ buoy: idx, side: 'right' });
+    insertVisit(idx, 'right');
   }
   commit();
 });
@@ -1740,11 +1848,12 @@ document.getElementById('btnGeoRemove').addEventListener('click', () => {
 function geoWaypoints() {
   const pts = [];
   const ll = (x, y) => metersToLatLng(track.geo, x, y);
-  let turnNo = 0, markerNo = 0;
+  let markerNo = 0;
   track.buoys.forEach((b, i) => {
     if (b.type !== 'marker') {
-      turnNo += 1;
-      pts.push({ name: `Turn ${turnNo} (pass ${passSideLabel(buoyColorSide(track, i))})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
+      const nums = visitNumbersForBuoy(track, i);
+      const label = nums.length ? nums.join('/') : String(firstVisitNumber(track, i));
+      pts.push({ name: `Turn ${label} (pass ${passSideLabel(buoyColorSide(track, i))})`, type: 'turn', x: b.x, y: b.y, ...ll(b.x, b.y) });
     } else {
       markerNo += 1;
       pts.push({ name: `Marker ${markerNo}`, type: 'marker', x: b.x, y: b.y, ...ll(b.x, b.y) });

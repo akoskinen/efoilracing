@@ -3465,7 +3465,7 @@ function drawOneBuoy(b) {
     withWorldMarker(b.x, b.y, () => {
       ctx.font = '12px sans-serif';
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillText(String(b.turnIndex), 11, -8);
+      ctx.fillText((b.aliases && b.aliases.length > 1) ? b.aliases.join('/') : String(b.turnIndex), 11, -8);
     });
   }
   if (currentTrack.parallelTrack) {

@@ -146,13 +146,26 @@ export function turnBuoyPaint(scheme, side) {
   };
 }
 
-/** 1-based number among turn buoys (markers skipped). */
+/** 1-based number among turn buoys (markers skipped). Placement order, not course order. */
 export function physicalBuoyNumber(track, buoyIndex) {
   let n = 0;
   for (let i = 0; i <= buoyIndex; i++) {
     if (track.buoys[i] && track.buoys[i].type !== 'marker') n += 1;
   }
   return n;
+}
+
+/** 1-based course-order visits that use this physical buoy. */
+export function visitNumbersForBuoy(track, buoyIndex) {
+  return (track?.visits || [])
+    .map((v, i) => v.buoy === buoyIndex ? i + 1 : null)
+    .filter(n => n != null);
+}
+
+/** Number painted on the mark: first visit in course order. Extra visits keep this id. */
+export function firstVisitNumber(track, buoyIndex) {
+  const nums = visitNumbersForBuoy(track, buoyIndex);
+  return nums[0] ?? physicalBuoyNumber(track, buoyIndex);
 }
 
 export function ensureVisits(track) {
@@ -860,12 +873,12 @@ export function normalizeTrack(track) {
       b.aliases = [];
     } else {
       turnCounter += 1;
-      b.turnIndex = turnCounter;
       b.rounding = storedRounding(b.rounding);
-      b.aliases = (track.visits || [])
+      const aliases = (track.visits || [])
         .map((v, vi) => v.buoy === i ? vi + 1 : null)
         .filter(n => n != null);
-      if (!b.aliases.length) b.aliases = [b.turnIndex];
+      b.aliases = aliases.length ? aliases : [turnCounter];
+      b.turnIndex = b.aliases[0];
     }
     if (b.apexRadius == null) b.apexRadius = 40;
   });
