@@ -11,7 +11,7 @@ import {
   encodeTrackForUrl, decodeTrackFromParam, serializeTrack,
   saveDraft, loadDraft,
   hasGeo, metersToLatLng, latLngToMeters, groundDistanceMeters,
-  latLngToWorldPx, metersPerPixel,
+  latLngToWorldPx, worldPxToLatLng, metersPerPixel,
   LINE_CAPTURE_KEY, LINE_RECORD_META_KEY,
   RACING_LINE_COLORS, newRacingLineId, defaultRacingLineName,
   buildRacingLineFromGhost,
@@ -91,10 +91,9 @@ const HANDLE_HIT_PX = 10;
 
 // --- Poster render target (briefing PNG export) ---
 // When set, the draw helpers render into the poster canvas instead of the
-// live editor canvas: cssSize() reports the poster layout size and the geo
-// (Leaflet) transform is bypassed — the poster draws satellite imagery
-// itself and keeps the plain meters transform for all track elements.
-let poster = null; // { ctx, w, h }
+// live editor canvas. cssSize() reports the poster layout size. Leaflet is
+// bypassed; geo tracks use poster.geo (north-up mercator, same as the map).
+let poster = null; // { ctx, w, h, geo? }
 
 // --- Coordinate transforms (CSS pixels <-> track meters) ---
 function cssSize() {
@@ -106,6 +105,7 @@ function geoActive() {
   return geoOn && map && hasGeo(track);
 }
 function mToPx(mx, my) {
+  if (poster?.geo) return posterMetersToPx(mx, my);
   if (geoActive()) {
     const ll = metersToLatLng(track.geo, mx, my);
     const pt = map.latLngToContainerPoint([ll.lat, ll.lng]);
@@ -118,6 +118,7 @@ function mToPx(mx, my) {
   };
 }
 function pxToM(px, py) {
+  if (poster?.geo) return posterPxToMeters(px, py);
   if (geoActive()) {
     const ll = map.containerPointToLatLng(L.point(px, py));
     return latLngToMeters(track.geo, ll.lat, ll.lng);
@@ -127,6 +128,20 @@ function pxToM(px, py) {
     x: view.cx + (px - w / 2) / view.pxPerM,
     y: view.cy - (py - h / 2) / view.pxPerM
   };
+}
+
+function posterMetersToPx(mx, my) {
+  const g = poster.geo;
+  const ll = metersToLatLng(track.geo, mx, my);
+  const wp = latLngToWorldPx(ll.lat, ll.lng, g.z);
+  return { x: g.ox + wp.x * g.s, y: g.oy + wp.y * g.s };
+}
+
+function posterPxToMeters(px, py) {
+  const g = poster.geo;
+  const wp = { x: (px - g.ox) / g.s, y: (py - g.oy) / g.s };
+  const ll = worldPxToLatLng(wp.x, wp.y, g.z);
+  return latLngToMeters(track.geo, ll.lat, ll.lng);
 }
 const snap = v => Math.round(v * 10) / 10;
 
@@ -1948,53 +1963,110 @@ function loadTileImage(url) {
   });
 }
 
-// Composites Esri World Imagery under the track. Must run while the poster
-// render target is active (uses pxToM/mToPx with the poster view).
-// Returns false when tiles could not be loaded so the caller can fall back.
-async function drawPosterSatellite(pctx, w, h) {
-  const geo = track.geo;
-  const lat0 = geo.origin.lat;
-
-  // Smallest zoom whose imagery resolution meets the poster's device px/m
-  let zoom = 19;
-  for (let z = 3; z <= 19; z++) {
-    if (1 / metersPerPixel(lat0, z) >= view.pxPerM * POSTER_SCALE) { zoom = z; break; }
-  }
-
-  const cornersM = [pxToM(0, 0), pxToM(w, 0), pxToM(0, h), pxToM(w, h)];
-  const worldBounds = z => {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    cornersM.forEach(m => {
-      const ll = metersToLatLng(geo, m.x, m.y);
-      const p = latLngToWorldPx(ll.lat, ll.lng, z);
-      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-    });
-    return { minX, minY, maxX, maxY };
+function trackPointsForPosterFit() {
+  const pts = [];
+  const add = (x, y) => {
+    if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
   };
-
-  let wb = worldBounds(zoom);
-  const tileSpan = b =>
-    (Math.floor(b.maxX / 256) - Math.floor(b.minX / 256) + 1) *
-    (Math.floor(b.maxY / 256) - Math.floor(b.minY / 256) + 1);
-  while (zoom > 3 && tileSpan(wb) > 150) {
-    zoom -= 1;
-    wb = worldBounds(zoom);
+  (track.buoys || []).forEach(b => add(b.x, b.y));
+  const addSeg = s => {
+    if (!s) return;
+    add(s.x1, s.y1);
+    add(s.x2, s.y2);
+  };
+  if (track.gate) {
+    addSeg(track.gate.start);
+    addSeg(track.gate.finish);
   }
+  if (track.startPosition) add(track.startPosition.x, track.startPosition.y);
+  (track.racingLines || []).forEach(line => {
+    (line.points || []).forEach(p => add(p.x, p.y));
+  });
+  return pts;
+}
 
-  const tx0 = Math.floor(wb.minX / 256), tx1 = Math.floor(wb.maxX / 256);
-  const ty0 = Math.floor(wb.minY / 256), ty1 = Math.floor(wb.maxY / 256);
-  const tilesCanvas = document.createElement('canvas');
-  tilesCanvas.width = (tx1 - tx0 + 1) * 256;
-  tilesCanvas.height = (ty1 - ty0 + 1) * 256;
-  const tctx = tilesCanvas.getContext('2d');
+function trackGeoWorldBBox(zRef = 20) {
+  if (!hasGeo(track)) return null;
+  const pts = trackPointsForPosterFit();
+  if (pts.length < 2) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  pts.forEach(p => {
+    const ll = metersToLatLng(track.geo, p.x, p.y);
+    const wp = latLngToWorldPx(ll.lat, ll.lng, zRef);
+    minX = Math.min(minX, wp.x);
+    maxX = Math.max(maxX, wp.x);
+    minY = Math.min(minY, wp.y);
+    maxY = Math.max(maxY, wp.y);
+  });
+  if (!Number.isFinite(minX) || maxX <= minX || maxY <= minY) return null;
+  return { minX, minY, maxX, maxY, zRef };
+}
 
+// North-up mercator fit, matching the live Leaflet map (not track-meter axes).
+function buildPosterGeoView(free) {
+  const box = trackGeoWorldBBox(20);
+  if (!box) return null;
+  const pad = 1.3;
+  const spanX = Math.max(box.maxX - box.minX, 8) * pad;
+  const spanY = Math.max(box.maxY - box.minY, 8) * pad;
+  const scaleRef = Math.min(free.w / spanX, free.h / spanY);
+  if (!(scaleRef > 0) || !Number.isFinite(scaleRef)) return null;
+  const cxRef = (box.minX + box.maxX) / 2;
+  const cyRef = (box.minY + box.maxY) / 2;
+  const freeCx = free.x + free.w / 2;
+  const freeCy = free.y + free.h / 2;
+  const zIdeal = box.zRef + Math.log2(Math.max(scaleRef * POSTER_SCALE, 1e-9));
+  const z = Math.max(3, Math.min(19, Math.round(zIdeal)));
+  const s = scaleRef * Math.pow(2, box.zRef - z);
+  const pow = Math.pow(2, z - box.zRef);
+  const ox = freeCx - cxRef * pow * s;
+  const oy = freeCy - cyRef * pow * s;
+  const mpp = metersPerPixel(track.geo.origin.lat, z);
+  return { z, s, ox, oy, pxPerM: s / mpp };
+}
+
+// Composites Esri World Imagery under the track, north-up like the designer.
+// Must run while poster.geo is set. Returns false when tiles cannot load.
+async function drawPosterSatellite(pctx, w, h) {
+  const g = poster?.geo;
+  if (!g || !hasGeo(track)) return false;
+  const zoom = g.z;
+
+  const corners = [[0, 0], [w, 0], [0, h], [w, h]].map(([x, y]) => {
+    const m = posterPxToMeters(x, y);
+    const ll = metersToLatLng(track.geo, m.x, m.y);
+    return latLngToWorldPx(ll.lat, ll.lng, zoom);
+  });
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  corners.forEach(p => {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  });
+
+  let tx0 = Math.floor(minX / 256), tx1 = Math.floor(maxX / 256);
+  let ty0 = Math.floor(minY / 256), ty1 = Math.floor(maxY / 256);
+  const tileSpan = () => (tx1 - tx0 + 1) * (ty1 - ty0 + 1);
+  while (g.z > 3 && tileSpan() > 150) {
+    g.z -= 1;
+    g.s *= 2;
+    minX /= 2; maxX /= 2; minY /= 2; maxY /= 2;
+    tx0 = Math.floor(minX / 256); tx1 = Math.floor(maxX / 256);
+    ty0 = Math.floor(minY / 256); ty1 = Math.floor(maxY / 256);
+  }
+  if (tileSpan() > 160) return false;
+
+  const dest = 256 * g.s;
   const jobs = [];
+  const placed = [];
   for (let tx = tx0; tx <= tx1; tx++) {
     for (let ty = ty0; ty <= ty1; ty++) {
+      const dx = g.ox + tx * dest;
+      const dy = g.oy + ty * dest;
       jobs.push(
         loadTileImage(esriTileUrl(zoom, tx, ty))
-          .then(img => { tctx.drawImage(img, (tx - tx0) * 256, (ty - ty0) * 256); return true; })
+          .then(img => { placed.push({ img, dx, dy }); return true; })
           .catch(() => false)
       );
     }
@@ -2003,35 +2075,12 @@ async function drawPosterSatellite(pctx, w, h) {
   const ok = results.filter(Boolean).length;
   if (ok === 0 || ok < results.length * 0.7) return false;
 
-  // Affine transform world px -> poster layout px, solved from three
-  // reference points in track meters (handles geo rotation exactly).
-  const refs = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 0, y: 100 }].map(m => {
-    const c = mToPx(m.x, m.y);
-    const ll = metersToLatLng(geo, m.x, m.y);
-    return { c, wp: latLngToWorldPx(ll.lat, ll.lng, zoom) };
-  });
-  const [O, U, V] = refs;
-  const du = { x: U.wp.x - O.wp.x, y: U.wp.y - O.wp.y };
-  const dv = { x: V.wp.x - O.wp.x, y: V.wp.y - O.wp.y };
-  const cu = { x: U.c.x - O.c.x, y: U.c.y - O.c.y };
-  const cv = { x: V.c.x - O.c.x, y: V.c.y - O.c.y };
-  const det = du.x * dv.y - du.y * dv.x;
-  if (Math.abs(det) < 1e-12) return false;
-  const a = (cu.x * dv.y - cv.x * du.y) / det;
-  const c = (du.x * cv.x - dv.x * cu.x) / det;
-  const b = (cu.y * dv.y - cv.y * du.y) / det;
-  const d = (du.x * cv.y - dv.x * cu.y) / det;
-  const e = O.c.x - (a * O.wp.x + c * O.wp.y);
-  const f = O.c.y - (b * O.wp.x + d * O.wp.y);
-
   pctx.save();
-  pctx.transform(a, b, c, d, e, f);
   pctx.imageSmoothingEnabled = true;
   pctx.imageSmoothingQuality = 'high';
-  pctx.drawImage(tilesCanvas, tx0 * 256, ty0 * 256);
+  placed.forEach(t => { pctx.drawImage(t.img, t.dx, t.dy, dest, dest); });
   pctx.restore();
 
-  // Slight darkening so the neon track colors keep their contrast
   pctx.fillStyle = 'rgba(4,10,16,0.18)';
   pctx.fillRect(0, 0, w, h);
   return true;
@@ -2377,7 +2426,11 @@ async function renderBriefingPoster() {
 
   const W = POSTER_W, H = POSTER_H, M = POSTER_MARGIN;
   const bbox = trackBBox(track);
-  const wide = bbox ? bbox.w / Math.max(bbox.h, 1) >= 1.4 : false;
+  const geoBox = trackGeoWorldBBox(20);
+  const geoAspect = geoBox ? (geoBox.maxX - geoBox.minX) / (geoBox.maxY - geoBox.minY) : null;
+  const wide = geoAspect != null
+    ? geoAspect >= 1.4
+    : (bbox ? bbox.w / Math.max(bbox.h, 1) >= 1.4 : false);
 
   const panel = wide
     ? { x: M, y: H - M - POSTER_PANEL_H, w: W - 2 * M, h: POSTER_PANEL_H }
@@ -2404,14 +2457,16 @@ async function renderBriefingPoster() {
     cx: bcx - (free.x + free.w / 2 - W / 2) / pxPerM,
     cy: bcy - (H / 2 - (free.y + free.h / 2)) / pxPerM
   };
+  const pgeo = hasGeo(track) ? buildPosterGeoView(free) : null;
+  if (pgeo) pview.pxPerM = pgeo.pxPerM;
 
   // Swap the module render target so the existing draw helpers hit the poster
   const prevCtx = ctx, prevView = view, prevSelection = selection;
   ctx = pctx; view = pview; selection = null;
-  poster = { ctx: pctx, w: W, h: H };
+  poster = { ctx: pctx, w: W, h: H, geo: pgeo };
   let satellite = false;
   try {
-    if (hasGeo(track)) {
+    if (pgeo) {
       satellite = await drawPosterSatellite(pctx, W, H);
     }
     if (!satellite) {
