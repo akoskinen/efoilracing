@@ -31,6 +31,8 @@
 //     rotationDeg: 0                     // CCW rotation of the +x axis from East
 //   }
 // }
+// Share URLs omit racingLines, notes, and startTechnique so the link
+// fits a QR code and WhatsApp. Drafts and JSON export keep the full track.
 ////////////////////////////////////////////////////////////
 
 export const TRACK_SCHEMA_VERSION = 3;
@@ -883,6 +885,8 @@ export function normalizeTrack(track) {
     if (b.apexRadius == null) b.apexRadius = 40;
   });
 
+  if (!Number.isFinite(track.scale) || track.scale <= 0) track.scale = 4;
+
   track.useGates = true;
   track.requiresDirectionalGates = !!gate.directional;
   track.directionalFinishGate = !!gate.directionalFinish;
@@ -1079,7 +1083,7 @@ export function ghostFromRacingLine(line) {
 }
 
 // Keep only the declarative source fields (drops runtime fields added by
-// normalizeTrack) and round coordinates to keep share URLs short.
+// normalizeTrack) and round coordinates. Used for drafts, undo, and JSON export.
 export function serializeTrack(track) {
   migrateTrackSchema(track);
   const r1 = v => Math.round(v * 10) / 10;
@@ -1170,8 +1174,35 @@ export function serializeTrack(track) {
   return out;
 }
 
+/**
+ * Course layout only — no racing lines, ghosts, or briefing copy.
+ * Share links have to fit a QR code (~2.9k bytes) and survive WhatsApp paste.
+ */
+export function serializeTrackForShare(track) {
+  const out = serializeTrack(track);
+  delete out.racingLines;
+  delete out.startTechnique;
+  delete out.notes;
+  if (!String(out.author || '').trim()) delete out.author;
+  else out.author = String(out.author).trim();
+  if (out.name) out.name = String(out.name).trim();
+  if (out.buoyColorScheme === 'nautical') delete out.buoyColorScheme;
+  (out.buoys || []).forEach(b => {
+    delete b.optimalSpeed;
+  });
+  if (out.gate) {
+    if (out.gate.sameStartFinish !== false) delete out.gate.sameStartFinish;
+    if (!out.gate.directional) delete out.gate.directional;
+    if (!out.gate.directionalFinish) delete out.gate.directionalFinish;
+    if (!out.gate.finish) delete out.gate.finish;
+    const d = out.gate.direction;
+    if (d && d.x === 1 && d.y === 0) delete out.gate.direction;
+  }
+  return out;
+}
+
 export function encodeTrackForUrl(track) {
-  return lz().compressToEncodedURIComponent(JSON.stringify(serializeTrack(track)));
+  return lz().compressToEncodedURIComponent(JSON.stringify(serializeTrackForShare(track)));
 }
 
 export function decodeTrackFromParam(param) {

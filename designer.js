@@ -3185,11 +3185,21 @@ document.getElementById('btnShare').addEventListener('click', () => {
   const param = encodeTrackForUrl(track);
   const url = new URL('index.html', window.location.href);
   url.search = '?data=' + param;
-  els.shareUrl.value = url.toString();
+  const href = url.toString();
+  els.shareUrl.value = href;
+  const meta = document.getElementById('shareMeta');
+  if (meta) {
+    const n = href.length;
+    const whatsappOk = n <= 2000;
+    meta.textContent = n + ' characters' +
+      (whatsappOk
+        ? ' — short enough for a QR code and WhatsApp.'
+        : ' — may be too long for some WhatsApp chats; try a shorter track name.');
+  }
   els.qrContainer.innerHTML = '';
   try {
     const qr = qrcode(0, 'L');
-    qr.addData(url.toString());
+    qr.addData(href);
     qr.make();
     els.qrContainer.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0 });
   } catch (err) {

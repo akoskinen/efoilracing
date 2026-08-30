@@ -50,7 +50,7 @@ The top-left stack is **Back to Designer**, then the **ghost** block (previous l
 - **Tracks** menu:
   - **Saved tracks** — full course including world location, grouped by country with flag emojis. Opening one jumps the map to that venue.
   - **Presets** — layout templates (Official Speedtrack 70 / 55 / 105 m). Applying a preset keeps the current map location.
-- Record a racing line from the simulator; share a compressed URL + QR; export a race-briefing poster.
+- Record a racing line from the simulator; share a compressed layout-only URL + QR (ghosts stay local); export a race-briefing poster.
 
 ## Architecture (short)
 
