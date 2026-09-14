@@ -138,7 +138,8 @@
 	  pointer-events: none;
 	}
 	#rideChrome .hudLink,
-	#rideChrome #ghostCustomize {
+	#rideChrome #ghostCustomize,
+	#rideChrome #ghostTimeline {
 	  pointer-events: auto;
 	}
 	#rideChrome .hudLink {
@@ -188,6 +189,99 @@
 	}
 	#ghostHudDelta.ahead { color: #3eef90; }
 	#ghostHudDelta.behind { color: #ffd54a; }
+	#ghostTimeline {
+	  display: none;
+	  flex-direction: column;
+	  align-items: stretch;
+	  gap: 2px;
+	  width: 248px;
+	  max-width: calc(100vw - 40px);
+	  margin-top: -4px;
+	  pointer-events: auto;
+	  touch-action: none;
+	  user-select: none;
+	  -webkit-user-select: none;
+	}
+	#ghostTimeline.show { display: flex; }
+	#ghostTimelineRow {
+	  display: flex;
+	  align-items: center;
+	  gap: 8px;
+	}
+	#ghostTimelinePlay {
+	  flex: 0 0 44px;
+	  width: 44px;
+	  min-height: 44px;
+	  margin: 0;
+	  padding: 0;
+	  color: #ffc4ff;
+	  background: rgba(12, 18, 24, 0.55);
+	  border: 1px solid rgba(255,136,255,0.35);
+	  border-radius: 10px;
+	  font-family: sans-serif;
+	  font-size: 12px;
+	  font-weight: 600;
+	  text-shadow: 0 1px 3px #000;
+	  cursor: pointer;
+	  -webkit-tap-highlight-color: rgba(255,136,255,0.25);
+	}
+	#ghostTimelineTimes {
+	  flex: 1;
+	  display: flex;
+	  justify-content: space-between;
+	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	  font-size: 12px;
+	  font-variant-numeric: tabular-nums;
+	  color: rgba(255,255,255,0.8);
+	  text-shadow: 1px 1px 2px #000;
+	}
+	#ghostTimelineTrack {
+	  position: relative;
+	  height: 44px;
+	  cursor: ew-resize;
+	  touch-action: none;
+	}
+	#ghostTimelineTrack::before {
+	  content: '';
+	  position: absolute;
+	  left: 0;
+	  right: 0;
+	  top: 50%;
+	  height: 6px;
+	  margin-top: -3px;
+	  border-radius: 3px;
+	  background: rgba(255,255,255,0.22);
+	}
+	#ghostTimelineFill {
+	  position: absolute;
+	  left: 0;
+	  top: 50%;
+	  height: 6px;
+	  margin-top: -3px;
+	  width: 0%;
+	  border-radius: 3px;
+	  background: #ff88ff;
+	  pointer-events: none;
+	}
+	#ghostTimelineThumb {
+	  position: absolute;
+	  top: 50%;
+	  left: 0%;
+	  width: 18px;
+	  height: 18px;
+	  margin-left: -9px;
+	  margin-top: -9px;
+	  border-radius: 50%;
+	  background: #ffc4ff;
+	  box-shadow: 0 0 0 3px rgba(255,136,255,0.35);
+	  pointer-events: none;
+	}
+	#ghostTimelineHint {
+	  font-size: 11px;
+	  line-height: 1.3;
+	  color: rgba(255,255,255,0.55);
+	  text-shadow: 0 1px 3px #000;
+	}
 	#ghostCustomize {
 	  display: none;
 	  flex-direction: column;
@@ -422,6 +516,20 @@
 	  <div id="ghostHudTitle">Ghost: —</div>
 	  <div id="ghostHudBody"></div>
 	  <div id="ghostHudDelta"></div>
+	</div>
+	<div id="ghostTimeline">
+	  <div id="ghostTimelineRow">
+	    <button type="button" id="ghostTimelinePlay" aria-label="Play ghost">Play</button>
+	    <div id="ghostTimelineTimes">
+	      <span id="ghostTimelineNow">00:00.00</span>
+	      <span id="ghostTimelineDur">00:00.00</span>
+	    </div>
+	  </div>
+	  <div id="ghostTimelineTrack" role="slider" aria-label="Ghost replay position" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" tabindex="0">
+	    <div id="ghostTimelineFill"></div>
+	    <div id="ghostTimelineThumb"></div>
+	  </div>
+	  <div id="ghostTimelineHint">Drag to skip the wait. Your lap starts from this point.</div>
 	</div>
 	<button type="button" class="hudLink" id="customizeGhostBtn" aria-expanded="false">Customize ghost</button>
 	<div id="ghostCustomize">

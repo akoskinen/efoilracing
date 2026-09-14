@@ -858,6 +858,7 @@ function resetRideForNewTrack() {
   validCrossing = false;
   idealLineData = null;
   showIdealLine = false;
+  resetGhostTimeline();
   ghostWakeTrail = [];
   zoomStopIndex = 0;
   const music = AudioManager.sounds.music;
@@ -920,6 +921,7 @@ const rideHudEls = [
   document.getElementById('rideMeter'),
   document.getElementById('lapHistory'),
   document.getElementById('ghostHud'),
+  document.getElementById('ghostTimeline'),
   document.getElementById('customizeGhostBtn'),
   document.getElementById('ghostCustomize'),
   document.getElementById('brandMark')
@@ -1904,6 +1906,65 @@ bindChromeTap(document.getElementById('keepGhostBtn'), () => {
   toggleKeepCurrentGhost();
 });
 
+function ghostTimeFromPointer(e, trackEl) {
+  const r = trackEl.getBoundingClientRect();
+  const x = (e.clientX - r.left) / Math.max(1, r.width);
+  return Math.max(0, Math.min(1, x)) * ghostDurationSec();
+}
+
+(function bindGhostTimeline() {
+  const track = document.getElementById('ghostTimelineTrack');
+  const playBtn = document.getElementById('ghostTimelinePlay');
+  if (track) {
+    const onDown = e => {
+      if (e.button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      ghostScrubbing = true;
+      seekGhostTo(ghostTimeFromPointer(e, track), { play: false });
+      syncGhostTimelineUi();
+      try { track.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    };
+    const onMove = e => {
+      if (!ghostScrubbing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      seekGhostTo(ghostTimeFromPointer(e, track), { play: false });
+      syncGhostTimelineUi();
+    };
+    const onUp = e => {
+      if (!ghostScrubbing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      ghostScrubbing = false;
+      seekGhostTo(ghostSeekSec, { play: false });
+      syncGhostTimelineUi();
+    };
+    track.addEventListener('pointerdown', onDown);
+    track.addEventListener('pointermove', onMove);
+    track.addEventListener('pointerup', onUp);
+    track.addEventListener('pointercancel', onUp);
+  }
+  bindChromeTap(playBtn, () => {
+    if (!currentGhost?.frames?.length) return;
+    if (lapActive) return;
+    const playing = !!ghostPreviewStart && ghostPlaying && !ghostScrubbing;
+    if (playing) {
+      ghostClockOrigin = ghostPlaybackTimeSec();
+      ghostPlaying = false;
+      ghostPreviewStart = ghostNowMs();
+    } else {
+      if (ghostDurationSec() > 0 && ghostClockOrigin >= ghostDurationSec() - 0.05) {
+        ghostClockOrigin = 0;
+      }
+      ghostPlaying = true;
+      ghostPreviewStart = ghostNowMs();
+    }
+    ghostUserSeeked = true;
+    syncGhostTimelineUi();
+  });
+})();
+
 document.addEventListener('pointerdown', e => {
   const panel = document.getElementById('ghostCustomize');
   if (!panel?.classList.contains('open')) return;
@@ -2750,30 +2811,89 @@ function ghostFrameHeadingToScreen(frame) {
 }
 
 // Free-running preview clock so session ghosts are visible before a lap starts.
+// Timeline scrubbing sets the playhead; starting a lap keeps that offset so
+// you can skip the pre-gate wait in an imported session.
 let ghostPreviewStart = 0;
+let ghostClockOrigin = 0;
+let ghostSeekSec = 0;
+let ghostRaceOffsetSec = 0;
+let ghostPlaying = true;
+let ghostScrubbing = false;
+let ghostUserSeeked = false;
+
+function ghostNowMs() {
+  return (rideSimPaused && rideSimPauseAt) ? rideSimPauseAt : performance.now();
+}
+
+function ghostDurationSec() {
+  const frames = currentGhost?.frames;
+  if (!frames?.length) return 0;
+  const last = frames[frames.length - 1];
+  return Math.max(0, Number(currentGhost.time ?? last.time) || 0);
+}
+
+function resetGhostTimeline() {
+  ghostPreviewStart = 0;
+  ghostClockOrigin = 0;
+  ghostSeekSec = 0;
+  ghostRaceOffsetSec = 0;
+  ghostPlaying = true;
+  ghostScrubbing = false;
+  ghostUserSeeked = false;
+}
 
 function ghostPlaybackTimeSec() {
-  const now = (rideSimPaused && rideSimPauseAt) ? rideSimPauseAt : performance.now();
+  if (ghostScrubbing) return ghostSeekSec;
   if (lapActive && lapStartTime) {
-    return (now - lapStartTime) / 1000;
+    return ghostRaceOffsetSec + (ghostNowMs() - lapStartTime) / 1000;
   }
-  if (ghostPreviewStart) {
-    return (now - ghostPreviewStart) / 1000;
+  if (!ghostPreviewStart) return ghostClockOrigin;
+  if (!ghostPlaying) return ghostClockOrigin;
+  const dur = ghostDurationSec();
+  const t = ghostClockOrigin + (ghostNowMs() - ghostPreviewStart) / 1000;
+  if (dur > 0 && t >= dur) {
+    ghostClockOrigin = dur;
+    ghostPlaying = false;
+    ghostPreviewStart = ghostNowMs();
+    return dur;
   }
-  return 0;
+  return t;
+}
+
+function seekGhostTo(sec, { play } = {}) {
+  const dur = ghostDurationSec();
+  const t = Math.max(0, Math.min(dur, Number(sec) || 0));
+  ghostSeekSec = t;
+  ghostClockOrigin = t;
+  ghostUserSeeked = true;
+  ghostWakeTrail = [];
+  const now = ghostNowMs();
+  if (lapActive && lapStartTime) {
+    ghostRaceOffsetSec = t - (now - lapStartTime) / 1000;
+  } else {
+    ghostPreviewStart = now || performance.now();
+    if (play != null) ghostPlaying = !!play;
+  }
 }
 
 function startGhostPreview() {
+  ghostRaceOffsetSec = 0;
+  ghostClockOrigin = 0;
+  ghostSeekSec = 0;
+  ghostUserSeeked = false;
+  ghostScrubbing = false;
+  ghostPlaying = true;
   ghostPreviewStart = performance.now();
   ghostWakeTrail = [];
+  syncGhostTimelineUi();
 }
 
 function drawGhostFrame() {
     if (!showGhost || !currentGhost) {
         return;
     }
-    // Need an active lap or a free preview (session CSV import starts preview).
-    if (!lapActive && !ghostPreviewStart) {
+    // Need an active lap, a free preview, or a paused/scrubbed playhead.
+    if (!lapActive && !ghostPreviewStart && !ghostUserSeeked) {
         return;
     }
 
@@ -2781,10 +2901,8 @@ function drawGhostFrame() {
         return;
     }
 
-    const timeSec = ghostPlaybackTimeSec();
-    // Loop preview so long sessions keep animating while you wait to start
-    const lapDur = currentGhost.time || currentGhost.frames[currentGhost.frames.length - 1]?.time || 0;
-    const playT = (!lapActive && lapDur > 0) ? (timeSec % Math.max(lapDur, 0.1)) : timeSec;
+    const playT = ghostPlaybackTimeSec();
+    syncGhostTimelineUi();
 
     const frame = getGhostPosition(playT, currentGhost);
     if (!frame) {
@@ -2830,9 +2948,14 @@ function drawGhost(x, y, heading) {
 }
 
 function startLap(){
+  const ghostAtGate = (ghostPreviewStart || ghostUserSeeked)
+    ? ghostPlaybackTimeSec()
+    : 0;
   lapStartTime = performance.now();
   currentLapTime = 0;
   lapActive = true;
+  ghostRaceOffsetSec = ghostAtGate;
+  ghostPlaying = true;
   
   // Clear ghost wake trail
   ghostWakeTrail = [];
@@ -2940,6 +3063,18 @@ function completeLap() {
       historyDiv.insertBefore(lapEntry, historyDiv.firstChild);
     }
     
+    // Freeze the ghost playhead so a second lap can scrub back, instead of
+    // jumping to a preview clock that kept running during the race.
+    if (ghostPreviewStart || ghostUserSeeked) {
+      ghostClockOrigin = ghostPlaybackTimeSec();
+      ghostSeekSec = ghostClockOrigin;
+      ghostPlaying = false;
+      ghostPreviewStart = performance.now();
+    } else {
+      ghostRaceOffsetSec = 0;
+      ghostClockOrigin = 0;
+    }
+
     // Set lap to inactive before any potential game pause
     lapActive = false;
     
@@ -4040,7 +4175,7 @@ function ghostTimeDeltaSec() {
     }
   }
   ghostDeltaSearchIdx = bestI;
-  return currentLapTime - (frames[bestI].time || 0);
+  return currentLapTime - ((frames[bestI].time || 0) - ghostRaceOffsetSec);
 }
 
 function formatGhostDelta(sec) {
@@ -4049,6 +4184,38 @@ function formatGhostDelta(sec) {
   if (abs < 0.005) return { text: '0.00s ahead of ghost', kind: 'ahead' };
   if (sec > 0) return { text: `${sec.toFixed(2)}s behind ghost`, kind: 'behind' };
   return { text: `${abs.toFixed(2)}s ahead of ghost`, kind: 'ahead' };
+}
+
+function syncGhostTimelineUi() {
+  const root = document.getElementById('ghostTimeline');
+  if (!root) return;
+  const hasGhost = !!(showGhost && currentGhost?.frames?.length);
+  root.classList.toggle('show', hasGhost);
+  if (!hasGhost) return;
+
+  const dur = ghostDurationSec();
+  const t = Math.max(0, Math.min(dur, ghostPlaybackTimeSec()));
+  const pct = dur > 0 ? (t / dur) * 100 : 0;
+  const fill = document.getElementById('ghostTimelineFill');
+  const thumb = document.getElementById('ghostTimelineThumb');
+  const nowEl = document.getElementById('ghostTimelineNow');
+  const durEl = document.getElementById('ghostTimelineDur');
+  const playBtn = document.getElementById('ghostTimelinePlay');
+  const track = document.getElementById('ghostTimelineTrack');
+  if (fill) fill.style.width = pct + '%';
+  if (thumb) thumb.style.left = pct + '%';
+  if (nowEl) nowEl.textContent = formatLapClock(t);
+  if (durEl) durEl.textContent = formatLapClock(dur);
+  if (playBtn) {
+    const playing = lapActive || (!!ghostPreviewStart && ghostPlaying && !ghostScrubbing);
+    playBtn.textContent = playing ? 'Pause' : 'Play';
+    playBtn.setAttribute('aria-label', playing ? 'Pause ghost' : 'Play ghost');
+  }
+  if (track) {
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', String(Math.round(dur)));
+    track.setAttribute('aria-valuenow', String(Math.round(t)));
+  }
 }
 
 function ghostHudLines() {
@@ -4084,6 +4251,7 @@ function updateGhostStats() {
         .join(' ');
     }
     updateKeepGhostButton();
+    syncGhostTimelineUi();
 }
 
 function applyImportedGhost(ghost, message) {
@@ -4124,7 +4292,7 @@ async function importSessionCsvText(text, fileName) {
       `Session CSV imported as ghost on “${currentTrack.name}” ` +
       `(${ghost.frames.length} frames, ${ghost.time.toFixed(1)}s, ${ghost.distance.toFixed(0)} m).\n` +
       `Positions are real GPS via this track’s map anchor.\n` +
-      `The pink ghost should start replaying immediately; cross the gate to race it.` + note);
+      `The pink ghost should start replaying immediately; drag the timeline to skip the wait, then cross the gate to race from that point.` + note);
     return;
   }
 
@@ -4207,6 +4375,7 @@ if (chooseFileBtn && importGhostFile) {
 
 function restorePreviousLapGhost() {
   setKeepCurrentGhost(false);
+  resetGhostTimeline();
   ghostWakeTrail = [];
   if (lastValidGhost) {
     currentGhost = lastValidGhost;
@@ -4835,6 +5004,7 @@ window.enableGhostRacing = function() {
       showGhostCheckbox.checked = true;
     }
     
+    startGhostPreview();
     updateGhostStats();
     return true;
   } else {
