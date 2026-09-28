@@ -13,6 +13,7 @@ import {
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
   RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost, applySparseGhostSmoothing,
+  SESSION_GHOST_TARGET_HZ,
   createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
   buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
@@ -4408,7 +4409,7 @@ importGhostFile.addEventListener('change', async (e) => {
       updateGhostStats();
       const smoothedOne = [...ghostDataMap.values()].find(g => g?.smoothed);
       const extra = smoothedOne?.sampleHz
-        ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to 10 Hz`
+        ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`
         : '';
       alert('Ghost data imported successfully! It will appear on your next lap.' + extra);
     } else if (imported.trackKey && imported.frames) {
@@ -4536,7 +4537,7 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
             updateGhostStats();
             const smoothedOne = [...ghostDataMap.values()].find(g => g?.smoothed);
             const extra = smoothedOne?.sampleHz
-              ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to 10 Hz`
+              ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`
               : '';
             alert('Ghost data imported successfully! It will appear on your next lap.' + extra);
         } else if (imported.frames) {
