@@ -1475,11 +1475,70 @@ function thinGhostFramesEven(frames, maxFrames) {
   return out;
 }
 
+/** Turning angle at p1 (0 = straight, π = U-turn). */
+function cornerAngle(p0, p1, p2) {
+  if (!p0 || !p1 || !p2) return 0;
+  const ax = p1.x - p0.x, ay = p1.y - p0.y;
+  const bx = p2.x - p1.x, by = p2.y - p1.y;
+  const na = Math.hypot(ax, ay), nb = Math.hypot(bx, by);
+  if (na < 1e-6 || nb < 1e-6) return 0;
+  const dot = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (na * nb)));
+  return Math.acos(dot);
+}
+
+/** One Chaikin cut: round sparse GPS knots (tight buoy turns) without leaving the corridor. */
+function chaikinTimed(frames, minMoveM) {
+  if (!frames || frames.length < 3) return frames;
+  const out = [{ ...frames[0] }];
+  for (let i = 0; i < frames.length - 1; i++) {
+    const a = frames[i];
+    const b = frames[i + 1];
+    const move = Math.hypot(b.x - a.x, b.y - a.y);
+    const ta = frameTimeSec(a);
+    const tb = frameTimeSec(b);
+    if (move < minMoveM) {
+      out.push({ ...b });
+      continue;
+    }
+    const mk = t => ({
+      ...a,
+      time: lerpNum(ta, tb, t),
+      x: lerpNum(a.x, b.x, t),
+      y: lerpNum(a.y, b.y, t),
+      speedKmh: lerpNum(a.speedKmh || 0, b.speedKmh || 0, t),
+      headingSpace: a.headingSpace || b.headingSpace
+    });
+    out.push(mk(0.25));
+    out.push(mk(0.75));
+  }
+  const last = frames[frames.length - 1];
+  const prev = out[out.length - 1];
+  if (!prev || Math.abs(frameTimeSec(last) - frameTimeSec(prev)) > 1e-4) out.push({ ...last });
+  return out;
+}
+
+function refreshGhostHeadings(frames) {
+  for (let i = 1; i < frames.length; i++) {
+    const dx = frames[i].x - frames[i - 1].x;
+    const dy = frames[i].y - frames[i - 1].y;
+    if (Math.hypot(dx, dy) > 0.15) {
+      frames[i].heading = Math.round(Math.atan2(dy, dx) * 1000) / 1000;
+    } else {
+      frames[i].heading = frames[i - 1].heading;
+    }
+  }
+  return frames;
+}
+
+export const SESSION_GHOST_TARGET_HZ = 20;
+export const SESSION_GHOST_MAX_FRAMES = 16000;
+/** Extra spline samples so a tight buoy turn is ~5° steps, not 1 Hz chords. */
+const SESSION_GHOST_TURN_STEP_RAD = Math.PI / 36;
+
 /**
- * If GPS is slower than ~8 Hz (iPhone ~1 Hz), resample the path with a
- * centripetal spline to ~10 Hz so replay is not a chain of 1 s chords.
- * Dragy-class 20 Hz logs are left alone. Stationary segments stay linear
- * so waiting-on-the-beach GPS jitter does not wiggle.
+ * If GPS is slower than ~8 Hz (iPhone ~1 Hz), round the 1 Hz knots, then
+ * resample with a centripetal spline to ~20 Hz (denser still in tight turns).
+ * Dragy-class 20 Hz logs are left alone.
  */
 export function smoothSparseGhostFrames(frames, options = {}) {
   if (!frames || frames.length < 3) {
@@ -1488,12 +1547,20 @@ export function smoothSparseGhostFrames(frames, options = {}) {
   const dt = medianFrameDtSec(frames);
   const sampleHz = dt > 0 ? 1 / dt : 0;
   const minHz = options.minHz ?? 8;
-  const targetHz = options.targetHz ?? 10;
+  const targetHz = options.targetHz ?? SESSION_GHOST_TARGET_HZ;
   if (!(sampleHz > 0) || sampleHz >= minHz) {
     return { frames, sampleHz, smoothed: false };
   }
 
   const minMoveM = options.minMoveM ?? 1;
+  const maxInsert = options.maxInsert ?? 32;
+  const chaikinPasses = options.chaikinPasses ?? 1;
+
+  // Cut the 1 Hz corners first so Catmull-Rom is not interpolating a
+  // faceted buoy turn. Stationary beach-wait segments stay linear.
+  let src = frames;
+  for (let p = 0; p < chaikinPasses; p++) src = chaikinTimed(src, minMoveM);
+
   const out = [];
   const push = (f, from) => {
     const time = frameTimeSec(f);
@@ -1513,22 +1580,27 @@ export function smoothSparseGhostFrames(frames, options = {}) {
     });
   };
 
-  push({ ...frames[0] }, null);
-  for (let i = 0; i < frames.length - 1; i++) {
-    const a = frames[i];
-    const b = frames[i + 1];
+  push({ ...src[0] }, null);
+  for (let i = 0; i < src.length - 1; i++) {
+    const a = src[i];
+    const b = src[i + 1];
     const t0 = frameTimeSec(a);
     const t1 = frameTimeSec(b);
     const segDt = t1 - t0;
     const move = Math.hypot(b.x - a.x, b.y - a.y);
-    // Keep nearly-stationary GPS as endpoints (linear in the draw loop).
-    // Splining beach-wait jitter would wiggle around the true sit-spot.
-    const nInsert = (segDt > 0.04 && move >= minMoveM)
-      ? Math.min(12, Math.max(0, Math.round(segDt * targetHz) - 1))
-      : 0;
+    const ang = Math.max(
+      cornerAngle(ghostPtAt(src, i - 1), a, b),
+      cornerAngle(a, b, ghostPtAt(src, i + 2))
+    );
+    let nInsert = 0;
+    if (segDt > 0.04 && move >= minMoveM) {
+      const nTime = Math.round(segDt * targetHz) - 1;
+      const nAngle = ang > 0.12 ? Math.ceil(ang / SESSION_GHOST_TURN_STEP_RAD) : 0;
+      nInsert = Math.min(maxInsert, Math.max(0, nTime, nAngle));
+    }
     if (nInsert > 0) {
-      const p0 = ghostPtAt(frames, i - 1);
-      const p3 = ghostPtAt(frames, i + 2);
+      const p0 = ghostPtAt(src, i - 1);
+      const p3 = ghostPtAt(src, i + 2);
       for (let k = 1; k <= nInsert; k++) {
         const t = k / (nInsert + 1);
         const xy = centripetalCatmullRom(p0, a, b, p3, t);
@@ -1545,12 +1617,13 @@ export function smoothSparseGhostFrames(frames, options = {}) {
     push({ ...b }, out[out.length - 1]);
   }
 
-  let result = out;
-  const maxFrames = options.maxFrames;
+  let result = refreshGhostHeadings(out);
+  const maxFrames = options.maxFrames ?? SESSION_GHOST_MAX_FRAMES;
   if (Number.isFinite(maxFrames) && result.length > maxFrames) {
     result = thinGhostFramesEven(result, maxFrames);
+    refreshGhostHeadings(result);
   }
-  return { frames: result, sampleHz, smoothed: out.length > frames.length };
+  return { frames: result, sampleHz, smoothed: result.length > frames.length };
 }
 
 /** Simulator racing-line ghosts are already a fair curve; do not re-spline them. */
@@ -1571,7 +1644,7 @@ function isSimulatorRacingLineGhost(ghost) {
 export function applySparseGhostSmoothing(ghost, options = {}) {
   if (!ghost?.frames?.length || ghost.smoothed) return { ghost, changed: false };
   if (isSimulatorRacingLineGhost(ghost)) return { ghost, changed: false };
-  const maxFrames = options.maxFrames ?? 1600;
+  const maxFrames = options.maxFrames ?? SESSION_GHOST_MAX_FRAMES;
   const result = smoothSparseGhostFrames(ghost.frames, { ...options, maxFrames });
   if (!result.smoothed) {
     if (result.sampleHz && ghost.sampleHz == null) ghost.sampleHz = result.sampleHz;
@@ -1585,7 +1658,7 @@ export function applySparseGhostSmoothing(ghost, options = {}) {
       smoothed: true
     },
     changed: true,
-    note: `Smoothed ${result.sampleHz.toFixed(1)} Hz GPS to 10 Hz`
+    note: `Smoothed ${result.sampleHz.toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`
   };
 }
 
@@ -1636,7 +1709,7 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
   }
 
   const rotationDeg = geo.rotationDeg || 0;
-  const maxFrames = options.maxFrames ?? 1600;
+  const maxFrames = options.maxFrames ?? SESSION_GHOST_MAX_FRAMES;
 
   let frames = [];
   let sumSpeed = 0;
@@ -1684,7 +1757,7 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
   const smoothed = smoothSparseGhostFrames(frames, { maxFrames });
   frames = smoothed.frames;
   if (smoothed.smoothed) {
-    warnings.push(`Smoothed ${smoothed.sampleHz.toFixed(1)} Hz GPS to 10 Hz`);
+    warnings.push(`Smoothed ${smoothed.sampleHz.toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`);
   }
 
   if (best.dist < 15) {
