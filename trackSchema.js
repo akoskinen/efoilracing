@@ -1400,14 +1400,17 @@ function rowGhostTime(row, t0, useLapElapsed) {
   return null;
 }
 
+function frameTimeSec(frame) {
+  const t = frame?.time ?? frame?.t;
+  return Number.isFinite(t) ? t : 0;
+}
+
 /** Median positive sample interval in seconds (ignores pauses and jitter). */
 export function medianFrameDtSec(frames) {
   const dts = [];
   for (let i = 1; i < (frames || []).length; i++) {
-    const a = frames[i - 1].time ?? frames[i - 1].t;
-    const b = frames[i].time ?? frames[i].t;
-    const d = Number(b) - Number(a);
-    if (Number.isFinite(d) && d > 0.01 && d < 10) dts.push(d);
+    const d = frameTimeSec(frames[i]) - frameTimeSec(frames[i - 1]);
+    if (Number.isFinite(d) && d >= 0.01 && d <= 10) dts.push(d);
   }
   if (!dts.length) return 0;
   dts.sort((x, y) => x - y);
@@ -1456,14 +1459,14 @@ function ghostPtAt(frames, i) {
 
 function thinGhostFramesEven(frames, maxFrames) {
   if (!frames || frames.length <= maxFrames) return frames || [];
-  const firstT = frames[0].time;
-  const lastT = frames[frames.length - 1].time;
+  const firstT = frameTimeSec(frames[0]);
+  const lastT = frameTimeSec(frames[frames.length - 1]);
   const span = Math.max(lastT - firstT, 1e-6);
   const out = [frames[0]];
   let idx = 1;
   for (let k = 1; k < maxFrames - 1; k++) {
     const targetT = firstT + (span * k) / (maxFrames - 1);
-    while (idx < frames.length - 1 && frames[idx].time < targetT) idx++;
+    while (idx < frames.length - 1 && frameTimeSec(frames[idx]) < targetT) idx++;
     const pick = frames[idx];
     if (out[out.length - 1] !== pick) out.push(pick);
   }
@@ -1493,15 +1496,16 @@ export function smoothSparseGhostFrames(frames, options = {}) {
   const minMoveM = options.minMoveM ?? 1;
   const out = [];
   const push = (f, from) => {
-    let heading = f.heading;
+    const time = frameTimeSec(f);
+    let heading = f.heading ?? f.h ?? 0;
     if (from && Math.hypot(f.x - from.x, f.y - from.y) > 0.15) {
       heading = Math.atan2(f.y - from.y, f.x - from.x);
     }
     const prev = out[out.length - 1];
-    if (prev && Math.abs((f.time || 0) - prev.time) < 1e-4) return;
+    if (prev && Math.abs(time - prev.time) < 1e-4) return;
     out.push({
       ...f,
-      time: Math.round((f.time || 0) * 1000) / 1000,
+      time: Math.round(time * 1000) / 1000,
       x: Math.round(f.x * 100) / 100,
       y: Math.round(f.y * 100) / 100,
       heading: Math.round((heading || 0) * 1000) / 1000,
@@ -1513,8 +1517,12 @@ export function smoothSparseGhostFrames(frames, options = {}) {
   for (let i = 0; i < frames.length - 1; i++) {
     const a = frames[i];
     const b = frames[i + 1];
-    const segDt = (b.time || 0) - (a.time || 0);
+    const t0 = frameTimeSec(a);
+    const t1 = frameTimeSec(b);
+    const segDt = t1 - t0;
     const move = Math.hypot(b.x - a.x, b.y - a.y);
+    // Keep nearly-stationary GPS as endpoints (linear in the draw loop).
+    // Splining beach-wait jitter would wiggle around the true sit-spot.
     const nInsert = (segDt > 0.04 && move >= minMoveM)
       ? Math.min(12, Math.max(0, Math.round(segDt * targetHz) - 1))
       : 0;
@@ -1525,10 +1533,10 @@ export function smoothSparseGhostFrames(frames, options = {}) {
         const t = k / (nInsert + 1);
         const xy = centripetalCatmullRom(p0, a, b, p3, t);
         push({
-          time: lerpNum(a.time, b.time, t),
+          time: lerpNum(t0, t1, t),
           x: xy.x,
           y: xy.y,
-          heading: a.heading,
+          heading: a.heading ?? a.h,
           headingSpace: a.headingSpace || b.headingSpace,
           speedKmh: lerpNum(a.speedKmh || 0, b.speedKmh || 0, t)
         }, out[out.length - 1]);
@@ -1537,7 +1545,48 @@ export function smoothSparseGhostFrames(frames, options = {}) {
     push({ ...b }, out[out.length - 1]);
   }
 
-  return { frames: out, sampleHz, smoothed: out.length > frames.length };
+  let result = out;
+  const maxFrames = options.maxFrames;
+  if (Number.isFinite(maxFrames) && result.length > maxFrames) {
+    result = thinGhostFramesEven(result, maxFrames);
+  }
+  return { frames: result, sampleHz, smoothed: out.length > frames.length };
+}
+
+/** Simulator racing-line ghosts are already a fair curve; do not re-spline them. */
+function isSimulatorRacingLineGhost(ghost) {
+  if (!ghost) return false;
+  if (ghost.source === 'sessionCsv' || ghost.geoBound) return false;
+  if (ghost.trackLineId || (typeof ghost.lineName === 'string' && ghost.lineName.length)) return true;
+  const f = ghost.frames?.[0];
+  // Compact designer frames: { t, x, y, h } with no session heading space.
+  if (f && f.t != null && f.time == null && f.headingSpace == null) return true;
+  return false;
+}
+
+/**
+ * Upsample an already-built ghost JSON if its median dt is sparse session GPS.
+ * No-ops for dense logs, already-smoothed ghosts, and simulator racing lines.
+ */
+export function applySparseGhostSmoothing(ghost, options = {}) {
+  if (!ghost?.frames?.length || ghost.smoothed) return { ghost, changed: false };
+  if (isSimulatorRacingLineGhost(ghost)) return { ghost, changed: false };
+  const maxFrames = options.maxFrames ?? 1600;
+  const result = smoothSparseGhostFrames(ghost.frames, { ...options, maxFrames });
+  if (!result.smoothed) {
+    if (result.sampleHz && ghost.sampleHz == null) ghost.sampleHz = result.sampleHz;
+    return { ghost, changed: false };
+  }
+  return {
+    ghost: {
+      ...ghost,
+      frames: result.frames,
+      sampleHz: result.sampleHz,
+      smoothed: true
+    },
+    changed: true,
+    note: `Smoothed ${result.sampleHz.toFixed(1)} Hz GPS to 10 Hz`
+  };
 }
 
 /** Haversine from session GPS centroid to a track geo origin (meters). */
@@ -1607,6 +1656,8 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
 
     let elapsed = rowGhostTime(row, t0, useLapElapsed);
     if (elapsed == null) elapsed = frames.length * 0.05;
+    const prevFrame = frames[frames.length - 1];
+    if (prevFrame && Math.abs(elapsed - prevFrame.time) < 0.01) return;
     const speedKmh = Number.isFinite(row._speedKmh) ? row._speedKmh : 0;
     sumSpeed += speedKmh;
     frames.push({
@@ -1630,12 +1681,10 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
 
   for (let i = 0; i < lapRows.length; i++) pushFrame(lapRows[i]);
 
-  const smoothed = smoothSparseGhostFrames(frames);
-  frames = thinGhostFramesEven(smoothed.frames, maxFrames);
+  const smoothed = smoothSparseGhostFrames(frames, { maxFrames });
+  frames = smoothed.frames;
   if (smoothed.smoothed) {
-    warnings.push(
-      `Smoothed ${smoothed.sampleHz.toFixed(1)} Hz GPS to ~10 Hz so the ghost does not jump in 1 s chords`
-    );
+    warnings.push(`Smoothed ${smoothed.sampleHz.toFixed(1)} Hz GPS to 10 Hz`);
   }
 
   if (best.dist < 15) {

@@ -12,7 +12,7 @@ import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
-  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost, smoothSparseGhostFrames,
+  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost, applySparseGhostSmoothing,
   createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
   buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
@@ -4311,14 +4311,10 @@ function applyImportedGhost(ghost, message) {
     alert('No ghost frames to import.');
     return false;
   }
-  const smoothed = ghost.smoothed ? null : smoothSparseGhostFrames(ghost.frames);
-  if (smoothed?.smoothed) {
-    ghost = {
-      ...ghost,
-      frames: smoothed.frames,
-      sampleHz: smoothed.sampleHz,
-      smoothed: true
-    };
+  const prepared = applySparseGhostSmoothing(ghost);
+  ghost = prepared.ghost;
+  if (prepared.note) {
+    message = message ? `${message}\n\n${prepared.note}` : prepared.note;
   }
   ghost.trackKey = ghost.trackKey || currentTrackKey;
   ghostDataMap.set(ghost.trackKey, ghost);
@@ -4405,12 +4401,16 @@ importGhostFile.addEventListener('change', async (e) => {
     if (Array.isArray(imported)) {
       imported.forEach(ghost => {
         if (ghost.trackKey && ghost.frames) {
-          ghostDataMap.set(ghost.trackKey, ghost);
+          ghostDataMap.set(ghost.trackKey, applySparseGhostSmoothing(ghost).ghost);
         }
       });
       currentGhost = ghostDataMap.get(currentTrackKey) || null;
       updateGhostStats();
-      alert('Ghost data imported successfully! It will appear on your next lap.');
+      const smoothedOne = [...ghostDataMap.values()].find(g => g?.smoothed);
+      const extra = smoothedOne?.sampleHz
+        ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to 10 Hz`
+        : '';
+      alert('Ghost data imported successfully! It will appear on your next lap.' + extra);
     } else if (imported.trackKey && imported.frames) {
       applyImportedGhost(imported, 'Ghost data imported successfully! It will appear on your next lap.');
     } else if (imported.frames) {
@@ -4529,12 +4529,16 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
         if (Array.isArray(imported)) {
             imported.forEach(ghost => {
                 if (ghost.trackKey && ghost.frames) {
-                    ghostDataMap.set(ghost.trackKey, ghost);
+                    ghostDataMap.set(ghost.trackKey, applySparseGhostSmoothing(ghost).ghost);
                 }
             });
             currentGhost = ghostDataMap.get(currentTrackKey) || null;
             updateGhostStats();
-            alert('Ghost data imported successfully! It will appear on your next lap.');
+            const smoothedOne = [...ghostDataMap.values()].find(g => g?.smoothed);
+            const extra = smoothedOne?.sampleHz
+              ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to 10 Hz`
+              : '';
+            alert('Ghost data imported successfully! It will appear on your next lap.' + extra);
         } else if (imported.frames) {
             applyImportedGhost(
               { ...imported, trackKey: imported.trackKey || currentTrackKey },
