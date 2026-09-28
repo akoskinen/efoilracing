@@ -12,7 +12,7 @@ import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
-  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost,
+  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost, smoothSparseGhostFrames,
   createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
   buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
@@ -4310,6 +4310,15 @@ function applyImportedGhost(ghost, message) {
   if (!ghost?.frames?.length) {
     alert('No ghost frames to import.');
     return false;
+  }
+  const smoothed = ghost.smoothed ? null : smoothSparseGhostFrames(ghost.frames);
+  if (smoothed?.smoothed) {
+    ghost = {
+      ...ghost,
+      frames: smoothed.frames,
+      sampleHz: smoothed.sampleHz,
+      smoothed: true
+    };
   }
   ghost.trackKey = ghost.trackKey || currentTrackKey;
   ghostDataMap.set(ghost.trackKey, ghost);

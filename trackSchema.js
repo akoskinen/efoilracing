@@ -1400,6 +1400,146 @@ function rowGhostTime(row, t0, useLapElapsed) {
   return null;
 }
 
+/** Median positive sample interval in seconds (ignores pauses and jitter). */
+export function medianFrameDtSec(frames) {
+  const dts = [];
+  for (let i = 1; i < (frames || []).length; i++) {
+    const a = frames[i - 1].time ?? frames[i - 1].t;
+    const b = frames[i].time ?? frames[i].t;
+    const d = Number(b) - Number(a);
+    if (Number.isFinite(d) && d > 0.01 && d < 10) dts.push(d);
+  }
+  if (!dts.length) return 0;
+  dts.sort((x, y) => x - y);
+  const mid = Math.floor(dts.length / 2);
+  return dts.length % 2 ? dts[mid] : (dts[mid - 1] + dts[mid]) / 2;
+}
+
+function lerpNum(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function lerpPt(a, b, t) {
+  return { x: lerpNum(a.x, b.x, t), y: lerpNum(a.y, b.y, t) };
+}
+
+/** Centripetal Catmull-Rom (α=0.5) — stays closer to GPS than uniform CR on tight turns. */
+function centripetalCatmullRom(p0, p1, p2, p3, t, alpha = 0.5) {
+  const dist = (a, b) => {
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    return Math.pow(Math.max(d, 1e-6), alpha);
+  };
+  const t0 = 0;
+  const t1 = t0 + dist(p0, p1);
+  const t2 = t1 + dist(p1, p2);
+  const t3 = t2 + dist(p2, p3);
+  if (t2 - t1 < 1e-9) return { x: p1.x, y: p1.y };
+  const tv = t1 + t * (t2 - t1);
+  const mix = (pa, pb, ta, tb, u) => {
+    const den = tb - ta;
+    if (Math.abs(den) < 1e-12) return { x: pa.x, y: pa.y };
+    return lerpPt(pa, pb, (u - ta) / den);
+  };
+  const a1 = mix(p0, p1, t0, t1, tv);
+  const a2 = mix(p1, p2, t1, t2, tv);
+  const a3 = mix(p2, p3, t2, t3, tv);
+  const b1 = mix(a1, a2, t0, t2, tv);
+  const b2 = mix(a2, a3, t1, t3, tv);
+  return mix(b1, b2, t1, t2, tv);
+}
+
+function ghostPtAt(frames, i) {
+  if (i <= 0) return frames[0];
+  if (i >= frames.length) return frames[frames.length - 1];
+  return frames[i];
+}
+
+function thinGhostFramesEven(frames, maxFrames) {
+  if (!frames || frames.length <= maxFrames) return frames || [];
+  const firstT = frames[0].time;
+  const lastT = frames[frames.length - 1].time;
+  const span = Math.max(lastT - firstT, 1e-6);
+  const out = [frames[0]];
+  let idx = 1;
+  for (let k = 1; k < maxFrames - 1; k++) {
+    const targetT = firstT + (span * k) / (maxFrames - 1);
+    while (idx < frames.length - 1 && frames[idx].time < targetT) idx++;
+    const pick = frames[idx];
+    if (out[out.length - 1] !== pick) out.push(pick);
+  }
+  const last = frames[frames.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+
+/**
+ * If GPS is slower than ~8 Hz (iPhone ~1 Hz), resample the path with a
+ * centripetal spline to ~10 Hz so replay is not a chain of 1 s chords.
+ * Dragy-class 20 Hz logs are left alone. Stationary segments stay linear
+ * so waiting-on-the-beach GPS jitter does not wiggle.
+ */
+export function smoothSparseGhostFrames(frames, options = {}) {
+  if (!frames || frames.length < 3) {
+    return { frames: frames || [], sampleHz: 0, smoothed: false };
+  }
+  const dt = medianFrameDtSec(frames);
+  const sampleHz = dt > 0 ? 1 / dt : 0;
+  const minHz = options.minHz ?? 8;
+  const targetHz = options.targetHz ?? 10;
+  if (!(sampleHz > 0) || sampleHz >= minHz) {
+    return { frames, sampleHz, smoothed: false };
+  }
+
+  const minMoveM = options.minMoveM ?? 1;
+  const out = [];
+  const push = (f, from) => {
+    let heading = f.heading;
+    if (from && Math.hypot(f.x - from.x, f.y - from.y) > 0.15) {
+      heading = Math.atan2(f.y - from.y, f.x - from.x);
+    }
+    const prev = out[out.length - 1];
+    if (prev && Math.abs((f.time || 0) - prev.time) < 1e-4) return;
+    out.push({
+      ...f,
+      time: Math.round((f.time || 0) * 1000) / 1000,
+      x: Math.round(f.x * 100) / 100,
+      y: Math.round(f.y * 100) / 100,
+      heading: Math.round((heading || 0) * 1000) / 1000,
+      speedKmh: Number.isFinite(f.speedKmh) ? Math.round(f.speedKmh * 10) / 10 : f.speedKmh
+    });
+  };
+
+  push({ ...frames[0] }, null);
+  for (let i = 0; i < frames.length - 1; i++) {
+    const a = frames[i];
+    const b = frames[i + 1];
+    const segDt = (b.time || 0) - (a.time || 0);
+    const move = Math.hypot(b.x - a.x, b.y - a.y);
+    const nInsert = (segDt > 0.04 && move >= minMoveM)
+      ? Math.min(12, Math.max(0, Math.round(segDt * targetHz) - 1))
+      : 0;
+    if (nInsert > 0) {
+      const p0 = ghostPtAt(frames, i - 1);
+      const p3 = ghostPtAt(frames, i + 2);
+      for (let k = 1; k <= nInsert; k++) {
+        const t = k / (nInsert + 1);
+        const xy = centripetalCatmullRom(p0, a, b, p3, t);
+        push({
+          time: lerpNum(a.time, b.time, t),
+          x: xy.x,
+          y: xy.y,
+          heading: a.heading,
+          headingSpace: a.headingSpace || b.headingSpace,
+          speedKmh: lerpNum(a.speedKmh || 0, b.speedKmh || 0, t)
+        }, out[out.length - 1]);
+      }
+    }
+    push({ ...b }, out[out.length - 1]);
+  }
+
+  return { frames: out, sampleHz, smoothed: out.length > frames.length };
+}
+
 /** Haversine from session GPS centroid to a track geo origin (meters). */
 export function sessionDistanceToGeoOrigin(rows, geo) {
   if (!rows?.length || !geo?.origin) return null;
@@ -1447,10 +1587,9 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
   }
 
   const rotationDeg = geo.rotationDeg || 0;
-  const maxFrames = options.maxFrames ?? 800;
-  const step = Math.max(1, Math.ceil(lapRows.length / maxFrames));
+  const maxFrames = options.maxFrames ?? 1600;
 
-  const frames = [];
+  let frames = [];
   let sumSpeed = 0;
   let prevM = null;
 
@@ -1480,7 +1619,7 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
     });
   };
 
-  // Ground distance from full-resolution GPS path; frames are downsampled
+  // Ground distance from full-resolution GPS path (before replay resampling).
   let distance = 0;
   for (let i = 1; i < lapRows.length; i++) {
     distance += haversineMeters(
@@ -1489,16 +1628,14 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
     );
   }
 
-  for (let i = 0; i < lapRows.length; i += step) {
-    pushFrame(lapRows[i]);
-  }
-  const last = lapRows[lapRows.length - 1];
-  const lastFrame = frames[frames.length - 1];
-  const lastT = rowGhostTime(last, t0, useLapElapsed) ?? lastFrame.time;
-  const lastM = latLngToMeters(geo, last._lat, last._lon);
-  if (!lastFrame || Math.hypot(lastFrame.x - lastM.x, lastFrame.y - lastM.y) > 0.05 ||
-      Math.abs(lastFrame.time - lastT) > 0.05) {
-    pushFrame(last);
+  for (let i = 0; i < lapRows.length; i++) pushFrame(lapRows[i]);
+
+  const smoothed = smoothSparseGhostFrames(frames);
+  frames = thinGhostFramesEven(smoothed.frames, maxFrames);
+  if (smoothed.smoothed) {
+    warnings.push(
+      `Smoothed ${smoothed.sampleHz.toFixed(1)} Hz GPS to ~10 Hz so the ghost does not jump in 1 s chords`
+    );
   }
 
   if (best.dist < 15) {
@@ -1512,6 +1649,8 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
     sessionId: parsed.meta.SessionId || null,
     riderLabel: options.riderLabel || null,
     geoBound: true,
+    sampleHz: smoothed.sampleHz || null,
+    smoothed: !!smoothed.smoothed,
     time,
     distance: Math.round(distance * 10) / 10,
     avgSpeed: time > 0 ? (distance / time) * 3.6 : (sumSpeed / Math.max(frames.length, 1)),
