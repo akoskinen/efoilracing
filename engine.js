@@ -1912,57 +1912,103 @@ function ghostTimeFromPointer(e, trackEl) {
   return Math.max(0, Math.min(1, x)) * ghostDurationSec();
 }
 
+function isGhostPreviewPlaying() {
+  return !lapActive && !!ghostPreviewStart && ghostPlaying && !ghostScrubbing;
+}
+
+function setGhostPreviewPlaying(on) {
+  if (!currentGhost?.frames?.length || lapActive) return;
+  const dur = ghostDurationSec();
+  const nowT = ghostPlaybackTimeSec();
+  ghostScrubbing = false;
+  ghostUserSeeked = true;
+  ghostWakeTrail = [];
+  if (on) {
+    let start = nowT;
+    if (dur > 0 && start >= dur - 0.25) start = 0;
+    ghostClockOrigin = start;
+    ghostSeekSec = start;
+    ghostPlaying = true;
+    ghostPreviewStart = ghostNowMs();
+  } else {
+    ghostClockOrigin = nowT;
+    ghostSeekSec = nowT;
+    ghostPlaying = false;
+    ghostPreviewStart = ghostNowMs();
+  }
+  syncGhostTimelineUi();
+}
+
+function toggleGhostPreview() {
+  setGhostPreviewPlaying(!isGhostPreviewPlaying());
+}
+
+function beginGhostScrub(e, trackEl) {
+  if (e.button) return;
+  e.preventDefault();
+  e.stopPropagation();
+  ghostScrubbing = true;
+  ghostScrubPointerId = e.pointerId;
+  seekGhostTo(ghostTimeFromPointer(e, trackEl), { play: false });
+  syncGhostTimelineUi();
+  try { trackEl.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+}
+
+function moveGhostScrub(e, trackEl) {
+  if (!ghostScrubbing) return;
+  if (ghostScrubPointerId != null && e.pointerId !== ghostScrubPointerId) return;
+  if (e.buttons === 0) {
+    endGhostScrub();
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  seekGhostTo(ghostTimeFromPointer(e, trackEl), { play: false });
+  syncGhostTimelineUi();
+}
+
+function endGhostScrub(e) {
+  if (!ghostScrubbing) return;
+  if (e && ghostScrubPointerId != null && e.pointerId !== ghostScrubPointerId) return;
+  ghostScrubbing = false;
+  ghostScrubPointerId = null;
+  seekGhostTo(ghostSeekSec, { play: false });
+  syncGhostTimelineUi();
+}
+
 (function bindGhostTimeline() {
   const track = document.getElementById('ghostTimelineTrack');
   const playBtn = document.getElementById('ghostTimelinePlay');
+  const ptrOpts = { passive: false };
   if (track) {
-    const onDown = e => {
+    track.addEventListener('pointerdown', e => beginGhostScrub(e, track), ptrOpts);
+    track.addEventListener('pointermove', e => moveGhostScrub(e, track), ptrOpts);
+    track.addEventListener('pointerup', endGhostScrub);
+    track.addEventListener('pointercancel', endGhostScrub);
+    window.addEventListener('pointerup', endGhostScrub);
+    window.addEventListener('pointercancel', endGhostScrub);
+  }
+  if (playBtn) {
+    // pointerdown for mouse + touch (click is unreliable: HUD rewrites the
+    // label every frame, which can cancel the click between mousedown/up).
+    let playHandled = false;
+    playBtn.addEventListener('pointerdown', e => {
       if (e.button) return;
       e.preventDefault();
       e.stopPropagation();
-      ghostScrubbing = true;
-      seekGhostTo(ghostTimeFromPointer(e, track), { play: false });
-      syncGhostTimelineUi();
-      try { track.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-    };
-    const onMove = e => {
-      if (!ghostScrubbing) return;
+      playHandled = true;
+      toggleGhostPreview();
+    });
+    playBtn.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
-      seekGhostTo(ghostTimeFromPointer(e, track), { play: false });
-      syncGhostTimelineUi();
-    };
-    const onUp = e => {
-      if (!ghostScrubbing) return;
-      e.preventDefault();
-      e.stopPropagation();
-      ghostScrubbing = false;
-      seekGhostTo(ghostSeekSec, { play: false });
-      syncGhostTimelineUi();
-    };
-    track.addEventListener('pointerdown', onDown);
-    track.addEventListener('pointermove', onMove);
-    track.addEventListener('pointerup', onUp);
-    track.addEventListener('pointercancel', onUp);
+      if (playHandled) return;
+      toggleGhostPreview();
+    });
+    const clearPlayHandled = () => { playHandled = false; };
+    playBtn.addEventListener('pointerup', () => setTimeout(clearPlayHandled, 0));
+    playBtn.addEventListener('pointercancel', clearPlayHandled);
   }
-  bindChromeTap(playBtn, () => {
-    if (!currentGhost?.frames?.length) return;
-    if (lapActive) return;
-    const playing = !!ghostPreviewStart && ghostPlaying && !ghostScrubbing;
-    if (playing) {
-      ghostClockOrigin = ghostPlaybackTimeSec();
-      ghostPlaying = false;
-      ghostPreviewStart = ghostNowMs();
-    } else {
-      if (ghostDurationSec() > 0 && ghostClockOrigin >= ghostDurationSec() - 0.05) {
-        ghostClockOrigin = 0;
-      }
-      ghostPlaying = true;
-      ghostPreviewStart = ghostNowMs();
-    }
-    ghostUserSeeked = true;
-    syncGhostTimelineUi();
-  });
 })();
 
 document.addEventListener('pointerdown', e => {
@@ -2819,6 +2865,7 @@ let ghostSeekSec = 0;
 let ghostRaceOffsetSec = 0;
 let ghostPlaying = true;
 let ghostScrubbing = false;
+let ghostScrubPointerId = null;
 let ghostUserSeeked = false;
 
 function ghostNowMs() {
@@ -2839,6 +2886,7 @@ function resetGhostTimeline() {
   ghostRaceOffsetSec = 0;
   ghostPlaying = true;
   ghostScrubbing = false;
+  ghostScrubPointerId = null;
   ghostUserSeeked = false;
 }
 
@@ -2882,6 +2930,7 @@ function startGhostPreview() {
   ghostSeekSec = 0;
   ghostUserSeeked = false;
   ghostScrubbing = false;
+  ghostScrubPointerId = null;
   ghostPlaying = true;
   ghostPreviewStart = performance.now();
   ghostWakeTrail = [];
@@ -4207,9 +4256,12 @@ function syncGhostTimelineUi() {
   if (nowEl) nowEl.textContent = formatLapClock(t);
   if (durEl) durEl.textContent = formatLapClock(dur);
   if (playBtn) {
-    const playing = lapActive || (!!ghostPreviewStart && ghostPlaying && !ghostScrubbing);
-    playBtn.textContent = playing ? 'Pause' : 'Play';
-    playBtn.setAttribute('aria-label', playing ? 'Pause ghost' : 'Play ghost');
+    const playing = lapActive || isGhostPreviewPlaying();
+    const label = playing ? 'Pause' : 'Play';
+    if (playBtn.textContent !== label) {
+      playBtn.textContent = label;
+      playBtn.setAttribute('aria-label', playing ? 'Pause ghost' : 'Play ghost');
+    }
   }
   if (track) {
     track.setAttribute('aria-valuemin', '0');
