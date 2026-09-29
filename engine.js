@@ -4404,7 +4404,8 @@ importGhostFile.addEventListener('change', async (e) => {
     const text = await file.text();
     const looksCsv = /\.csv$/i.test(file.name) ||
       text.trimStart().startsWith('# ExportVersion') ||
-      /^Time,.*lat_deg/m.test(text);
+      /^Time,.*lat_deg/m.test(text) ||
+      /^time_utc,.*\blat\b/m.test(text);
 
     if (looksCsv) {
       await importSessionCsvText(text, file.name);
@@ -4522,7 +4523,8 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
         const text = await file.text();
         const looksCsv = /\.csv$/i.test(file.name) ||
           text.trimStart().startsWith('# ExportVersion') ||
-          /^Time,.*lat_deg/m.test(text);
+          /^Time,.*lat_deg/m.test(text) ||
+          /^time_utc,.*\blat\b/m.test(text);
 
         if (looksCsv) {
           await importSessionCsvText(text, file.name);

@@ -1258,8 +1258,39 @@ function parseCsvLine(line) {
   return out;
 }
 
+// Admin/backend exports use short column names; map them onto the app's.
+const SESSION_CSV_ALIASES = {
+  lat_deg: ['lat', 'latitude'],
+  lon_deg: ['lon', 'lng', 'longitude'],
+  speed_kmh: ['spd_kmh'],
+  speed_mps: ['spd'],
+  heading_deg: ['hdg', 'heading'],
+  t_unix: ['ts'],
+  t_iso: ['time_utc'],
+  hacc_m: ['hacc']
+};
+const SESSION_CSV_LAT_NAMES = ['lat_deg', ...SESSION_CSV_ALIASES.lat_deg];
+// Fixes worse than this are cold-start GPS and jump tens of meters.
+const SESSION_CSV_MAX_HACC_M = 50;
+
+function numOrNaN(v) {
+  if (v == null || String(v).trim() === '') return NaN;
+  return Number(v);
+}
+
+function sessionCsvColumnMap(headers) {
+  const lower = headers.map(h => String(h).trim().toLowerCase());
+  const map = {};
+  for (const [canon, alts] of Object.entries(SESSION_CSV_ALIASES)) {
+    if (lower.includes(canon)) continue;
+    const i = lower.findIndex(h => alts.includes(h));
+    if (i >= 0) map[canon] = headers[i];
+  }
+  return map;
+}
+
 export function parseSessionCsv(text) {
-  const lines = String(text || '').split(/\r?\n/);
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
   const meta = {};
   let headerIdx = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -1270,17 +1301,20 @@ export function parseSessionCsv(text) {
       if (m) meta[m[1].trim()] = m[2].trim();
       continue;
     }
-    if (line.toLowerCase().startsWith('time,') || line.includes('lat_deg')) {
+    const cols = parseCsvLine(line).map(c => c.trim().toLowerCase());
+    if (line.toLowerCase().startsWith('time,') || cols.some(c => SESSION_CSV_LAT_NAMES.includes(c))) {
       headerIdx = i;
       break;
     }
   }
   if (headerIdx < 0) {
-    return { meta, headers: [], rows: [], errors: ['No CSV header row found (expected lat_deg / Time columns)'] };
+    return { meta, headers: [], rows: [], errors: ['No CSV header row found (expected lat_deg or lat / lon columns)'] };
   }
 
-  const headers = parseCsvLine(lines[headerIdx]);
+  const headers = parseCsvLine(lines[headerIdx]).map(h => h.trim());
+  const aliases = sessionCsvColumnMap(headers);
   const rows = [];
+  let droppedInaccurate = 0;
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith('#')) continue;
@@ -1288,16 +1322,23 @@ export function parseSessionCsv(text) {
     if (cols.length < 8) continue;
     const row = {};
     headers.forEach((h, idx) => { row[h] = cols[idx] ?? ''; });
-    const lat = Number(row.lat_deg);
-    const lon = Number(row.lon_deg);
+    for (const [canon, src] of Object.entries(aliases)) row[canon] = row[src];
+    const lat = numOrNaN(row.lat_deg);
+    const lon = numOrNaN(row.lon_deg);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const hacc = numOrNaN(row.hacc_m);
+    if (Number.isFinite(hacc) && hacc > SESSION_CSV_MAX_HACC_M) {
+      droppedInaccurate++;
+      continue;
+    }
     row._lat = lat;
     row._lon = lon;
     row._speedKmh = Number(row.speed_kmh);
     if (!Number.isFinite(row._speedKmh) && Number.isFinite(Number(row.speed_mps))) {
       row._speedKmh = Number(row.speed_mps) * 3.6;
     }
-    row._headingDeg = Number(row.heading_deg);
+    // Blank heading is "unknown", not due north.
+    row._headingDeg = numOrNaN(row.heading_deg);
     row._lapElapsed = Number(row.lap_elapsed_s);
     const lapIdx = Number(row.lap_index);
     row._lapIndex = Number.isFinite(lapIdx) ? lapIdx : null;
@@ -1316,7 +1357,7 @@ export function parseSessionCsv(text) {
   if (!rows.length) {
     return { meta, headers, rows, errors: ['CSV has a header but no valid GPS samples'] };
   }
-  return { meta, headers, rows, errors: [] };
+  return { meta, headers, rows, errors: [], droppedInaccurate };
 }
 
 // Compass degrees (0=N, 90=E) → direction angle in track meters (0=+x/East-ish, 90=+y/North-ish).
