@@ -1713,6 +1713,8 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
 
   let frames = [];
   let sumSpeed = 0;
+  let topSpeed = -Infinity;
+  let minSpeed = Infinity;
   let prevM = null;
 
   const pushFrame = (row) => {
@@ -1732,14 +1734,17 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
     const prevFrame = frames[frames.length - 1];
     if (prevFrame && Math.abs(elapsed - prevFrame.time) < 0.01) return;
     const speedKmh = Number.isFinite(row._speedKmh) ? row._speedKmh : 0;
+    const speedRounded = Math.round(speedKmh * 10) / 10;
     sumSpeed += speedKmh;
+    if (speedRounded > topSpeed) topSpeed = speedRounded;
+    if (speedRounded < minSpeed) minSpeed = speedRounded;
     frames.push({
       time: Math.round(elapsed * 1000) / 1000,
       x: Math.round(m.x * 100) / 100,
       y: Math.round(m.y * 100) / 100,
       heading: Math.round(heading * 1000) / 1000,
       headingSpace: 'trackMeters',
-      speedKmh: Math.round(speedKmh * 10) / 10
+      speedKmh: speedRounded
     });
   };
 
@@ -1773,6 +1778,8 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
     geoBound: true,
     sampleHz: smoothed.sampleHz || null,
     smoothed: !!smoothed.smoothed,
+    topSpeed: topSpeed === -Infinity ? 0 : topSpeed,
+    minSpeed: minSpeed === Infinity ? 0 : minSpeed,
     time,
     distance: Math.round(distance * 10) / 10,
     avgSpeed: time > 0 ? (distance / time) * 3.6 : (sumSpeed / Math.max(frames.length, 1)),

@@ -13,7 +13,6 @@ import {
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
   RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost, applySparseGhostSmoothing,
-  SESSION_GHOST_TARGET_HZ,
   createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
   buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
@@ -4163,18 +4162,26 @@ function ghostHudWho() {
 }
 
 function ghostFrameSpeedStats(ghost) {
-  if (!ghost) return { top: 0, min: 0 };
+  if (!ghost) return { top: 0, min: 0, hasSpeed: false };
   if (ghost._hudSpeeds) return ghost._hudSpeeds;
+  // Session imports keep the logged extrema. Smoothing the path must not
+  // shave the top speed off the summary.
+  if (Number.isFinite(ghost.topSpeed) && Number.isFinite(ghost.minSpeed)) {
+    ghost._hudSpeeds = { top: ghost.topSpeed, min: ghost.minSpeed, hasSpeed: true };
+    return ghost._hudSpeeds;
+  }
   let top = 0;
   let min = Infinity;
+  let hasSpeed = false;
   const frames = ghost.frames || [];
   for (let i = 0; i < frames.length; i++) {
     const s = frames[i].speedKmh;
     if (!Number.isFinite(s)) continue;
+    hasSpeed = true;
     if (s > top) top = s;
     if (s < min) min = s;
   }
-  ghost._hudSpeeds = { top, min: min === Infinity ? 0 : min };
+  ghost._hudSpeeds = { top, min: min === Infinity ? 0 : min, hasSpeed };
   return ghost._hudSpeeds;
 }
 
@@ -4194,10 +4201,27 @@ function ghostHudBodyLines(ghost) {
   const lines = [];
   if (Number.isFinite(time)) lines.push(`  Time:   ${time.toFixed(2)} s`);
   if (Number.isFinite(ghost.distance)) lines.push(`  Dist:   ${ghost.distance.toFixed(1)} m`);
-  if (speeds.top > 0) lines.push(`  TopSpd: ${speeds.top.toFixed(1)} km/h`);
-  if (speeds.min > 0) lines.push(`  MinSpd: ${speeds.min.toFixed(1)} km/h`);
+  // Same order as the lap list: time, distance, top, minimum, average.
+  // Minimum stays visible at 0 so a session that sat still still matches that list.
+  if (speeds.hasSpeed) {
+    lines.push(`  TopSpd: ${speeds.top.toFixed(1)} km/h`);
+    lines.push(`  MinSpd: ${speeds.min.toFixed(1)} km/h`);
+  }
   if (Number.isFinite(avgSpeed) && avgSpeed > 0) lines.push(`  AvgSpd: ${avgSpeed.toFixed(1)} km/h`);
   return lines;
+}
+
+function ghostImportMessage(note) {
+  const lines = ghostHudLines();
+  let text = lines.title;
+  if (lines.body) text += `\n\n${lines.body}`;
+  if (note) text += `\n\n${note}`;
+  return text;
+}
+
+function sessionImportNotes(warnings, extra) {
+  const kept = (warnings || []).filter(w => !/^Smoothed /.test(w));
+  return [extra, kept.length ? kept.join(' ') : ''].filter(Boolean).join('\n\n');
 }
 
 function ghostTimeDeltaSec() {
@@ -4313,9 +4337,6 @@ function applyImportedGhost(ghost, message) {
   }
   const prepared = applySparseGhostSmoothing(ghost);
   ghost = prepared.ghost;
-  if (prepared.note) {
-    message = message ? `${message}\n\n${prepared.note}` : prepared.note;
-  }
   ghost.trackKey = ghost.trackKey || currentTrackKey;
   ghostDataMap.set(ghost.trackKey, ghost);
   // Also bind to the active track so racing against it works immediately
@@ -4331,7 +4352,7 @@ function applyImportedGhost(ghost, message) {
   placePlayerAtStart();
   startGhostPreview();
   updateGhostStats();
-  if (message) alert(message);
+  alert(ghostImportMessage(message));
   return true;
 }
 
@@ -4344,12 +4365,7 @@ async function importSessionCsvText(text, fileName) {
       riderLabel: fileName
     });
     if (errors.length) throw new Error(errors.join('\n'));
-    const note = warnings.length ? `\n\nNote: ${warnings.join(' ')}` : '';
-    applyImportedGhost(ghost,
-      `Session CSV imported as ghost on “${currentTrack.name}” ` +
-      `(${ghost.frames.length} frames, ${ghost.time.toFixed(1)}s, ${ghost.distance.toFixed(0)} m).\n` +
-      `Positions are real GPS via this track’s map anchor.\n` +
-      `The pink ghost should start replaying immediately; drag the timeline to skip the wait, then cross the gate to race from that point.` + note);
+    applyImportedGhost(ghost, sessionImportNotes(warnings));
     return;
   }
 
@@ -4369,13 +4385,12 @@ async function importSessionCsvText(text, fileName) {
   wakeTrail = [];
   lapActive = false;
 
-  const note = built.warnings.length ? `\n\nNote: ${built.warnings.join(' ')}` : '';
   applyImportedGhost(
     { ...built.ghost, trackKey: 'session' },
-    `No geo track was selected, so a temporary Session Replay map was created from GPS.\n` +
-    `For racing on your Orlando course: open that track first, then import the CSV.\n` +
-    `Ghost: ${built.ghost.frames.length} frames, ${built.ghost.time.toFixed(1)}s, ${built.ghost.distance.toFixed(0)} m.` +
-    note
+    sessionImportNotes(
+      built.warnings,
+      'No geo track was selected, so a temporary map was created from the GPS. Open the course first, then import the CSV, to race on that layout.'
+    )
   );
 }
 
@@ -4406,18 +4421,11 @@ importGhostFile.addEventListener('change', async (e) => {
       });
       currentGhost = ghostDataMap.get(currentTrackKey) || null;
       updateGhostStats();
-      const smoothedOne = [...ghostDataMap.values()].find(g => g?.smoothed);
-      const extra = smoothedOne?.sampleHz
-        ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`
-        : '';
-      alert('Ghost data imported successfully! It will appear on your next lap.' + extra);
+      alert(currentGhost?.frames?.length ? ghostImportMessage() : 'Ghost data imported.');
     } else if (imported.trackKey && imported.frames) {
-      applyImportedGhost(imported, 'Ghost data imported successfully! It will appear on your next lap.');
+      applyImportedGhost(imported);
     } else if (imported.frames) {
-      applyImportedGhost(
-        { ...imported, trackKey: currentTrackKey },
-        'Ghost data imported successfully! It will appear on your next lap.'
-      );
+      applyImportedGhost({ ...imported, trackKey: currentTrackKey });
     } else {
       alert('Invalid ghost data file format.');
     }
@@ -4534,16 +4542,9 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
             });
             currentGhost = ghostDataMap.get(currentTrackKey) || null;
             updateGhostStats();
-            const smoothedOne = [...ghostDataMap.values()].find(g => g?.smoothed);
-            const extra = smoothedOne?.sampleHz
-              ? `\n\nSmoothed ${Number(smoothedOne.sampleHz).toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`
-              : '';
-            alert('Ghost data imported successfully! It will appear on your next lap.' + extra);
+            alert(currentGhost?.frames?.length ? ghostImportMessage() : 'Ghost data imported.');
         } else if (imported.frames) {
-            applyImportedGhost(
-              { ...imported, trackKey: imported.trackKey || currentTrackKey },
-              'Ghost data imported successfully! It will appear on your next lap.'
-            );
+            applyImportedGhost({ ...imported, trackKey: imported.trackKey || currentTrackKey });
         } else {
             alert('Invalid ghost data file format.');
         }
