@@ -4165,6 +4165,12 @@ function ghostHudWho() {
 function ghostFrameSpeedStats(ghost) {
   if (!ghost) return { top: 0, min: 0, hasSpeed: false };
   if (ghost._hudSpeeds) return ghost._hudSpeeds;
+  // Session imports keep the logged extrema. Smoothing the path must not
+  // shave the top speed off the summary.
+  if (Number.isFinite(ghost.topSpeed) && Number.isFinite(ghost.minSpeed)) {
+    ghost._hudSpeeds = { top: ghost.topSpeed, min: ghost.minSpeed, hasSpeed: true };
+    return ghost._hudSpeeds;
+  }
   let top = 0;
   let min = Infinity;
   let hasSpeed = false;
