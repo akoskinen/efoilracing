@@ -1990,25 +1990,24 @@ function endGhostScrub(e) {
     window.addEventListener('pointercancel', endGhostScrub);
   }
   if (playBtn) {
-    // pointerdown for mouse + touch (click is unreliable: HUD rewrites the
-    // label every frame, which can cancel the click between mousedown/up).
-    let playHandled = false;
+    // Toggle on pointerdown: a per-frame label rewrite used to cancel the
+    // click between press and release. Touch browsers then also emit a click
+    // when the finger lifts. If that second event toggles again, a tap starts
+    // the replay and the lift pauses it, so it only runs while held.
+    let ignoreClickUntil = 0;
     playBtn.addEventListener('pointerdown', e => {
       if (e.button) return;
       e.preventDefault();
       e.stopPropagation();
-      playHandled = true;
+      ignoreClickUntil = performance.now() + 700;
       toggleGhostPreview();
     });
     playBtn.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
-      if (playHandled) return;
+      if (performance.now() < ignoreClickUntil) return;
       toggleGhostPreview();
     });
-    const clearPlayHandled = () => { playHandled = false; };
-    playBtn.addEventListener('pointerup', () => setTimeout(clearPlayHandled, 0));
-    playBtn.addEventListener('pointercancel', clearPlayHandled);
   }
 })();
 
