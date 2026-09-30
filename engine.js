@@ -4438,9 +4438,16 @@ importGhostFile.addEventListener('change', async (e) => {
   }
 });
 
+// Choose file is a <label for="importGhostFile">: iOS Safari only opens the
+// picker from a real click, so bindChromeTap (fires on touchstart and cancels
+// the click) must not be used here. Keyboard activation still needs a nudge.
 const chooseFileBtn = document.getElementById('chooseFileBtn');
 if (chooseFileBtn && importGhostFile) {
-  bindChromeTap(chooseFileBtn, () => importGhostFile.click());
+  chooseFileBtn.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    importGhostFile.click();
+  });
 }
 
 function restorePreviousLapGhost() {

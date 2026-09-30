@@ -301,6 +301,7 @@
 	#ghostCustomize .hudLink {
 	  width: 100%;
 	  padding: 10px 4px;
+	  box-sizing: border-box;
 	}
 	#fileLabel {
 	  color: rgba(255,255,255,0.55);
@@ -535,7 +536,7 @@
 	<div id="ghostCustomize">
 	  <button type="button" class="hudLink" id="keepGhostBtn">G Keep current ghost</button>
 	  <button type="button" class="hudLink" id="exportGhostBtn">Export ghost</button>
-	  <button type="button" class="hudLink" id="chooseFileBtn">Choose file</button>
+	  <label class="hudLink" id="chooseFileBtn" for="importGhostFile" role="button" tabindex="0">Choose file</label>
 	  <span id="fileLabel">ghost JSON or session CSV</span>
 	  <input type="file" id="importGhostFile" accept=".json,.csv,application/json,text/csv" style="position: absolute; opacity: 0; width: 1px; height: 1px;">
 	</div>
