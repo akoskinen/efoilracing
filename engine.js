@@ -12,7 +12,8 @@ import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
-  RACING_LINE_COLORS, trackFromSessionCsv, sessionCsvToGhost, applySparseGhostSmoothing,
+  RACING_LINE_COLORS, trackFromSessionCsv, trackFromSessionGpx, sessionCsvToGhost, sessionGpxToGhost,
+  applySparseGhostSmoothing,
   createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
   buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
@@ -4356,11 +4357,24 @@ function applyImportedGhost(ghost, message) {
   return true;
 }
 
-async function importSessionCsvText(text, fileName) {
+function sessionImportKind(name, text) {
+  const head = String(text || '').slice(0, 1200);
+  if (/\.gpx$/i.test(name) || /<gpx[\s>]/i.test(head)) return 'gpx';
+  if (/\.csv$/i.test(name) ||
+      head.trimStart().startsWith('# ExportVersion') ||
+      /^Time,.*lat_deg/m.test(head) ||
+      /^time_utc,.*\blat\b/m.test(head)) return 'csv';
+  return null;
+}
+
+async function importSessionTrackText(text, fileName, kind) {
+  const toGhost = kind === 'gpx' ? sessionGpxToGhost : sessionCsvToGhost;
+  const toTrack = kind === 'gpx' ? trackFromSessionGpx : trackFromSessionCsv;
+  const label = kind === 'gpx' ? 'GPX' : 'CSV';
   // With a geo-anchored track selected: project GPS through THAT track's
   // real-world origin — never re-center or invent a new layout.
   if (hasGeo(currentTrack)) {
-    const { ghost, errors, warnings } = sessionCsvToGhost(text, currentTrack.geo, {
+    const { ghost, errors, warnings } = toGhost(text, currentTrack.geo, {
       trackKey: currentTrackKey,
       riderLabel: fileName
     });
@@ -4370,7 +4384,7 @@ async function importSessionCsvText(text, fileName) {
   }
 
   // No geo track selected — only then build a temporary replay map from GPS.
-  const built = trackFromSessionCsv(text, {
+  const built = toTrack(text, {
     trackKey: 'session',
     name: 'Session Replay',
     riderLabel: fileName
@@ -4389,7 +4403,7 @@ async function importSessionCsvText(text, fileName) {
     { ...built.ghost, trackKey: 'session' },
     sessionImportNotes(
       built.warnings,
-      'No geo track was selected, so a temporary map was created from the GPS. Open the course first, then import the CSV, to race on that layout.'
+      `No geo track was selected, so a temporary map was created from the GPS. Open the course first, then import the ${label}, to race on that layout.`
     )
   );
 }
@@ -4402,13 +4416,9 @@ importGhostFile.addEventListener('change', async (e) => {
   if (label) label.textContent = file.name;
   try {
     const text = await file.text();
-    const looksCsv = /\.csv$/i.test(file.name) ||
-      text.trimStart().startsWith('# ExportVersion') ||
-      /^Time,.*lat_deg/m.test(text) ||
-      /^time_utc,.*\blat\b/m.test(text);
-
-    if (looksCsv) {
-      await importSessionCsvText(text, file.name);
+    const kind = sessionImportKind(file.name, text);
+    if (kind) {
+      await importSessionTrackText(text, file.name, kind);
       return;
     }
 
@@ -4528,17 +4538,13 @@ ghostControlsDiv.addEventListener('drop', async (e) => {
 
     try {
         const text = await file.text();
-        const looksCsv = /\.csv$/i.test(file.name) ||
-          text.trimStart().startsWith('# ExportVersion') ||
-          /^Time,.*lat_deg/m.test(text) ||
-          /^time_utc,.*\blat\b/m.test(text);
-
-        if (looksCsv) {
-          await importSessionCsvText(text, file.name);
+        const kind = sessionImportKind(file.name, text);
+        if (kind) {
+          await importSessionTrackText(text, file.name, kind);
           return;
         }
         if (!/\.json$/i.test(file.name)) {
-          alert('Please drop a .json ghost file or session .csv');
+          alert('Please drop a .json ghost file, a session .csv, or a .gpx');
           return;
         }
 

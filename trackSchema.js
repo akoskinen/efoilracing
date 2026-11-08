@@ -1360,6 +1360,70 @@ export function parseSessionCsv(text) {
   return { meta, headers, rows, errors: [], droppedInaccurate };
 }
 
+function decodeXml(text) {
+  return String(text)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function xmlAttr(attrs, name) {
+  const m = String(attrs).match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i'));
+  return m ? decodeXml(m[1] ?? m[2]) : '';
+}
+
+function xmlLocalText(body, local) {
+  const m = String(body).match(new RegExp(
+    `<(?:[\\w.-]+:)?${local}\\b[^>]*>([^<]*)<\\/(?:[\\w.-]+:)?${local}>`,
+    'i'
+  ));
+  return m ? decodeXml(m[1].trim()) : '';
+}
+
+/**
+ * eFoil Racing app GPX (creator="eFoil Racing App").
+ * Track points carry compass `<heading>` and `<speed>` in meters per second.
+ * A negative speed (the app writes -1) means "unknown".
+ */
+export function parseSessionGpx(text) {
+  const src = String(text || '').replace(/^\uFEFF/, '');
+  if (!/<gpx[\s>]/i.test(src) || !/<trkpt\b/i.test(src)) {
+    return { meta: {}, rows: [], errors: ['Not a GPX track (expected trkpt points)'] };
+  }
+  const meta = {};
+  const name = src.match(/<metadata>[\s\S]*?<name>([^<]*)<\/name>/i);
+  if (name) meta.name = decodeXml(name[1].trim());
+  const trackName = src.match(/<trk>\s*<name>([^<]*)<\/name>/i);
+  if (trackName) meta.trackName = decodeXml(trackName[1].trim());
+
+  const rows = [];
+  const re = /<trkpt\b([^>]*)>([\s\S]*?)<\/trkpt>/gi;
+  let m;
+  while ((m = re.exec(src))) {
+    const lat = numOrNaN(xmlAttr(m[1], 'lat'));
+    const lon = numOrNaN(xmlAttr(m[1], 'lon'));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const ms = Date.parse(xmlLocalText(m[2], 'time'));
+    const speedMps = numOrNaN(xmlLocalText(m[2], 'speed'));
+    rows.push({
+      _lat: lat,
+      _lon: lon,
+      // Ground speed is m/s. Unknown (-1) becomes 0 so the summary min stays honest.
+      _speedKmh: Number.isFinite(speedMps) && speedMps >= 0 ? speedMps * 3.6 : 0,
+      _headingDeg: numOrNaN(xmlLocalText(m[2], 'heading')),
+      _lapElapsed: NaN,
+      _lapIndex: null,
+      _tUnix: Number.isFinite(ms) ? ms / 1000 : null
+    });
+  }
+  if (rows.length < 2) {
+    return { meta, rows, errors: ['GPX track does not have enough points to build a ghost'] };
+  }
+  return { meta, rows, errors: [] };
+}
+
 // Compass degrees (0=N, 90=E) → direction angle in track meters (0=+x/East-ish, 90=+y/North-ish).
 export function compassToTrackHeadingRad(compassDeg, rotationDeg = 0) {
   const c = (Number(compassDeg) || 0) * Math.PI / 180;
@@ -1712,14 +1776,13 @@ export function sessionDistanceToGeoOrigin(rows, geo) {
 }
 
 /**
- * Convert an eFoil Racing session CSV into a simulator ghost.
+ * Convert parsed session GPS rows into a simulator ghost.
  * Positions are ALWAYS real GPS projected through the given geo anchor
  * (lat/lng → track meters). Nothing is re-centered onto buoys.
  * Heading is stored in track-meter radians (`headingSpace: 'trackMeters'`).
  */
-export function sessionCsvToGhost(csvText, geo, options = {}) {
-  const parsed = parseSessionCsv(csvText);
-  if (parsed.errors.length) {
+function ghostFromSessionRows(parsed, geo, options = {}) {
+  if (parsed.errors?.length) {
     return { ghost: null, track: null, errors: parsed.errors, warnings: [] };
   }
   if (!geo?.origin || !Number.isFinite(geo.origin.lat) || !Number.isFinite(geo.origin.lng)) {
@@ -1738,7 +1801,7 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
     ? lapRows.find(r => Number.isFinite(r._lapElapsed))?._lapElapsed ?? 0
     : lapRows.find(r => Number.isFinite(r._tUnix))?._tUnix ?? 0;
   if (!useLapElapsed) {
-    warnings.push('No lap markers in CSV — using full session wall-clock time');
+    warnings.push('No lap markers — using full session wall-clock time');
   }
 
   const distToOrigin = sessionDistanceToGeoOrigin(lapRows, geo);
@@ -1813,7 +1876,7 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
   const time = frames[frames.length - 1].time;
   const ghost = {
     trackKey: options.trackKey || 'session',
-    source: 'sessionCsv',
+    source: options.source || 'sessionCsv',
     sessionId: parsed.meta.SessionId || null,
     riderLabel: options.riderLabel || null,
     geoBound: true,
@@ -1830,12 +1893,21 @@ export function sessionCsvToGhost(csvText, geo, options = {}) {
   return { ghost, track: null, errors: [], warnings, meta: parsed.meta, lapKey: best.key };
 }
 
+/** Convert an eFoil Racing session CSV into a simulator ghost. */
+export function sessionCsvToGhost(csvText, geo, options = {}) {
+  return ghostFromSessionRows(parseSessionCsv(csvText), geo, { ...options, source: 'sessionCsv' });
+}
+
+/** Convert an eFoil Racing GPX export into a simulator ghost. */
+export function sessionGpxToGhost(gpxText, geo, options = {}) {
+  return ghostFromSessionRows(parseSessionGpx(gpxText), geo, { ...options, source: 'sessionGpx' });
+}
+
 /**
  * Build a minimal geo-anchored track that fits a session GPS path so the
  * simulator can show satellite imagery + play the ghost without a designer track.
  */
-export function trackFromSessionCsv(csvText, options = {}) {
-  const parsed = parseSessionCsv(csvText);
+function trackFromSessionParsed(parsed, options = {}) {
   if (parsed.errors.length) {
     return { track: null, ghost: null, errors: parsed.errors, warnings: [] };
   }
@@ -1871,7 +1943,9 @@ export function trackFromSessionCsv(csvText, options = {}) {
     schemaVersion: TRACK_SCHEMA_VERSION,
     name: options.name || 'Session Replay',
     author: options.author || '',
-    notes: parsed.meta.SessionId ? `Imported session ${parsed.meta.SessionId}` : 'Imported from session CSV',
+    notes: options.note || (parsed.meta.SessionId
+      ? `Imported session ${parsed.meta.SessionId}`
+      : 'Imported from session CSV'),
     scale: 4,
     buoys: [
       { x: maxX, y: maxY, type: 'marker' },
@@ -1898,10 +1972,11 @@ export function trackFromSessionCsv(csvText, options = {}) {
     geo
   };
 
-  const converted = sessionCsvToGhost(csvText, geo, {
+  const converted = ghostFromSessionRows(parsed, geo, {
     trackKey: options.trackKey || 'session',
     riderLabel: options.riderLabel,
-    maxFrames: options.maxFrames
+    maxFrames: options.maxFrames,
+    source: options.source
   });
 
   return {
@@ -1912,4 +1987,20 @@ export function trackFromSessionCsv(csvText, options = {}) {
     meta: parsed.meta,
     spanM: { w: maxX - minX, h: maxY - minY, samples: meters.length }
   };
+}
+
+export function trackFromSessionCsv(csvText, options = {}) {
+  return trackFromSessionParsed(parseSessionCsv(csvText), {
+    ...options,
+    source: 'sessionCsv',
+    note: options.note
+  });
+}
+
+export function trackFromSessionGpx(gpxText, options = {}) {
+  return trackFromSessionParsed(parseSessionGpx(gpxText), {
+    ...options,
+    source: 'sessionGpx',
+    note: 'Imported from session GPX'
+  });
 }
