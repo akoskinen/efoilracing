@@ -4227,6 +4227,20 @@ function drawBuoyDot(x, y, isTurn, passSide) {
     fillGroundDisc(x, y, Math.max(0.6, r - ring / 2), paint.fill);
     return;
   }
+  // 1 km and 5 km: draw the real disc so it shrinks into a dot. The
+  // usual marker scale would hold it at race size after the zoom settles.
+  if (isOverviewZoom()) {
+    const s = Math.max(followCam.scale || 1, 0.02);
+    const dot = Math.max(r, 0.9 / s);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.beginPath();
+    ctx.arc(0, 0, dot, 0, Math.PI * 2);
+    ctx.fillStyle = paint.fill;
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
   withWorldMarker(x, y, () => {
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, 2 * Math.PI);
