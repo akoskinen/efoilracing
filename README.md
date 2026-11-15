@@ -30,6 +30,8 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map** |
 | **F** | Fullscreen. Top-right **F Fullscreen** |
+| **O** | Show or hide the ghost's rider name. Blue **O Ghost name** link above the ghost replay |
+| **Pick a Pro** | Top-left, under the designer link. Opens a swipeable board rack for Antti, Carmine, Piet, and Manel. Tap the board to flip it and tune that rider. **Save** keeps the sliders, **Reset** restores that pro's stock setup |
 
 HUD chrome (T / F / P, and **Customize ghost**) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
 

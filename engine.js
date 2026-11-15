@@ -8,6 +8,10 @@
 
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
 import {
+  RIDERS, RIDER_LIMITS, BANK_ANGLE_MAX as RIDER_BANK_MAX, BOARD_SHINE,
+  riderById, riderDynamics, loadRiderState, saveRiderState, presetTune, clampTune
+} from "./riders.js";
+import {
   FLAT_BEARING, chaseFraming, makeCamera, project, unproject, viewDepth,
   easeAngle, isFlatView, focalLength, expandTileIndexRange
 } from "./chaseCam.js";
@@ -2563,11 +2567,7 @@ function updateFullscreenButtonState() {
 }
 
 // --- Game Physics and Control Variables ---
-const maxSpeed       = 100;
-const timeToMaxSpeed = 18;
-const accelRate      = maxSpeed / timeToMaxSpeed;
-const decelRate      = 12.333;
-const speedConversion= 0.6;
+const speedConversion = 0.6; // HUD km/h = internal speed × this
 // Legacy pixel-speed tuning (built-ins at ~4 px/m). Kept only as the reference
 // for meter-based collision thresholds that were authored in canvas pixels.
 const SPEED_CALIBRATION_PX_PER_M = 4;
@@ -2607,9 +2607,7 @@ function advancePositionBySpeed(speedKmh, dt) {
   pos.y = p.y;
 }
 
-const BANK_ANGLE_MAX = 55;
-const bankRate0to30  = 40;
-const bankRate30to55 = 10;
+const BANK_ANGLE_MAX = RIDER_BANK_MAX;
 let bankAngleDeg     = 0;
 const bankDecay      = 0.9;
 
@@ -2627,7 +2625,7 @@ function updateBankAngle(dt) {
       bankAngleDeg = 0;
       sign = targetSign;
     }
-    let rate = (currentMag < 30) ? bankRate0to30 : bankRate30to55;
+    let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
     currentMag += rate * dt;
     if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
     bankAngleDeg = sign * currentMag;
@@ -2643,20 +2641,7 @@ function updateBankAngle(dt) {
 }
 
 // --- Turn Radius Interpolation ---
-const baseline30Data = [
-  { speed:10, radius:10 },
-  { speed:15, radius:15 },
-  { speed:30, radius:30 },
-  { speed:40, radius:65 },
-  { speed:60, radius:80 }
-];
-const reduceData = [
-  { speed:10, factor:0.85 },
-  { speed:15, factor:0.82 },
-  { speed:30, factor:0.83 },
-  { speed:40, factor:0.85 },
-  { speed:60, factor:0.90 }
-];
+// The 40 and 60 km/h rows come from the selected rider (see riders.js).
 
 function interpPiecewise(table, spd){
   let s = Math.max(10, Math.min(60, spd));
@@ -2680,8 +2665,8 @@ function interpPiecewise(table, spd){
 
 function getTurnRadius(speedKmh, angleDeg) {
   let ang = Math.max(0, Math.min(55, angleDeg));
-  const base30    = interpPiecewise(baseline30Data, speedKmh);
-  const factorMax = interpPiecewise(reduceData,          speedKmh);
+  const base30    = interpPiecewise(activeRider.baseline, speedKmh);
+  const factorMax = interpPiecewise(activeRider.reduce, speedKmh);
   const radiusAt50= base30 * factorMax;
   
   if (ang < 30) {
@@ -2702,6 +2687,18 @@ const lowFactor = 0.02084;
 // --- Movement & Telemetry ---
 let heading = 0;
 let speed   = 0;
+
+let riderState = loadRiderState();
+let activeRider = null;
+
+function applyActiveRider() {
+  const id = riderState.id;
+  activeRider = riderDynamics(riderState.tunes[id]);
+  activeRider.meta = riderById(id);
+  if (speed > activeRider.maxSpeed) speed = activeRider.maxSpeed;
+}
+
+applyActiveRider();
 const pos   = { x: 0, y: 0 };
 let oldPos  = { x: 0, y: 0 };
 
@@ -3343,6 +3340,7 @@ function drawGhostFrame() {
     }
 
     drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame));
+    drawGhostRiderLabel(ghostX, ghostY);
 
     ghostWakeTrail.push({ x: ghostX, y: ghostY });
     const targetWakeLength = 200;
@@ -3364,6 +3362,55 @@ function drawGhost(x, y, heading) {
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
   });
+}
+
+function ghostNameText(ghost) {
+  if (!ghost) return '';
+  const raw = ghost.riderName || ghost.lineName || ghost.riderLabel || '';
+  const text = String(raw).replace(/\.[^.]+$/, '').trim();
+  if (!text) return '';
+  return text.length > 24 ? `${text.slice(0, 23)}…` : text;
+}
+
+function ghostScreenPoint(worldX, worldY) {
+  if (typeof cameraIsFlat === 'function' && !cameraIsFlat()) {
+    const p = projectWorld(worldX, worldY);
+    return p ? { x: p.x, y: p.y } : null;
+  }
+  const s = followCam.scale || 1;
+  return { x: worldX * s + followCam.tx, y: worldY * s + followCam.ty };
+}
+
+function drawGhostRiderLabel(worldX, worldY) {
+  if (!riderState.showLabel || !currentGhost) return;
+  const name = ghostNameText(currentGhost);
+  if (!name) return;
+  const screen = ghostScreenPoint(worldX, worldY);
+  if (!screen) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = '600 13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const textW = ctx.measureText(name).width;
+  const h = 22;
+  const w = Math.ceil(textW) + 18;
+  const x = Math.round(screen.x - w / 2);
+  const y = Math.round(screen.y - 42);
+  ctx.fillStyle = 'rgba(10, 16, 22, 0.88)';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, 6);
+  else ctx.rect(x, y, w, h);
+  ctx.fill();
+  let accent = '#ff88ff';
+  if (currentGhost.riderId && RIDERS.some(r => r.id === currentGhost.riderId)) {
+    accent = currentGhost.riderId === 'antti' ? '#f2f2f2' : riderById(currentGhost.riderId).color;
+  }
+  ctx.fillStyle = accent;
+  ctx.fillRect(x, y, 3, h);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(name, x + 10, y + h / 2);
+  ctx.restore();
 }
 
 function startLap(){
@@ -3528,6 +3575,8 @@ function completeLap() {
             distance: distanceTraveled,
             time: currentLapTime,
             avgSpeed: avgSpeedKmh, // Store the calculated average speed
+            riderName: activeRider.meta.name,
+            riderId: activeRider.meta.id,
             frames: recordedGhost.map(frame => ({
                 ...frame,
                 finalLapTime: currentLapTime
@@ -3573,7 +3622,8 @@ const keys = {};
 
 document.addEventListener('keydown', function(e) {
   // Don't process keyboard shortcuts if game is paused or if typing in an input
-  if (gamePaused || (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+  const tag = e.target && e.target.tagName;
+  if (gamePaused || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
     return;
   }
 
@@ -3648,6 +3698,12 @@ document.addEventListener('keydown', function(e) {
   // Cycle Z: race zoom → chase view → 1 km → 5 km
   if (e.key === 'z' || e.key === 'Z') {
     cycleZoomStop();
+  }
+
+  // O shows or hides the ghost's rider name. L stays lean-right.
+  if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+    e.preventDefault();
+    toggleGhostLabel();
   }
 });
 
@@ -3882,12 +3938,12 @@ function update(dt){
   prevPos.y = pos.y;
   
   if (keys['ArrowUp']) {
-    speed += accelRate * dt;
+    speed += activeRider.accelRate * dt;
   }
   if (keys['ArrowDown']) {
-    speed -= decelRate * dt;
+    speed -= activeRider.decelRate * dt;
   }
-  speed = Math.max(0, Math.min(maxSpeed, speed));
+  speed = Math.max(0, Math.min(activeRider.maxSpeed, speed));
   
   updateBankAngle(dt);
   
@@ -3902,7 +3958,7 @@ function update(dt){
 
   // Update wind volume based on speed and ensure it's playing
   AudioManager.ensureWindPlaying();
-  AudioManager.sounds.wind.volume = speed / maxSpeed;
+  AudioManager.sounds.wind.volume = speed / activeRider.maxSpeed;
   
   updateRideMeter(speedKmh);
 
@@ -4121,9 +4177,25 @@ function drawRacer() {
     ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
     ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
     ctx.closePath();
-    ctx.fillStyle = '#00ccff';
-    ctx.fill();
+    fillRiderBoard();
   });
+}
+
+function fillRiderBoard() {
+  const meta = activeRider.meta;
+  const shine = BOARD_SHINE[meta.gloss];
+  if (shine) {
+    const g = ctx.createLinearGradient(-4, -14, 5, 14);
+    shine.forEach((color, i) => g.addColorStop(i / (shine.length - 1), color));
+    ctx.fillStyle = g;
+  } else {
+    ctx.fillStyle = meta.color;
+  }
+  ctx.fill();
+  const dark = meta.id === 'antti';
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = dark ? 1.25 : 0.6;
+  ctx.stroke();
 }
 
 // --- Ideal Line Toggle ---
@@ -4408,7 +4480,7 @@ function gameLoop(timestamp) {
 
   if (!settleReveal && !rideSimPaused) {
     wakeTrail.push({ x: pos.x, y: pos.y });
-    const targetWakeLength = (speed / maxSpeed) * 200;
+    const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
     }
@@ -5383,7 +5455,7 @@ function updateRideMeter(speedKmh) {
     const bar = document.getElementById('speedBar');
     const fill = document.getElementById('speedBarFill');
     if (bar && fill) {
-      const pct = Math.max(0, Math.min(1, speed / maxSpeed));
+      const pct = Math.max(0, Math.min(1, speed / activeRider.maxSpeed));
       fill.style.width = `${pct * 100}%`;
       fill.style.backgroundSize = `${bar.clientWidth}px 100%`;
     }
@@ -5420,6 +5492,221 @@ export function resumeGame() {
 }
 
 const highScoreManager = new HighScoreManager();
+
+const PRO_SLIDERS = [
+  { id: 'riderTop', key: 'topKmh', label: 'Top speed', unit: 'km/h', digits: 1 },
+  { id: 'riderAccel', key: 'accelKmhS', label: 'Acceleration', unit: 'km/h/s', digits: 1 },
+  { id: 'riderLean0', key: 'lean0', label: 'Lean to 30°', unit: '°/s', digits: 0 },
+  { id: 'riderLean30', key: 'lean30', label: 'Lean past 30°', unit: '°/s', digits: 0 },
+  { id: 'riderArc', key: 'arc60', label: 'Arc at 60 km/h', unit: 'm', digits: 0 }
+];
+
+let savedTunes = JSON.parse(JSON.stringify(riderState.tunes));
+
+function formatTuneValue(value, digits) {
+  return digits ? Number(value).toFixed(digits) : String(Math.round(value));
+}
+
+function persistSavedRiders() {
+  saveRiderState({
+    id: riderState.id,
+    showLabel: riderState.showLabel,
+    tunes: savedTunes
+  });
+}
+
+function proTuneDirty() {
+  return JSON.stringify(riderState.tunes[riderState.id]) !== JSON.stringify(savedTunes[riderState.id]);
+}
+
+function boardMarkup(rider) {
+  const shine = BOARD_SHINE[rider.gloss];
+  const stops = shine
+    ? shine.map((color, i) => `<stop offset="${(i / (shine.length - 1)) * 100}%" stop-color="${color}"/>`).join('')
+    : '';
+  const defs = shine
+    ? `<defs><linearGradient id="proShine" x1="18%" y1="0%" x2="82%" y2="100%">${stops}</linearGradient>
+       <clipPath id="proClip"><path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z"/></clipPath></defs>`
+    : `<defs><clipPath id="proClip"><path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z"/></clipPath></defs>`;
+  const fill = shine ? 'url(#proShine)' : rider.color;
+  const stroke = rider.id === 'antti' ? '#f3f3f3' : 'rgba(0,0,0,0.35)';
+  const sw = rider.id === 'antti' ? 3 : 1.5;
+  const streakOpacity = shine ? 0.78 : 0.2;
+  return `<svg viewBox="0 0 140 318" aria-hidden="true">${defs}
+    <ellipse cx="70" cy="308" rx="26" ry="5" fill="rgba(0,0,0,0.38)"/>
+    <path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
+    <g clip-path="url(#proClip)">
+      <path d="M78 42 C90 110 86 196 72 262" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" opacity="${streakOpacity}"/>
+    </g>
+  </svg>`;
+}
+
+function syncProRack() {
+  const rider = riderById(riderState.id);
+  const front = document.getElementById('proFront');
+  if (!front) return;
+  const tune = riderState.tunes[rider.id];
+  front.innerHTML = `<div class="proBoard">${boardMarkup(rider)}</div><div class="proName">${rider.name}</div>`;
+  front.setAttribute('aria-label', `Flip ${rider.name}'s board to customize`);
+  const backName = document.getElementById('proBackName');
+  if (backName) {
+    backName.textContent = rider.name;
+    backName.style.color = rider.id === 'antti' ? '#f2f2f2' : rider.color;
+  }
+  for (const row of PRO_SLIDERS) {
+    const input = document.getElementById(row.id);
+    const label = document.getElementById(row.id + 'Val');
+    if (input && document.activeElement !== input) input.value = String(tune[row.key]);
+    if (label) label.textContent = `${formatTuneValue(tune[row.key], row.digits)} ${row.unit}`;
+  }
+  const save = document.getElementById('proSave');
+  if (save) save.classList.toggle('dirty', proTuneDirty());
+  const nameBtn = document.getElementById('ghostLabelBtn');
+  if (nameBtn) {
+    nameBtn.setAttribute('aria-pressed', riderState.showLabel ? 'true' : 'false');
+    nameBtn.classList.toggle('off', !riderState.showLabel);
+  }
+  const card = document.getElementById('proCard');
+  if (card) front.setAttribute('aria-pressed', card.classList.contains('flipped') ? 'true' : 'false');
+}
+
+function selectPro(id) {
+  if (!RIDERS.some(r => r.id === id)) return;
+  riderState.id = id;
+  applyActiveRider();
+  persistSavedRiders();
+  syncProRack();
+}
+
+function stepPro(dir) {
+  const i = RIDERS.findIndex(r => r.id === riderState.id);
+  const next = RIDERS[(i + dir + RIDERS.length) % RIDERS.length];
+  selectPro(next.id);
+}
+
+function toggleGhostLabel() {
+  riderState.showLabel = !riderState.showLabel;
+  persistSavedRiders();
+  syncProRack();
+}
+
+function initProRack() {
+  const btn = document.getElementById('pickProBtn');
+  const rack = document.getElementById('proRack');
+  const front = document.getElementById('proFront');
+  if (!btn || !rack || !front) return;
+
+  const sliders = document.getElementById('proSliders');
+  for (const row of PRO_SLIDERS) {
+    const lim = RIDER_LIMITS[row.key];
+    const wrap = document.createElement('label');
+    wrap.className = 'proSlider';
+    wrap.htmlFor = row.id;
+    wrap.innerHTML = `${row.label} <b id="${row.id}Val"></b><input id="${row.id}" type="range" min="${lim.min}" max="${lim.max}" step="${lim.step}">`;
+    sliders.appendChild(wrap);
+    const input = wrap.querySelector('input');
+    input.addEventListener('input', () => {
+      riderState.tunes[riderState.id] = clampTune({
+        ...riderState.tunes[riderState.id],
+        [row.key]: Number(input.value)
+      });
+      applyActiveRider();
+      const label = document.getElementById(row.id + 'Val');
+      if (label) {
+        label.textContent = `${formatTuneValue(riderState.tunes[riderState.id][row.key], row.digits)} ${row.unit}`;
+      }
+      const save = document.getElementById('proSave');
+      if (save) save.classList.toggle('dirty', proTuneDirty());
+    });
+    input.addEventListener('pointerdown', e => e.stopPropagation());
+  }
+
+  const setRackOpen = open => {
+    rack.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    for (const id of ['ghostHud', 'ghostTimeline', 'customizeGhostBtn', 'ghostCustomize']) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.style.visibility = open ? 'hidden' : '';
+    }
+    if (open) syncProRack();
+  };
+  bindChromeTap(btn, () => setRackOpen(!rack.classList.contains('open')));
+  const bindStep = (el, dir) => {
+    if (!el) return;
+    let swallowClick = 0;
+    el.addEventListener('pointerdown', e => {
+      if (e.button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.pointerType === 'mouse') return;
+      swallowClick = performance.now() + 700;
+      stepPro(dir);
+    });
+    el.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (performance.now() < swallowClick) return;
+      stepPro(dir);
+    });
+  };
+  bindStep(document.getElementById('proPrev'), -1);
+  bindStep(document.getElementById('proNext'), 1);
+  bindChromeTap(document.getElementById('proSave'), () => {
+    savedTunes[riderState.id] = clampTune(riderState.tunes[riderState.id]);
+    riderState.tunes[riderState.id] = clampTune(savedTunes[riderState.id]);
+    persistSavedRiders();
+    syncProRack();
+  });
+  bindChromeTap(document.getElementById('proReset'), () => {
+    const stock = clampTune(presetTune(riderById(riderState.id)));
+    riderState.tunes[riderState.id] = stock;
+    savedTunes[riderState.id] = stock;
+    applyActiveRider();
+    persistSavedRiders();
+    syncProRack();
+  });
+  bindChromeTap(document.getElementById('ghostLabelBtn'), toggleGhostLabel);
+
+  const card = document.getElementById('proCard');
+  let drag = null;
+  front.addEventListener('pointerdown', e => {
+    if (e.button) return;
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+    front.setPointerCapture(e.pointerId);
+  });
+  front.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 10) drag.moved = true;
+  });
+  const endDrag = e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    const moved = drag.moved;
+    drag = null;
+    if (Math.abs(dx) >= 42 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      stepPro(dx < 0 ? 1 : -1);
+      return;
+    }
+    if (!moved) {
+      card.classList.toggle('flipped');
+      syncProRack();
+    }
+  };
+  front.addEventListener('pointerup', endDrag);
+  front.addEventListener('pointercancel', () => { drag = null; });
+  front.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    card.classList.toggle('flipped');
+    syncProRack();
+  });
+
+  syncProRack();
+}
+
+initProRack();
 
 requestAnimationFrame(gameLoop);
 

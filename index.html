@@ -148,7 +148,8 @@
 	}
 	#rideChrome .hudLink,
 	#rideChrome #ghostCustomize,
-	#rideChrome #ghostTimeline {
+	#rideChrome #ghostTimeline,
+	#rideChrome #proDock {
 	  pointer-events: auto;
 	}
 	#rideChrome .hudLink {
@@ -184,6 +185,162 @@
 	  left: -8px;
 	}
 	#rideChrome .hudLink:hover { text-decoration: underline; }
+	#ghostLabelBtn { white-space: nowrap; }
+	#ghostLabelBtn.off { opacity: 0.45; }
+	#proDock {
+	  position: relative;
+	  display: flex;
+	  flex-direction: column;
+	  align-items: flex-start;
+	}
+	#proRack {
+	  display: none;
+	  position: absolute;
+	  top: calc(100% + 4px);
+	  left: 0;
+	  z-index: 8;
+	  align-items: center;
+	  width: min(360px, calc(100vw - 28px));
+	  pointer-events: auto;
+	}
+	#proRack.open {
+	  display: flex;
+	  background: #0b1116;
+	  border-radius: 22px;
+	  padding: 6px 0;
+	}
+	.proArrow {
+	  position: relative;
+	  flex: 0 0 44px;
+	  width: 44px;
+	  height: 44px;
+	  margin: 0;
+	  padding: 0;
+	  border: none;
+	  background: transparent;
+	  cursor: pointer;
+	  display: flex;
+	  align-items: center;
+	  justify-content: center;
+	  -webkit-tap-highlight-color: rgba(127, 212, 255, 0.25);
+	  touch-action: manipulation;
+	}
+	.proChevron {
+	  display: block;
+	  width: 9px;
+	  height: 9px;
+	  border-left: 1px solid #7fd4ff;
+	  border-bottom: 1px solid #7fd4ff;
+	  transform: rotate(45deg);
+	}
+	.proArrowNext .proChevron { transform: rotate(-135deg); }
+	#proSpin {
+	  flex: 1 1 auto;
+	  min-width: 0;
+	  height: 348px;
+	  max-height: min(348px, calc(100dvh - 150px));
+	  perspective: 1100px;
+	}
+	#proCard {
+	  position: relative;
+	  width: 100%;
+	  height: 100%;
+	  transform-style: preserve-3d;
+	  transition: transform 0.6s cubic-bezier(0.2, 0.75, 0.2, 1);
+	}
+	#proCard.flipped { transform: rotateY(180deg); }
+	#proCard:not(.flipped) .proBack { pointer-events: none; }
+	#proCard.flipped .proFront { pointer-events: none; }
+	.proFace {
+	  position: absolute;
+	  inset: 0;
+	  border-radius: 18px;
+	  backface-visibility: hidden;
+	  -webkit-backface-visibility: hidden;
+	  box-sizing: border-box;
+	  background: #121a22;
+	  border: 1px solid rgba(255,255,255,0.16);
+	  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+	}
+	.proBack { transform: rotateY(180deg); }
+	.proFront {
+	  display: flex;
+	  flex-direction: column;
+	  align-items: center;
+	  justify-content: flex-end;
+	  padding: 10px 8px 12px;
+	  cursor: pointer;
+	  touch-action: pan-y;
+	  user-select: none;
+	}
+	.proBoard {
+	  flex: 1 1 auto;
+	  min-height: 0;
+	  width: 100%;
+	  display: flex;
+	  align-items: flex-end;
+	  justify-content: center;
+	}
+	.proBoard svg { height: 100%; width: auto; max-width: 78%; display: block; }
+	.proName {
+	  margin-top: 6px;
+	  font: 600 16px/1.2 ui-sans-serif, system-ui, sans-serif;
+	  letter-spacing: 0.06em;
+	  color: #fff;
+	  text-shadow: none;
+	}
+	.proBack {
+	  display: flex;
+	  flex-direction: column;
+	  padding: 12px 14px 6px;
+	  overflow: auto;
+	  color: #fff;
+	  text-shadow: none;
+	  font-family: ui-sans-serif, system-ui, sans-serif;
+	}
+	.proBackName {
+	  font: 600 15px/1.2 ui-sans-serif, system-ui, sans-serif;
+	  letter-spacing: 0.06em;
+	  margin: 0 0 8px;
+	}
+	.proSlider {
+	  display: flex;
+	  flex-wrap: wrap;
+	  align-items: baseline;
+	  margin: 0 0 2px;
+	  color: rgba(255,255,255,0.82);
+	  font-size: 12px;
+	  line-height: 1.2;
+	}
+	.proSlider b {
+	  margin-left: auto;
+	  font-weight: 600;
+	  color: #fff;
+	}
+	.proSlider input[type="range"] {
+	  flex: 1 1 100%;
+	  width: 100%;
+	  height: 28px;
+	  margin: 0;
+	  accent-color: #7fd4ff;
+	  touch-action: none;
+	  pointer-events: auto;
+	}
+	.proActions {
+	  margin-top: auto;
+	  display: flex;
+	  justify-content: space-between;
+	  align-items: center;
+	}
+	#proRack .hudLink {
+	  text-shadow: none;
+	  padding: 8px 2px;
+	  min-height: 44px;
+	}
+	#proSave.dirty { text-decoration: underline; }
+	@media (prefers-reduced-motion: reduce) {
+	  #proCard { transition-duration: 0.01s; }
+	}
 	#ghostHud {
 	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	  font-size: 14px;
@@ -523,6 +680,27 @@
   <!-- Ride / atlas chrome -->
   <div id="rideChrome">
 	<a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
+	<div id="proDock">
+	  <button type="button" class="hudLink" id="pickProBtn" aria-expanded="false" aria-controls="proRack">Pick a Pro</button>
+	  <button type="button" class="hudLink" id="ghostLabelBtn" aria-pressed="true">O Ghost name</button>
+	  <div id="proRack">
+		<button type="button" class="proArrow" id="proPrev" aria-label="Previous pro"><span class="proChevron"></span></button>
+		<div id="proSpin">
+		  <div id="proCard">
+			<div class="proFace proFront" id="proFront" role="button" tabindex="0" aria-label="Flip board to customize"></div>
+			<div class="proFace proBack" id="proBack">
+			  <div class="proBackName" id="proBackName"></div>
+			  <div id="proSliders"></div>
+			  <div class="proActions">
+				<button type="button" class="hudLink" id="proSave">Save</button>
+				<button type="button" class="hudLink" id="proReset">Reset</button>
+			  </div>
+			</div>
+		  </div>
+		</div>
+		<button type="button" class="proArrow proArrowNext" id="proNext" aria-label="Next pro"><span class="proChevron"></span></button>
+	  </div>
+	</div>
 	<div id="ghostHud">
 	  <div id="ghostHudTitle">Ghost: —</div>
 	  <div id="ghostHudBody"></div>
