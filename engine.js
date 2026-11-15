@@ -3115,20 +3115,40 @@ function displayHeading(worldHeading, x, y) {
 }
 
 // Close third-person would otherwise blow the flat-view sprites up by the
-// full perspective factor. Cap it so the board stays a readable marker
-// while the ground itself still comes up to the camera.
+// full perspective factor. Cap it so a buoy stays a readable marker while
+// the ground itself still comes up to the camera.
 const CHASE_MARKER_MAX_SCALE = 4;
+// The rider is drawn as a big marker on purpose. Once the camera is in
+// close, that same marker reads as an oversized board, so tuck it down.
+const CHASE_CLOSE_BOARD = 0.6;
 
 function perspectiveFactor(depth) {
   const cam = viewCamera();
   return Math.min(cam.f / Math.max(depth, 1), CHASE_MARKER_MAX_SCALE);
 }
 
-function withWorldMarker(x, y, fn) {
+// 0 at the wide walking chase, 1 when the camera has come in behind the board.
+function chaseCloseAmount() {
+  if (cameraIsFlat()) return 0;
+  const h = canvas.height || 1;
+  const s = followCam.scale || 1;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const wide = chaseFraming(0, h, s, ppm).distance;
+  const tucked = chaseFraming(99, h, s, ppm).distance;
+  if (!(wide > tucked + 1)) return 0;
+  const d = viewDistance > 1 ? viewDistance : wide;
+  return Math.max(0, Math.min(1, (wide - d) / (wide - tucked)));
+}
+
+function riderMarkerMul() {
+  return 1 - chaseCloseAmount() * (1 - CHASE_CLOSE_BOARD);
+}
+
+function withWorldMarker(x, y, fn, scaleMul = 1) {
   if (!cameraIsFlat()) {
     const p = projectWorld(x, y);
     if (!p) return;
-    const m = worldMarkerScale() * perspectiveFactor(p.depth);
+    const m = worldMarkerScale() * perspectiveFactor(p.depth) * scaleMul;
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.scale(m, m);
@@ -3436,7 +3456,7 @@ function drawGhost(x, y, heading) {
     traceBoard();
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
-  });
+  }, riderMarkerMul());
 }
 
 function ghostNameText(ghost) {
@@ -4103,16 +4123,37 @@ function totalTrailDistance(trail){
   return d;
 }
 
+function strokeSlimWake(x1, y1, x2, y2) {
+  // Screen pixels. The pitched view used to thicken this with the same
+  // factor as the board, which turned the wake into a ribbon up close.
+  const width = 2 * (cameraIsFlat() ? worldMarkerScale() : 1);
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (cameraIsFlat()) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    return;
+  }
+  const a = projectWorld(x1, y1);
+  const b = projectWorld(x2, y2);
+  if (!a || !b) return;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+}
+
 function drawWake(){
-  const m = worldMarkerScale();
   // Draw player wake
   if (wakeTrail.length < 2) return;
   for (let i = 1; i < wakeTrail.length; i++){
     const t = i / wakeTrail.length;
     const alpha = t;
     ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
-    ctx.lineWidth = 2 * m;
-    strokeWorldLine(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
+    strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
   }
 
   // Draw ghost wake during active laps or free preview
@@ -4121,8 +4162,7 @@ function drawWake(){
       const t = i / ghostWakeTrail.length;
       const alpha = t;
       ctx.strokeStyle = `rgba(255,136,255,${alpha.toFixed(2)})`;
-      ctx.lineWidth = 2 * m;
-      strokeWorldLine(ghostWakeTrail[i - 1].x, ghostWakeTrail[i - 1].y, ghostWakeTrail[i].x, ghostWakeTrail[i].y);
+      strokeSlimWake(ghostWakeTrail[i - 1].x, ghostWakeTrail[i - 1].y, ghostWakeTrail[i].x, ghostWakeTrail[i].y);
     }
   }
 }
@@ -4271,7 +4311,7 @@ function drawRacer() {
     ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
     traceBoard();
     fillRiderBoard();
-  });
+  }, riderMarkerMul());
 }
 
 function fillRiderBoard() {
