@@ -4167,17 +4167,72 @@ function drawWake(){
   }
 }
 
+// A buoy disc drawn in world pixels on the water plane, clipped at the
+// near plane so the part still in front of the camera stays visible.
+function groundDiscPoints(cx, cy, radius) {
+  const cam = viewCamera();
+  const segments = 36;
+  const near = 1.25;
+  const ring = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    ring.push({
+      x: cx + Math.cos(a) * radius,
+      y: cy + Math.sin(a) * radius
+    });
+  }
+  ring.forEach(p => { p.d = viewDepth(cam, p.x, p.y); });
+  const out = [];
+  for (let i = 0; i < ring.length - 1; i++) {
+    const a = ring[i];
+    const b = ring[i + 1];
+    const av = a.d >= near;
+    const bv = b.d >= near;
+    if (av) {
+      const p = project(cam, a.x, a.y);
+      if (p) out.push(p);
+    }
+    if (av !== bv && a.d !== b.d) {
+      const t = (near - a.d) / (b.d - a.d);
+      const p = project(cam, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+      if (p) out.push(p);
+    }
+  }
+  return out;
+}
+
+function fillGroundDisc(cx, cy, radius, color) {
+  if (!(radius > 0.4)) return;
+  const poly = groundDiscPoints(cx, cy, radius);
+  if (poly.length < 3) return;
+  ctx.beginPath();
+  ctx.moveTo(poly[0].x, poly[0].y);
+  for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
 function drawBuoyDot(x, y, isTurn, passSide) {
   const paint = isTurn
     ? turnBuoyPaint(currentTrack.buoyColorScheme, passSide)
     : { fill: MARKER_BUOY_FILL, stroke: '#fff' };
+  const r = isTurn ? 8 : 4;
+  const ring = isTurn ? 2 : 1.5;
+  // On the tilted water the buoy is a disc in the ground plane, so it
+  // grows and flattens with the same perspective as the surface. The
+  // number above it stays a screen marker.
+  if (!cameraIsFlat()) {
+    fillGroundDisc(x, y, r + ring / 2, paint.stroke);
+    fillGroundDisc(x, y, Math.max(0.6, r - ring / 2), paint.fill);
+    return;
+  }
   withWorldMarker(x, y, () => {
-    const r = isTurn ? 8 : 4;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, 2 * Math.PI);
     ctx.fillStyle = paint.fill;
     ctx.fill();
-    ctx.lineWidth = isTurn ? 2 : 1.5;
+    ctx.lineWidth = ring;
     ctx.strokeStyle = paint.stroke;
     ctx.stroke();
   });
