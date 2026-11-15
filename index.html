@@ -193,27 +193,52 @@
 	  flex-direction: column;
 	  align-items: flex-start;
 	}
+	body.pro-open #rideChrome { z-index: 40; }
+	body.pro-open #designerLink,
+	body.pro-open #pickProBtn,
+	body.pro-open #ghostLabelBtn {
+	  position: relative;
+	  z-index: 3;
+	}
+	body.pro-open #brandMark,
+	body.pro-open #ghostHud,
+	body.pro-open #ghostTimeline,
+	body.pro-open #customizeGhostBtn,
+	body.pro-open #ghostCustomize { visibility: hidden; }
 	#proRack {
 	  display: none;
-	  position: absolute;
-	  top: calc(100% + 4px);
-	  left: 0;
-	  z-index: 8;
-	  align-items: center;
-	  width: min(360px, calc(100vw - 28px));
-	  pointer-events: auto;
 	}
 	#proRack.open {
 	  display: flex;
-	  background: #0b1116;
-	  border-radius: 22px;
-	  padding: 6px 0;
+	  align-items: center;
+	  justify-content: center;
+	  position: fixed;
+	  inset: 0;
+	  z-index: 1;
+	  background: rgba(0, 0, 0, 0.4);
+	  pointer-events: auto;
+	  touch-action: none;
+	}
+	#proName {
+	  position: absolute;
+	  top: max(72px, 8vh);
+	  left: 0;
+	  right: 0;
+	  z-index: 2;
+	  margin: 0;
+	  text-align: center;
+	  font: 500 18px/1 ui-sans-serif, system-ui, sans-serif;
+	  letter-spacing: 0.14em;
+	  color: #fff;
+	  text-shadow: 0 1px 3px rgba(0,0,0,0.75);
+	  pointer-events: none;
 	}
 	.proArrow {
 	  position: relative;
-	  flex: 0 0 44px;
-	  width: 44px;
-	  height: 44px;
+	  z-index: 2;
+	  flex: 0 0 56px;
+	  width: 56px;
+	  height: 56px;
 	  margin: 0;
 	  padding: 0;
 	  border: none;
@@ -227,117 +252,161 @@
 	}
 	.proChevron {
 	  display: block;
-	  width: 9px;
-	  height: 9px;
+	  width: 10px;
+	  height: 10px;
 	  border-left: 1px solid #7fd4ff;
 	  border-bottom: 1px solid #7fd4ff;
 	  transform: rotate(45deg);
 	}
 	.proArrowNext .proChevron { transform: rotate(-135deg); }
-	#proSpin {
-	  flex: 1 1 auto;
-	  min-width: 0;
-	  height: 348px;
-	  max-height: min(348px, calc(100dvh - 150px));
-	  perspective: 1100px;
-	}
 	#proCard {
 	  position: relative;
-	  width: 100%;
-	  height: 100%;
+	  width: min(520px, calc(100vw - 128px));
+	  height: 60vh;
 	  transform-style: preserve-3d;
 	  transition: transform 0.6s cubic-bezier(0.2, 0.75, 0.2, 1);
 	}
 	#proCard.flipped { transform: rotateY(180deg); }
-	#proCard:not(.flipped) .proBack { pointer-events: none; }
-	#proCard.flipped .proFront { pointer-events: none; }
-	.proFace {
+	#proCard:not(.flipped) #proTune { pointer-events: none; }
+	#proCard.flipped #proFront { pointer-events: none; }
+	#proFront, #proTune {
 	  position: absolute;
 	  inset: 0;
-	  border-radius: 18px;
 	  backface-visibility: hidden;
 	  -webkit-backface-visibility: hidden;
 	  box-sizing: border-box;
-	  background: #121a22;
-	  border: 1px solid rgba(255,255,255,0.16);
-	  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
 	}
-	.proBack { transform: rotateY(180deg); }
-	.proFront {
+	#proTune { transform: rotateY(180deg); }
+	#proFront {
 	  display: flex;
-	  flex-direction: column;
 	  align-items: center;
-	  justify-content: flex-end;
-	  padding: 10px 8px 12px;
+	  justify-content: center;
 	  cursor: pointer;
-	  touch-action: pan-y;
+	  touch-action: none;
 	  user-select: none;
 	}
 	.proBoard {
-	  flex: 1 1 auto;
-	  min-height: 0;
+	  height: 100%;
 	  width: 100%;
 	  display: flex;
-	  align-items: flex-end;
+	  align-items: center;
 	  justify-content: center;
 	}
-	.proBoard svg { height: 100%; width: auto; max-width: 78%; display: block; }
-	.proName {
-	  margin-top: 6px;
-	  font: 600 16px/1.2 ui-sans-serif, system-ui, sans-serif;
-	  letter-spacing: 0.06em;
-	  color: #fff;
-	  text-shadow: none;
-	}
-	.proBack {
+	.proBoard svg { height: 100%; width: auto; max-width: 100%; display: block; }
+	#proTune {
 	  display: flex;
 	  flex-direction: column;
-	  padding: 12px 14px 6px;
+	  justify-content: center;
+	  gap: 2px;
+	  padding: 0 4px;
 	  overflow: auto;
 	  color: #fff;
-	  text-shadow: none;
 	  font-family: ui-sans-serif, system-ui, sans-serif;
 	}
-	.proBackName {
-	  font: 600 15px/1.2 ui-sans-serif, system-ui, sans-serif;
-	  letter-spacing: 0.06em;
-	  margin: 0 0 8px;
-	}
-	.proSlider {
+	.proSlider { margin: 0 0 8px; }
+	.proSliderHead {
 	  display: flex;
-	  flex-wrap: wrap;
-	  align-items: baseline;
+	  justify-content: space-between;
+	  gap: 16px;
 	  margin: 0 0 2px;
-	  color: rgba(255,255,255,0.82);
-	  font-size: 12px;
+	  font-size: 13px;
 	  line-height: 1.2;
-	}
-	.proSlider b {
-	  margin-left: auto;
-	  font-weight: 600;
 	  color: #fff;
+	  text-shadow: 0 1px 2px rgba(0,0,0,0.7);
 	}
-	.proSlider input[type="range"] {
-	  flex: 1 1 100%;
-	  width: 100%;
-	  height: 28px;
-	  margin: 0;
-	  accent-color: #7fd4ff;
+	.proSliderHead b {
+	  font-weight: 500;
+	  font-variant-numeric: tabular-nums;
+	}
+	.proTrack {
+	  position: relative;
+	  height: 44px;
 	  touch-action: none;
-	  pointer-events: auto;
+	  cursor: pointer;
+	  outline: none;
+	}
+	.proTrackLine, .proTrackFill {
+	  position: absolute;
+	  top: 50%;
+	  height: 1px;
+	  transform: translateY(-0.5px);
+	}
+	.proTrackLine {
+	  left: 0;
+	  right: 0;
+	  background: repeating-linear-gradient(90deg, #fff 0 1px, transparent 1px 5px);
+	}
+	.proTrackFill {
+	  left: 0;
+	  width: 0;
+	  background: #7fd4ff;
+	}
+	.proThumb {
+	  position: absolute;
+	  top: 50%;
+	  width: 2px;
+	  height: 18px;
+	  margin-left: -1px;
+	  background: #fff;
+	  transform: translateY(-50%);
+	  pointer-events: none;
 	}
 	.proActions {
-	  margin-top: auto;
 	  display: flex;
 	  justify-content: space-between;
 	  align-items: center;
+	  margin-top: 6px;
 	}
 	#proRack .hudLink {
-	  text-shadow: none;
+	  text-shadow: 0 1px 2px rgba(0,0,0,0.7);
 	  padding: 8px 2px;
 	  min-height: 44px;
 	}
 	#proSave.dirty { text-decoration: underline; }
+	@media (min-width: 1000px) {
+	  #proRack.open {
+	    display: grid;
+	    grid-template-columns: 72px minmax(0, 1fr) minmax(260px, 380px) 72px;
+	    align-items: center;
+	  }
+	  #proPrev { grid-column: 1; }
+	  #proNext { grid-column: 4; }
+	  #proCard {
+	    display: contents;
+	    width: auto;
+	    height: auto;
+	    transform: none;
+	  }
+	  #proCard.flipped { transform: none; }
+	  #proFront, #proTune {
+	    position: relative;
+	    inset: auto;
+	    transform: none;
+	    backface-visibility: visible;
+	    -webkit-backface-visibility: visible;
+	  }
+	  #proFront {
+	    grid-column: 2;
+	    justify-self: center;
+	    width: min(46vw, 520px);
+	    height: 60vh;
+	    cursor: grab;
+	  }
+	  #proFront:active { cursor: grabbing; }
+	  #proTune {
+	    grid-column: 3;
+	    height: auto;
+	    max-height: 70vh;
+	    padding: 0 36px 0 12px;
+	    overflow: visible;
+	  }
+	  #proCard:not(.flipped) #proTune,
+	  #proCard.flipped #proFront { pointer-events: auto; }
+	}
+	@media (max-width: 999px) and (max-height: 520px) {
+	  #proCard { height: 82vh; }
+	  #proName { top: 8px; }
+	}
 	@media (prefers-reduced-motion: reduce) {
 	  #proCard { transition-duration: 0.01s; }
 	}
@@ -684,17 +753,15 @@
 	  <button type="button" class="hudLink" id="pickProBtn" aria-expanded="false" aria-controls="proRack">Pick a Pro</button>
 	  <button type="button" class="hudLink" id="ghostLabelBtn" aria-pressed="true">O Ghost name</button>
 	  <div id="proRack">
+		<div id="proName"></div>
 		<button type="button" class="proArrow" id="proPrev" aria-label="Previous pro"><span class="proChevron"></span></button>
-		<div id="proSpin">
-		  <div id="proCard">
-			<div class="proFace proFront" id="proFront" role="button" tabindex="0" aria-label="Flip board to customize"></div>
-			<div class="proFace proBack" id="proBack">
-			  <div class="proBackName" id="proBackName"></div>
-			  <div id="proSliders"></div>
-			  <div class="proActions">
-				<button type="button" class="hudLink" id="proSave">Save</button>
-				<button type="button" class="hudLink" id="proReset">Reset</button>
-			  </div>
+		<div id="proCard">
+		  <div id="proFront"></div>
+		  <div id="proTune">
+			<div id="proSliders"></div>
+			<div class="proActions">
+			  <button type="button" class="hudLink" id="proSave">Save</button>
+			  <button type="button" class="hudLink" id="proReset">Reset</button>
 			</div>
 		  </div>
 		</div>

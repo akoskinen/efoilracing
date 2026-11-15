@@ -3109,6 +3109,7 @@ function nudgeZoomStop(dir) {
 }
 
 function drawZoomHint() {
+  if (document.body.classList.contains('pro-open')) return;
   const now = performance.now();
   ctx.save();
   ctx.textAlign = 'center';
@@ -3626,6 +3627,7 @@ document.addEventListener('keydown', function(e) {
   if (gamePaused || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
     return;
   }
+  if (e.target && e.target.closest && e.target.closest('#proRack')) return;
 
   if (atlasEls.confirm.classList.contains('open')) {
     if (e.key === 'Escape') keepRacingFromAtlasConfirm();
@@ -3647,6 +3649,12 @@ document.addEventListener('keydown', function(e) {
       e.preventDefault();
       closeAtlas();
     }
+    return;
+  }
+
+  if (document.body.classList.contains('pro-open') && e.key === 'Escape') {
+    e.preventDefault();
+    setProRackOpen(false);
     return;
   }
   
@@ -4136,6 +4144,7 @@ function telemetryTopY() {
 }
 
 function drawTelemetry() {
+  if (document.body.classList.contains('pro-open')) return;
   updateGhostStats();
   ctx.save();
   ctx.font = '14px monospace';
@@ -4183,18 +4192,18 @@ function drawRacer() {
 
 function fillRiderBoard() {
   const meta = activeRider.meta;
-  const shine = BOARD_SHINE[meta.gloss];
-  if (shine) {
-    const g = ctx.createLinearGradient(-4, -14, 5, 14);
-    shine.forEach((color, i) => g.addColorStop(i / (shine.length - 1), color));
+  const stops = shineStops(BOARD_SHINE[meta.gloss]);
+  if (stops.length) {
+    const g = ctx.createLinearGradient(0, -14, 0, 14);
+    stops.forEach(stop => g.addColorStop(stop.at, stop.color));
     ctx.fillStyle = g;
   } else {
     ctx.fillStyle = meta.color;
   }
   ctx.fill();
-  const dark = meta.id === 'antti';
-  ctx.strokeStyle = dark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = dark ? 1.25 : 0.6;
+  const lightEdge = meta.id === 'antti' || meta.gloss === 'silver' || meta.gloss === 'red';
+  ctx.strokeStyle = lightEdge ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6);
   ctx.stroke();
 }
 
@@ -5493,6 +5502,17 @@ export function resumeGame() {
 
 const highScoreManager = new HighScoreManager();
 
+let setProRackOpen = () => {};
+
+function shineStops(shine) {
+  if (!shine || !shine.length) return [];
+  return shine.map((stop, i) => (
+    typeof stop === 'string'
+      ? { at: shine.length === 1 ? 0 : i / (shine.length - 1), color: stop }
+      : stop
+  ));
+}
+
 const PRO_SLIDERS = [
   { id: 'riderTop', key: 'topKmh', label: 'Top speed', unit: 'km/h', digits: 1 },
   { id: 'riderAccel', key: 'accelKmhS', label: 'Acceleration', unit: 'km/h/s', digits: 1 },
@@ -5520,45 +5540,82 @@ function proTuneDirty() {
 }
 
 function boardMarkup(rider) {
-  const shine = BOARD_SHINE[rider.gloss];
-  const stops = shine
-    ? shine.map((color, i) => `<stop offset="${(i / (shine.length - 1)) * 100}%" stop-color="${color}"/>`).join('')
+  const stops = shineStops(BOARD_SHINE[rider.gloss]);
+  const gradient = stops.length
+    ? `<linearGradient id="proShine" x1="0" y1="0" x2="0" y2="1">${stops.map(s => `<stop offset="${s.at * 100}%" stop-color="${s.color}"/>`).join('')}</linearGradient>`
     : '';
-  const defs = shine
-    ? `<defs><linearGradient id="proShine" x1="18%" y1="0%" x2="82%" y2="100%">${stops}</linearGradient>
-       <clipPath id="proClip"><path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z"/></clipPath></defs>`
-    : `<defs><clipPath id="proClip"><path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z"/></clipPath></defs>`;
-  const fill = shine ? 'url(#proShine)' : rider.color;
-  const stroke = rider.id === 'antti' ? '#f3f3f3' : 'rgba(0,0,0,0.35)';
-  const sw = rider.id === 'antti' ? 3 : 1.5;
-  const streakOpacity = shine ? 0.78 : 0.2;
-  return `<svg viewBox="0 0 140 318" aria-hidden="true">${defs}
-    <ellipse cx="70" cy="308" rx="26" ry="5" fill="rgba(0,0,0,0.38)"/>
+  const fill = stops.length ? 'url(#proShine)' : rider.color;
+  const lightEdge = rider.id === 'antti' || rider.gloss === 'silver' || rider.gloss === 'red';
+  const stroke = lightEdge ? 'rgba(255,255,255,0.82)' : 'rgba(0,0,0,0.35)';
+  const sw = rider.id === 'antti' ? 2.5 : 1.25;
+  const streakEnd = rider.gloss === 'silver' || rider.gloss === 'red' ? 188 : 262;
+  const streakOpacity = rider.gloss === 'gold' ? 0.72 : (stops.length ? 0.42 : 0.18);
+  return `<svg viewBox="0 0 140 318" aria-hidden="true"><defs>
+    <clipPath id="proClip"><path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z"/></clipPath>
+    ${gradient}
+  </defs>
+    <ellipse cx="70" cy="308" rx="28" ry="5" fill="rgba(0,0,0,0.35)"/>
     <path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
     <g clip-path="url(#proClip)">
-      <path d="M78 42 C90 110 86 196 72 262" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" opacity="${streakOpacity}"/>
+      <path d="M78 42 C90 96 86 146 72 ${streakEnd}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity="${streakOpacity}"/>
     </g>
   </svg>`;
+}
+
+const proWide = window.matchMedia('(min-width: 1000px)');
+function rackIsWide() { return proWide.matches; }
+
+function paintSlider(row) {
+  const value = riderState.tunes[riderState.id][row.key];
+  const lim = RIDER_LIMITS[row.key];
+  const t = (value - lim.min) / (lim.max - lim.min);
+  const fill = document.getElementById(row.id + 'Fill');
+  const thumb = document.getElementById(row.id + 'Thumb');
+  const label = document.getElementById(row.id + 'Val');
+  const track = document.getElementById(row.id);
+  const text = `${formatTuneValue(value, row.digits)} ${row.unit}`;
+  if (fill) fill.style.width = `${t * 100}%`;
+  if (thumb) thumb.style.left = `${t * 100}%`;
+  if (label) label.textContent = text;
+  if (track) {
+    track.setAttribute('aria-valuenow', String(value));
+    track.setAttribute('aria-valuetext', text);
+  }
+}
+
+function applySlider(row, raw) {
+  riderState.tunes[riderState.id] = clampTune({
+    ...riderState.tunes[riderState.id],
+    [row.key]: raw
+  });
+  applyActiveRider();
+  paintSlider(row);
+  const save = document.getElementById('proSave');
+  if (save) save.classList.toggle('dirty', proTuneDirty());
 }
 
 function syncProRack() {
   const rider = riderById(riderState.id);
   const front = document.getElementById('proFront');
   if (!front) return;
-  const tune = riderState.tunes[rider.id];
-  front.innerHTML = `<div class="proBoard">${boardMarkup(rider)}</div><div class="proName">${rider.name}</div>`;
-  front.setAttribute('aria-label', `Flip ${rider.name}'s board to customize`);
-  const backName = document.getElementById('proBackName');
-  if (backName) {
-    backName.textContent = rider.name;
-    backName.style.color = rider.id === 'antti' ? '#f2f2f2' : rider.color;
+  const wide = rackIsWide();
+  const card = document.getElementById('proCard');
+  if (wide && card) card.classList.remove('flipped');
+  front.innerHTML = `<div class="proBoard">${boardMarkup(rider)}</div>`;
+  const name = document.getElementById('proName');
+  if (name) name.textContent = rider.name;
+  if (wide) {
+    front.removeAttribute('role');
+    front.removeAttribute('aria-pressed');
+    front.tabIndex = -1;
+    front.setAttribute('aria-label', `${rider.name}'s board`);
+  } else {
+    front.setAttribute('role', 'button');
+    front.tabIndex = 0;
+    front.setAttribute('aria-label', `Flip ${rider.name}'s board to customize`);
+    front.setAttribute('aria-pressed', card && card.classList.contains('flipped') ? 'true' : 'false');
   }
-  for (const row of PRO_SLIDERS) {
-    const input = document.getElementById(row.id);
-    const label = document.getElementById(row.id + 'Val');
-    if (input && document.activeElement !== input) input.value = String(tune[row.key]);
-    if (label) label.textContent = `${formatTuneValue(tune[row.key], row.digits)} ${row.unit}`;
-  }
+  for (const row of PRO_SLIDERS) paintSlider(row);
   const save = document.getElementById('proSave');
   if (save) save.classList.toggle('dirty', proTuneDirty());
   const nameBtn = document.getElementById('ghostLabelBtn');
@@ -5566,8 +5623,6 @@ function syncProRack() {
     nameBtn.setAttribute('aria-pressed', riderState.showLabel ? 'true' : 'false');
     nameBtn.classList.toggle('off', !riderState.showLabel);
   }
-  const card = document.getElementById('proCard');
-  if (card) front.setAttribute('aria-pressed', card.classList.contains('flipped') ? 'true' : 'false');
 }
 
 function selectPro(id) {
@@ -5599,38 +5654,55 @@ function initProRack() {
   const sliders = document.getElementById('proSliders');
   for (const row of PRO_SLIDERS) {
     const lim = RIDER_LIMITS[row.key];
-    const wrap = document.createElement('label');
+    const wrap = document.createElement('div');
     wrap.className = 'proSlider';
-    wrap.htmlFor = row.id;
-    wrap.innerHTML = `${row.label} <b id="${row.id}Val"></b><input id="${row.id}" type="range" min="${lim.min}" max="${lim.max}" step="${lim.step}">`;
+    wrap.innerHTML = `<div class="proSliderHead"><span>${row.label}</span><b id="${row.id}Val"></b></div>
+      <div class="proTrack" id="${row.id}" role="slider" tabindex="0" aria-label="${row.label}" aria-orientation="horizontal" aria-valuemin="${lim.min}" aria-valuemax="${lim.max}">
+        <div class="proTrackLine"></div>
+        <div class="proTrackFill" id="${row.id}Fill"></div>
+        <div class="proThumb" id="${row.id}Thumb"></div>
+      </div>`;
     sliders.appendChild(wrap);
-    const input = wrap.querySelector('input');
-    input.addEventListener('input', () => {
-      riderState.tunes[riderState.id] = clampTune({
-        ...riderState.tunes[riderState.id],
-        [row.key]: Number(input.value)
-      });
-      applyActiveRider();
-      const label = document.getElementById(row.id + 'Val');
-      if (label) {
-        label.textContent = `${formatTuneValue(riderState.tunes[riderState.id][row.key], row.digits)} ${row.unit}`;
-      }
-      const save = document.getElementById('proSave');
-      if (save) save.classList.toggle('dirty', proTuneDirty());
+    const track = wrap.querySelector('.proTrack');
+    const valueFromX = clientX => {
+      const rect = track.getBoundingClientRect();
+      const span = rect.width || 1;
+      const t = Math.max(0, Math.min(1, (clientX - rect.left) / span));
+      return lim.min + t * (lim.max - lim.min);
+    };
+    track.addEventListener('pointerdown', e => {
+      if (e.button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      track.focus();
+      track.setPointerCapture(e.pointerId);
+      applySlider(row, valueFromX(e.clientX));
     });
-    input.addEventListener('pointerdown', e => e.stopPropagation());
+    track.addEventListener('pointermove', e => {
+      if (!track.hasPointerCapture(e.pointerId)) return;
+      e.preventDefault();
+      applySlider(row, valueFromX(e.clientX));
+    });
+    track.addEventListener('keydown', e => {
+      let dir = 0;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') dir = 1;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') dir = -1;
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      applySlider(row, riderState.tunes[riderState.id][row.key] + dir * lim.step);
+    });
   }
 
+  const card = document.getElementById('proCard');
   const setRackOpen = open => {
     rack.classList.toggle('open', open);
+    document.body.classList.toggle('pro-open', open);
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    for (const id of ['ghostHud', 'ghostTimeline', 'customizeGhostBtn', 'ghostCustomize']) {
-      const el = document.getElementById(id);
-      if (!el) continue;
-      el.style.visibility = open ? 'hidden' : '';
-    }
+    if (!open && card) card.classList.remove('flipped');
     if (open) syncProRack();
   };
+  setProRackOpen = setRackOpen;
   bindChromeTap(btn, () => setRackOpen(!rack.classList.contains('open')));
   const bindStep = (el, dir) => {
     if (!el) return;
@@ -5668,7 +5740,14 @@ function initProRack() {
   });
   bindChromeTap(document.getElementById('ghostLabelBtn'), toggleGhostLabel);
 
-  const card = document.getElementById('proCard');
+  rack.addEventListener('click', e => {
+    if (e.target === rack) setRackOpen(false);
+  });
+  proWide.addEventListener('change', () => {
+    if (rackIsWide() && card) card.classList.remove('flipped');
+    syncProRack();
+  });
+
   let drag = null;
   front.addEventListener('pointerdown', e => {
     if (e.button) return;
@@ -5689,7 +5768,7 @@ function initProRack() {
       stepPro(dx < 0 ? 1 : -1);
       return;
     }
-    if (!moved) {
+    if (!moved && !rackIsWide()) {
       card.classList.toggle('flipped');
       syncProRack();
     }
@@ -5697,6 +5776,7 @@ function initProRack() {
   front.addEventListener('pointerup', endDrag);
   front.addEventListener('pointercancel', () => { drag = null; });
   front.addEventListener('keydown', e => {
+    if (rackIsWide()) return;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
     card.classList.toggle('flipped');

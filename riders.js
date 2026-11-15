@@ -40,19 +40,34 @@ const TUNE_KEYS = Object.keys(RIDER_LIMITS);
 /**
  * Rack order. Piet stays on the slower lean. Manel, Carmine and Antti
  * all get the quick lean (60 °/s up to 30°, then 28 °/s).
- * gloss gold / silver paint a metallic streak on the board.
+ * gloss paints the board from nose to tail. Silver and red stay
+ * their color through 70% of the length, then fall off to black.
  */
 export const RIDERS = [
   { id: 'antti', name: 'Antti', color: '#141414', gloss: 'solid', topKmh: 60, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 62 },
   { id: 'carmine', name: 'Carmine', color: '#d5d8de', gloss: 'silver', topKmh: 66, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 92 },
   { id: 'piet', name: 'Piet', color: '#d4a017', gloss: 'gold', topKmh: 66, accelKmhS: 5.1, lean0: 40, lean30: 10, arc60: 100 },
-  { id: 'manel', name: 'Manel', color: '#e53935', gloss: 'solid', topKmh: 66, accelKmhS: 5.1, lean0: 60, lean30: 28, arc60: 50 }
+  { id: 'manel', name: 'Manel', color: '#e53935', gloss: 'red', topKmh: 66, accelKmhS: 5.1, lean0: 60, lean30: 28, arc60: 50 }
 ];
 
-/** Metallic streak stops, nose to tail. A bright middle stop is the shine. */
+/**
+ * Nose-to-tail paint. `at` is 0 at the nose and 1 at the tail.
+ * A string list is spaced evenly, which is how the gold shine is drawn.
+ */
 export const BOARD_SHINE = {
   gold: ['#fff6cf', '#f2d56a', '#fff4c2', '#d4a017', '#8a6410'],
-  silver: ['#ffffff', '#e7e9ee', '#ffffff', '#b7bcc6', '#6e7682']
+  silver: [
+    { at: 0, color: '#f5f6f8' },
+    { at: 0.28, color: '#ffffff' },
+    { at: 0.7, color: '#d5d8de' },
+    { at: 1, color: '#080808' }
+  ],
+  red: [
+    { at: 0, color: '#ff564c' },
+    { at: 0.4, color: '#e53935' },
+    { at: 0.7, color: '#e53935' },
+    { at: 1, color: '#080808' }
+  ]
 };
 
 const STORAGE_KEY = 'efoil_rider_v1';
