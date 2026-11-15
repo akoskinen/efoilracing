@@ -16,12 +16,21 @@
 	  color: #fff;
 	  overflow: hidden;
 	}
-	#gameCanvas {
-	  display: block;
+	#groundCanvas, #gameCanvas {
+	  position: absolute;
+	  inset: 0;
 	  width: 100%;
 	  height: 100%;
-	  background: #222;
 	  touch-action: none;
+	}
+	#groundCanvas {
+	  z-index: 0;
+	  pointer-events: none;
+	  display: none;
+	}
+	#gameCanvas {
+	  z-index: 1;
+	  background: transparent;
 	}
 	#brandMark {
 	  position: absolute;
@@ -489,6 +498,7 @@
   <audio id="boomStopAudio" src="boom_stop.mp3" preload="auto"></audio>
   <audio id="collisionAudio" src="collision.wav" preload="auto"></audio>
 
+  <canvas id="groundCanvas"></canvas>
   <canvas id="gameCanvas"></canvas>
   <img id="brandMark" src="img/efoil-racing-mark.gif" alt="eFoil Racing" width="650" height="488">
 

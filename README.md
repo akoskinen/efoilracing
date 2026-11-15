@@ -25,7 +25,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | Control | Action |
 |---|---|
 | Arrows / IJKL | Steer and throttle |
-| **Z** | Cycle zoom: race → **1 km** → **5 km** → race |
+| **Z** | Cycle the camera: race zoom → **chase view** → **1 km** → **5 km** → race zoom. Pinch follows the same stops |
 | **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** |
 | G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map** |
@@ -33,7 +33,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 
 HUD chrome (T / F / P, and **Customize ghost**) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
 
-**Race zoom** uses an edge dead-zone follow camera (the rider stays in frame without wrapping the world). **1 km** and **5 km** ease the rider to the center of the viewport — a quick **Z Z** (out then back) is also a smooth recenter.
+**Race zoom** uses an edge dead-zone follow camera (the rider stays in frame without wrapping the world). **Chase view** eases the camera down behind the rider and turns with heading, lagging a little so a quick lean does not spin the lake. Under about 10 km/h that wide tilt stays put. From there to 45 km/h the camera closes in to about 15 m behind the board and tips further forward, into a third-person view. The tilted view keeps the same satellite zoom and loads extra tiles around it, so the water does not end in an empty wedge. **1 km** and **5 km** ease back to a top-down view with the rider centered. Every step of Z, and every pinch between those stops, moves the camera rather than cutting.
 
 **T** opens a world map of saved geo tracks (country pins, then a dive to the venue). The flight always looks at the selected start, not a lerp from world-center, and race-level tiles crossfade in before the camera arrives. Mid-lap T pauses the race and music until you keep racing or leave. See [docs/MILESTONE-6.md](docs/MILESTONE-6.md).
 
