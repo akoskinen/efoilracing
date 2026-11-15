@@ -7,6 +7,11 @@
 ////////////////////////////////////////////////////////////
 
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
+import {
+  FLAT_BEARING, CHASE_PITCH, chaseLookahead, makeCamera, project, unproject,
+  easeAngle, isFlatView
+} from "./chaseCam.js";
+import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
@@ -23,6 +28,7 @@ const trackConfigs = {};
 
 // --- Canvas and Context ---
 const canvas = document.getElementById('gameCanvas');
+const groundCanvas = document.getElementById('groundCanvas');
 const ctx = canvas.getContext('2d');
 const followCam = { tx: 0, ty: 0, scale: 1 };
 let zoomStopIndex = 0;
@@ -327,6 +333,10 @@ function screenToWorld(sx, sy, s, tx, ty) {
   s = s ?? followCam.scale ?? 1;
   tx = tx ?? followCam.tx;
   ty = ty ?? followCam.ty;
+  if (!cameraIsFlat()) {
+    const cam = viewCamera({ scale: s, tx, ty });
+    return unproject(cam, sx, sy, horizonReach());
+  }
   return { x: (sx - tx) / s, y: (sy - ty) / s };
 }
 
@@ -486,6 +496,48 @@ function drawCachedTileImage(z, x, y, dest) {
   return false;
 }
 
+function cachedBlit(z, x, y, dest, u0, v0, u1, v1) {
+  x = wrapTileX(x, z);
+  const e = geoTileCache.get(geoTileKey(z, x, y));
+  if (!(e?.status === 'ok' && e.img)) return null;
+  e.lastUsed = performance.now();
+  return { img: e.img, dest, u0, v0, u1, v1 };
+}
+
+function tileBlits(z, x, y) {
+  const dest = tileWorldRect(z, x, y);
+  const full = cachedBlit(z, x, y, dest, 0, 0, 1, 1);
+  if (full) return [full];
+
+  for (let k = 1; k <= 6 && z - k >= 8; k++) {
+    const pz = z - k;
+    const px = x >> k;
+    const py = y >> k;
+    const frac = 1 / (1 << k);
+    const u0 = (x - (px << k)) * frac;
+    const v0 = (y - (py << k)) * frac;
+    const parent = cachedBlit(pz, px, py, dest, u0, v0, u0 + frac, v0 + frac);
+    if (parent) return [parent];
+  }
+
+  const out = [];
+  const cz = z + 1;
+  if (cz <= 19) {
+    for (let dy = 0; dy < 2; dy++) {
+      for (let dx = 0; dx < 2; dx++) {
+        const child = cachedBlit(cz, x * 2 + dx, y * 2 + dy, {
+          x: dest.x + dest.w * dx / 2,
+          y: dest.y + dest.h * dy / 2,
+          w: dest.w / 2,
+          h: dest.h / 2
+        }, 0, 0, 1, 1);
+        if (child) out.push(child);
+      }
+    }
+  }
+  return out;
+}
+
 function drawTileWithFallback(z, x, y) {
   const dest = tileWorldRect(z, x, y);
   if (drawCachedTileImage(z, x, y, dest)) return true;
@@ -618,6 +670,74 @@ function drawGeoTiles() {
   pruneGeoTileCache(keep);
   updateGeoAttribution(drawn);
   return drawn;
+}
+
+function setGroundVisible(on) {
+  if (!groundCanvas) return;
+  groundCanvas.style.display = on ? 'block' : 'none';
+}
+
+function syncGroundSize() {
+  if (!groundCanvas) return;
+  if (groundCanvas.width !== canvas.width || groundCanvas.height !== canvas.height) {
+    groundCanvas.width = canvas.width;
+    groundCanvas.height = canvas.height;
+    groundRenderer = null;
+  }
+}
+
+function drawChaseHorizonFade() {
+  if (viewPitch < 0.15) return;
+  const g = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.62);
+  g.addColorStop(0, 'rgba(12,26,34,0.9)');
+  g.addColorStop(0.5, 'rgba(12,26,34,0.35)');
+  g.addColorStop(1, 'rgba(12,26,34,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, canvas.width, canvas.height * 0.62);
+}
+
+function drawChaseGround() {
+  syncGroundSize();
+  const cam = viewCamera();
+  const clear = geoCanvasTransform ? [12 / 255, 26 / 255, 34 / 255] : [0.133, 0.133, 0.133];
+  let quads = [];
+  if (geoCanvasTransform) {
+    const vis = currentGeoTilePlan(false);
+    const pre = currentGeoTilePlan(true);
+    const keep = enqueueTileRange(pre, 1) || new Set();
+    const visKeep = enqueueTileRange(vis, 0);
+    if (visKeep) visKeep.forEach(k => keep.add(k));
+    const blits = [];
+    if (vis) {
+      const n = 1 << vis.z;
+      for (let ty = vis.ty0; ty <= vis.ty1; ty++) {
+        if (ty < 0 || ty >= n) continue;
+        for (let tx = vis.tx0; tx <= vis.tx1; tx++) {
+          for (const b of tileBlits(vis.z, tx, ty)) blits.push(b);
+        }
+      }
+    }
+    pruneGeoTileCache(keep);
+    updateGeoAttribution(blits.length > 0);
+    quads = groundQuads(cam, blits);
+  } else {
+    updateGeoAttribution(false);
+  }
+  if (!groundCanvas) return;
+  if (groundRenderer == null) {
+    try { groundRenderer = createGroundRenderer(groundCanvas) || false; }
+    catch (err) {
+      console.warn('Chase ground unavailable', err);
+      groundRenderer = false;
+    }
+  }
+  if (!groundRenderer) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = geoCanvasTransform ? '#0c1a22' : '#222';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+  groundRenderer.draw(cam, quads, clear);
 }
 
 // --- Audio Manager ---
@@ -785,6 +905,7 @@ function resizeCanvas(opts = {}) {
 
   canvas.width = w;
   canvas.height = h;
+  syncGroundSize();
   computeBuoys();
 
   if (meters && Number.isFinite(meters.x) && Number.isFinite(meters.y)) {
@@ -2595,16 +2716,36 @@ const FOLLOW_MARGIN_MIN = 140;
 const FOLLOW_TAU = 0.45;
 const CAM_SCALE_TAU = 0.42;
 const OVERVIEW_CENTER_TAU = 0.65;
-// Z cycles: race zoom → 1 km → 5 km → race zoom
-const ZOOM_STOPS_M = [0, 1000, 5000];
+// Z cycles: race zoom → chase view → 1 km → 5 km → race zoom.
+// Pitch and bearing ease, so every step is a camera move rather than a cut.
+const ZOOM_STOPS = [
+  { id: 'race', meters: 0, title: 'Race zoom' },
+  { id: 'chase', meters: 0, title: 'Chase view' },
+  { id: 'km1', meters: 1000, title: 'Overview — 1 km' },
+  { id: 'km5', meters: 5000, title: 'Overview — 5 km' }
+];
+const PITCH_TAU = 0.62;
+const BEARING_TAU = 0.4;
+const CHASE_CENTER_TAU = 0.55;
+let viewPitch = 0;
+let viewBearing = FLAT_BEARING;
 let zoomHintUntil = 0;
+let groundRenderer = null;
+
+function zoomStop(index = zoomStopIndex) {
+  return ZOOM_STOPS[index] || ZOOM_STOPS[0];
+}
+
+function isChaseZoom() {
+  return zoomStop().id === 'chase';
+}
 
 function isOverviewZoom() {
-  return zoomStopIndex > 0;
+  return zoomStop().meters > 0;
 }
 
 function overviewMeters() {
-  return ZOOM_STOPS_M[zoomStopIndex] || 0;
+  return zoomStop().meters || 0;
 }
 
 function followTargetScale() {
@@ -2616,20 +2757,18 @@ function followTargetScale() {
 }
 
 function zoomStopTitle(index) {
-  const m = ZOOM_STOPS_M[index] || 0;
-  if (!m) return 'Race zoom';
-  return m >= 1000 ? `Overview — ${m / 1000} km` : `Overview — ${m} m`;
+  return zoomStop(index).title;
 }
 
 function nextZoomHint() {
-  const last = ZOOM_STOPS_M.length - 1;
+  const last = ZOOM_STOPS.length - 1;
   if (zoomStopIndex === last && 'ontouchstart' in window) {
     return 'pinch out · world map';
   }
-  const next = (zoomStopIndex + 1) % ZOOM_STOPS_M.length;
-  const m = ZOOM_STOPS_M[next] || 0;
-  if (!m) return 'Z · race zoom';
-  return m >= 1000 ? `Z · ${m / 1000} km overview` : `Z · ${m} m overview`;
+  const next = zoomStop((zoomStopIndex + 1) % ZOOM_STOPS.length);
+  if (next.id === 'race') return 'Z · race zoom';
+  if (next.id === 'chase') return 'Z · chase view';
+  return next.meters >= 1000 ? `Z · ${next.meters / 1000} km overview` : `Z · ${next.title}`;
 }
 
 function resetFollowCamera() {
@@ -2638,10 +2777,18 @@ function resetFollowCamera() {
   if (isOverviewZoom() && canvas.width) {
     followCam.tx = canvas.width / 2 - pos.x * s;
     followCam.ty = canvas.height / 2 - pos.y * s;
+  } else if (isChaseZoom() && canvas.width) {
+    const ahead = chaseLookahead(canvas.height, s, CHASE_PITCH);
+    const lx = pos.x + Math.cos(heading) * ahead;
+    const ly = pos.y + Math.sin(heading) * ahead;
+    followCam.tx = canvas.width / 2 - lx * s;
+    followCam.ty = canvas.height / 2 - ly * s;
   } else {
     followCam.tx = pos.x * (1 - s);
     followCam.ty = pos.y * (1 - s);
   }
+  viewPitch = isChaseZoom() ? CHASE_PITCH : 0;
+  viewBearing = isChaseZoom() ? heading : FLAT_BEARING;
 }
 
 function updateFollowCamera(dt) {
@@ -2667,7 +2814,15 @@ function updateFollowCamera(dt) {
   let tx;
   let ty;
   let tau = isOverviewZoom() ? OVERVIEW_CENTER_TAU : FOLLOW_TAU;
-  if (focus) {
+  if (isChaseZoom()) {
+    const ahead = chaseLookahead(h, s, CHASE_PITCH);
+    const lx = px + Math.cos(hd) * ahead;
+    const ly = py + Math.sin(hd) * ahead;
+    tx = w / 2 - lx * s;
+    ty = h / 2 - ly * s;
+    tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU;
+    if (focus) introCamReturning = true;
+  } else if (focus) {
     const look = Math.min(70, 28 / Math.max(0.25, s));
     const lx = px + Math.cos(hd) * look;
     const ly = py + Math.sin(hd) * look;
@@ -2706,6 +2861,11 @@ function updateFollowCamera(dt) {
     const dy = ty - followCam.ty;
     if (dx * dx + dy * dy < 36) introCamReturning = false;
   }
+
+  const pitchA = 1 - Math.exp(-dt / PITCH_TAU);
+  const targetPitch = isChaseZoom() ? CHASE_PITCH : 0;
+  viewPitch += (targetPitch - viewPitch) * pitchA;
+  viewBearing = easeAngle(viewBearing, isChaseZoom() ? hd : FLAT_BEARING, dt, BEARING_TAU);
 }
 
 function worldMarkerScale() {
@@ -2713,7 +2873,61 @@ function worldMarkerScale() {
   return s < 0.995 ? 1 / s : 1;
 }
 
+function horizonReach() {
+  const ppm = pixelsPerMeter() || 4;
+  return 1800 * ppm;
+}
+
+function viewCamera(overrides) {
+  const s = overrides?.scale ?? followCam.scale ?? 1;
+  const tx = overrides?.tx ?? followCam.tx;
+  const ty = overrides?.ty ?? followCam.ty;
+  const w = canvas.width || 1;
+  const h = canvas.height || 1;
+  return makeCamera({
+    lx: (w / 2 - tx) / s,
+    ly: (h / 2 - ty) / s,
+    scale: s,
+    pitch: overrides?.pitch ?? viewPitch,
+    bearing: overrides?.bearing ?? viewBearing,
+    viewW: w,
+    viewH: h
+  });
+}
+
+function cameraIsFlat() {
+  return isFlatView(viewPitch, viewBearing);
+}
+
+function projectWorld(x, y) {
+  return project(viewCamera(), x, y);
+}
+
+function displayHeading(worldHeading, x, y) {
+  if (cameraIsFlat()) return worldHeading;
+  const reach = 12;
+  const p0 = projectWorld(x, y);
+  const p1 = projectWorld(
+    x + Math.cos(worldHeading) * reach,
+    y + Math.sin(worldHeading) * reach
+  );
+  if (!p0 || !p1) return -Math.PI / 2;
+  return Math.atan2(p1.y - p0.y, p1.x - p0.x);
+}
+
 function withWorldMarker(x, y, fn) {
+  if (!cameraIsFlat()) {
+    const p = projectWorld(x, y);
+    if (!p) return;
+    const cam = viewCamera();
+    const m = worldMarkerScale() * (cam.f / Math.max(p.depth, 1));
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.scale(m, m);
+    fn();
+    ctx.restore();
+    return;
+  }
   const m = worldMarkerScale();
   ctx.save();
   ctx.translate(x, y);
@@ -2722,17 +2936,38 @@ function withWorldMarker(x, y, fn) {
   ctx.restore();
 }
 
+function strokeWorldLine(x1, y1, x2, y2) {
+  if (cameraIsFlat()) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    return;
+  }
+  const a = projectWorld(x1, y1);
+  const b = projectWorld(x2, y2);
+  if (!a || !b) return;
+  const width = ctx.lineWidth;
+  const depth = Math.max(1, (a.depth + b.depth) * 0.5);
+  ctx.lineWidth = width * (viewCamera().f / depth);
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+  ctx.lineWidth = width;
+}
+
 function cycleZoomStop(dir = 1) {
-  const n = ZOOM_STOPS_M.length;
+  const n = ZOOM_STOPS.length;
   const step = dir < 0 ? -1 : 1;
   zoomStopIndex = (zoomStopIndex + step + n) % n;
   zoomHintUntil = performance.now() + 1800;
   prefetchGeoTiles();
 }
 
-/** Discrete zoom for pinch: +1 zooms out (race→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
+/** Discrete zoom for pinch: +1 zooms out (race→chase→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
 function nudgeZoomStop(dir) {
-  const n = ZOOM_STOPS_M.length;
+  const n = ZOOM_STOPS.length;
   const next = zoomStopIndex + (dir < 0 ? -1 : 1);
   if (next < 0 || next >= n) return false;
   zoomStopIndex = next;
@@ -2984,7 +3219,7 @@ function drawGhostFrame() {
 // Separate function to draw the ghost racer at a given position
 function drawGhost(x, y, heading) {
   withWorldMarker(x, y, () => {
-    ctx.rotate(heading - Math.PI / 2);
+    ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
     ctx.globalAlpha *= 0.25;
     ctx.beginPath();
     ctx.moveTo(0, 12.5);
@@ -3603,12 +3838,9 @@ function drawWake(){
   for (let i = 1; i < wakeTrail.length; i++){
     const t = i / wakeTrail.length;
     const alpha = t;
-    ctx.beginPath();
-    ctx.moveTo(wakeTrail[i-1].x, wakeTrail[i-1].y);
-    ctx.lineTo(wakeTrail[i].x, wakeTrail[i].y);
     ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
     ctx.lineWidth = 2 * m;
-    ctx.stroke();
+    strokeWorldLine(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
   }
 
   // Draw ghost wake during active laps or free preview
@@ -3616,12 +3848,9 @@ function drawWake(){
     for (let i = 1; i < ghostWakeTrail.length; i++){
       const t = i / ghostWakeTrail.length;
       const alpha = t;
-      ctx.beginPath();
-      ctx.moveTo(ghostWakeTrail[i-1].x, ghostWakeTrail[i-1].y);
-      ctx.lineTo(ghostWakeTrail[i].x, ghostWakeTrail[i].y);
       ctx.strokeStyle = `rgba(255,136,255,${alpha.toFixed(2)})`;
       ctx.lineWidth = 2 * m;
-      ctx.stroke();
+      strokeWorldLine(ghostWakeTrail[i - 1].x, ghostWakeTrail[i - 1].y, ghostWakeTrail[i].x, ghostWakeTrail[i].y);
     }
   }
 }
@@ -3663,47 +3892,21 @@ function drawOneBuoy(b) {
 
 function drawTimingLines() {
   const gateW = worldMarkerScale();
+  ctx.strokeStyle = '#FF0000';
+  ctx.lineWidth = gateW;
+  const seg = (line) => {
+    if (!line) return;
+    strokeWorldLine(line.x1, line.y1, line.x2, line.y2);
+  };
   if (currentTrack.useGates) {
-    ctx.beginPath();
-    ctx.moveTo(gates.start.x1, gates.start.y1);
-    ctx.lineTo(gates.start.x2, gates.start.y2);
-    ctx.strokeStyle = '#FF0000';
-    ctx.lineWidth = gateW;
-    ctx.stroke();
-
-    if (!currentTrack.gates.sameStartFinish) {
-      ctx.beginPath();
-      ctx.moveTo(gates.finish.x1, gates.finish.y1);
-      ctx.lineTo(gates.finish.x2, gates.finish.y2);
-      ctx.strokeStyle = '#FF0000';
-      ctx.lineWidth = gateW;
-      ctx.stroke();
-    }
-
+    seg(gates.start);
+    if (!currentTrack.gates.sameStartFinish) seg(gates.finish);
     if (currentTrack.parallelTrack) {
-      ctx.beginPath();
-      ctx.moveTo(gates.parallelStart.x1, gates.parallelStart.y1);
-      ctx.lineTo(gates.parallelStart.x2, gates.parallelStart.y2);
-      ctx.strokeStyle = '#FF0000';
-      ctx.lineWidth = gateW;
-      ctx.stroke();
-
-      if (!currentTrack.gates.sameStartFinish) {
-        ctx.beginPath();
-        ctx.moveTo(gates.parallelFinish.x1, gates.parallelFinish.y1);
-        ctx.lineTo(gates.parallelFinish.x2, gates.parallelFinish.y2);
-        ctx.strokeStyle = '#FF0000';
-        ctx.lineWidth = gateW;
-        ctx.stroke();
-      }
+      seg(gates.parallelStart);
+      if (!currentTrack.gates.sameStartFinish) seg(gates.parallelFinish);
     }
   } else {
-    ctx.beginPath();
-    ctx.moveTo(timingLine.x1, timingLine.y1);
-    ctx.lineTo(timingLine.x2, timingLine.y2);
-    ctx.strokeStyle = '#FF0000';
-    ctx.lineWidth = gateW;
-    ctx.stroke();
+    seg(timingLine);
   }
 }
 
@@ -3777,7 +3980,7 @@ function drawTelemetry() {
 
 function drawRacer() {
   withWorldMarker(pos.x, pos.y, () => {
-    ctx.rotate(heading - Math.PI / 2);
+    ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
     ctx.beginPath();
     ctx.moveTo(0, 12.5);
     ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
@@ -3901,6 +4104,25 @@ function introLineCameraFocus(intro) {
 
 function strokePolylineUntil(pts, untilLen) {
   if (pts.length < 2 || untilLen <= 0) return 0;
+  if (!cameraIsFlat()) {
+    let acc = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const len = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+      let x2 = pts[i].x;
+      let y2 = pts[i].y;
+      let drawLen = len;
+      if (acc + len > untilLen) {
+        const t = (untilLen - acc) / (len || 1);
+        x2 = pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t;
+        y2 = pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t;
+        drawLen = untilLen - acc;
+      }
+      strokeWorldLine(pts[i - 1].x, pts[i - 1].y, x2, y2);
+      acc += drawLen;
+      if (acc >= untilLen - 1e-6) break;
+    }
+    return acc;
+  }
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   let acc = 0;
@@ -3960,7 +4182,7 @@ function drawOneRacingLine(line, color, progress) {
     const a = pts[j - 1];
     const b = pts[j];
     const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    const ang = displayHeading(Math.atan2(b.y - a.y, b.x - a.x), a.x, a.y);
     let d = arrowSpacing - (distAlong % arrowSpacing);
     while (d <= segLen && distAlong + d <= until) {
       const t = d / segLen;
@@ -4003,20 +4225,12 @@ function drawIdealLine() {
   ctx.save();
   ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
   ctx.lineWidth   = worldMarkerScale();
-  ctx.beginPath();
-
-  let started = false;
+  const pts = [];
   for (let i = 0; i < idealLineData.frames.length; i++) {
     const frame = idealLineData.frames[i];
-    const { x: px, y: py } = trackMetersToPixel(frame.x, frame.y);
-    if (!started) {
-      ctx.moveTo(px, py);
-      started = true;
-    } else {
-      ctx.lineTo(px, py);
-    }
+    pts.push(trackMetersToPixel(frame.x, frame.y));
   }
-  ctx.stroke();
+  if (pts.length >= 2) strokePolylineUntil(pts, Infinity);
   ctx.restore();
 }
 
@@ -4040,6 +4254,7 @@ function gameLoop(timestamp) {
   stepRideIntro(timestamp);
 
   if (atlas.open) {
+    setGroundVisible(false);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     stepAtlas(timestamp);
@@ -4067,14 +4282,20 @@ function gameLoop(timestamp) {
     updateFollowCamera(dt);
   }
 
+  const flat = cameraIsFlat();
+  const camS = followCam.scale || 1;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = geoCanvasTransform ? '#0c1a22' : '#222';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const camS = followCam.scale || 1;
-  ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
-  drawGeoTiles();
+  if (flat) {
+    setGroundVisible(false);
+    ctx.fillStyle = geoCanvasTransform ? '#0c1a22' : '#222';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
+    drawGeoTiles();
+  } else {
+    setGroundVisible(true);
+    drawChaseGround();
+  }
   const intro = rideIntroFrame;
   const reveal = rideOverlay;
   if (geoCanvasTransform) {
@@ -4083,8 +4304,14 @@ function gameLoop(timestamp) {
     const overlay = 0.32 + 0.10 * overlayA;
     ctx.fillStyle = `rgba(6,14,20,${overlay})`;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
+    if (!flat) drawChaseHorizonFade();
+    if (flat) ctx.setTransform(camS, 0, 0, camS, followCam.tx, followCam.ty);
+  } else if (!flat) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawChaseHorizonFade();
   }
+
+  if (!flat) ctx.setTransform(1, 0, 0, 1, 0, 0);
 
   if (intro) {
     ctx.save();
