@@ -3355,11 +3355,7 @@ function drawGhost(x, y, heading) {
   withWorldMarker(x, y, () => {
     ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
     ctx.globalAlpha *= 0.25;
-    ctx.beginPath();
-    ctx.moveTo(0, 12.5);
-    ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
-    ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
-    ctx.closePath();
+    traceBoard();
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
   });
@@ -3627,6 +3623,7 @@ document.addEventListener('keydown', function(e) {
   if (gamePaused || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
     return;
   }
+  if (handleProKey(e)) return;
   if (e.target && e.target.closest && e.target.closest('#proRack')) return;
 
   if (atlasEls.confirm.classList.contains('open')) {
@@ -3652,12 +3649,6 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  if (document.body.classList.contains('pro-open') && e.key === 'Escape') {
-    e.preventDefault();
-    setProRackOpen(false);
-    return;
-  }
-  
   switch(e.key) {
     case 'ArrowUp':
     case 'i':
@@ -3706,6 +3697,12 @@ document.addEventListener('keydown', function(e) {
   // Cycle Z: race zoom → chase view → 1 km → 5 km
   if (e.key === 'z' || e.key === 'Z') {
     cycleZoomStop();
+  }
+
+  if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
+    e.preventDefault();
+    setProRackOpen(true);
+    return;
   }
 
   // O shows or hides the ghost's rider name. L stays lean-right.
@@ -4178,14 +4175,24 @@ function drawTelemetry() {
   ctx.restore();
 }
 
+// Local +Y is the nose (it maps onto the heading). The tail is the flat edge at -Y.
+function traceBoard() {
+  ctx.beginPath();
+  ctx.moveTo(0, 13);
+  ctx.bezierCurveTo(3.8, 9, 4.6, 2.6, 4.5, -4);
+  ctx.lineTo(4.3, -11);
+  ctx.quadraticCurveTo(4.1, -12.4, 3.3, -12.4);
+  ctx.lineTo(-3.3, -12.4);
+  ctx.quadraticCurveTo(-4.1, -12.4, -4.3, -11);
+  ctx.lineTo(-4.5, -4);
+  ctx.bezierCurveTo(-4.6, 2.6, -3.8, 9, 0, 13);
+  ctx.closePath();
+}
+
 function drawRacer() {
   withWorldMarker(pos.x, pos.y, () => {
     ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
-    ctx.beginPath();
-    ctx.moveTo(0, 12.5);
-    ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
-    ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
-    ctx.closePath();
+    traceBoard();
     fillRiderBoard();
   });
 }
@@ -4194,7 +4201,7 @@ function fillRiderBoard() {
   const meta = activeRider.meta;
   const stops = shineStops(BOARD_SHINE[meta.gloss]);
   if (stops.length) {
-    const g = ctx.createLinearGradient(0, -14, 0, 14);
+    const g = ctx.createLinearGradient(0, 13, 0, -12.4);
     stops.forEach(stop => g.addColorStop(stop.at, stop.color));
     ctx.fillStyle = g;
   } else {
@@ -5503,6 +5510,8 @@ export function resumeGame() {
 const highScoreManager = new HighScoreManager();
 
 let setProRackOpen = () => {};
+let proSliderIndex = 0;
+let proReverting = false;
 
 function shineStops(shine) {
   if (!shine || !shine.length) return [];
@@ -5539,6 +5548,8 @@ function proTuneDirty() {
   return JSON.stringify(riderState.tunes[riderState.id]) !== JSON.stringify(savedTunes[riderState.id]);
 }
 
+const BOARD_PREVIEW_PATH = 'M70 16 C104 42 116 100 116 168 C116 240 114 290 110 304 Q106 316 94 316 L46 316 Q34 316 30 304 C26 290 24 240 24 168 C24 100 36 42 70 16 Z';
+
 function boardMarkup(rider) {
   const stops = shineStops(BOARD_SHINE[rider.gloss]);
   const gradient = stops.length
@@ -5548,16 +5559,16 @@ function boardMarkup(rider) {
   const lightEdge = rider.id === 'antti' || rider.gloss === 'silver' || rider.gloss === 'red';
   const stroke = lightEdge ? 'rgba(255,255,255,0.82)' : 'rgba(0,0,0,0.35)';
   const sw = rider.id === 'antti' ? 2.5 : 1.25;
-  const streakEnd = rider.gloss === 'silver' || rider.gloss === 'red' ? 188 : 262;
+  const streakEnd = rider.gloss === 'silver' || rider.gloss === 'red' ? 190 : 250;
   const streakOpacity = rider.gloss === 'gold' ? 0.72 : (stops.length ? 0.42 : 0.18);
-  return `<svg viewBox="0 0 140 318" aria-hidden="true"><defs>
-    <clipPath id="proClip"><path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z"/></clipPath>
+  return `<svg viewBox="0 0 140 330" aria-hidden="true"><defs>
+    <clipPath id="proClip"><path d="${BOARD_PREVIEW_PATH}"/></clipPath>
     ${gradient}
   </defs>
-    <ellipse cx="70" cy="308" rx="28" ry="5" fill="rgba(0,0,0,0.35)"/>
-    <path d="M70 18 C104 58 112 120 104 176 C98 236 88 278 70 304 C52 278 42 236 36 176 C28 120 36 58 70 18 Z" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"/>
+    <ellipse cx="70" cy="322" rx="30" ry="4" fill="rgba(0,0,0,0.35)"/>
+    <path d="${BOARD_PREVIEW_PATH}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round"/>
     <g clip-path="url(#proClip)">
-      <path d="M78 42 C90 96 86 146 72 ${streakEnd}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity="${streakOpacity}"/>
+      <path d="M78 46 C92 100 88 150 74 ${streakEnd}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity="${streakOpacity}"/>
     </g>
   </svg>`;
 }
@@ -5565,8 +5576,7 @@ function boardMarkup(rider) {
 const proWide = window.matchMedia('(min-width: 1000px)');
 function rackIsWide() { return proWide.matches; }
 
-function paintSlider(row) {
-  const value = riderState.tunes[riderState.id][row.key];
+function paintSlider(row, value = riderState.tunes[riderState.id][row.key]) {
   const lim = RIDER_LIMITS[row.key];
   const t = (value - lim.min) / (lim.max - lim.min);
   const fill = document.getElementById(row.id + 'Fill');
@@ -5594,6 +5604,88 @@ function applySlider(row, raw) {
   if (save) save.classList.toggle('dirty', proTuneDirty());
 }
 
+function syncProSelection() {
+  const rows = document.querySelectorAll('#proSliders .proSlider');
+  rows.forEach((row, i) => {
+    const on = i === proSliderIndex;
+    row.classList.toggle('active', on);
+    const track = row.querySelector('.proTrack');
+    if (track) track.tabIndex = on ? 0 : -1;
+  });
+  if (!document.body.classList.contains('pro-open')) return;
+  const track = rows[proSliderIndex] && rows[proSliderIndex].querySelector('.proTrack');
+  if (track && document.activeElement !== track) track.focus({ preventScroll: true });
+}
+
+function saveProTune() {
+  savedTunes[riderState.id] = clampTune(riderState.tunes[riderState.id]);
+  riderState.tunes[riderState.id] = clampTune(savedTunes[riderState.id]);
+  persistSavedRiders();
+  syncProRack();
+}
+
+function revertProAndClose() {
+  if (proReverting) return;
+  const id = riderState.id;
+  const from = { ...riderState.tunes[id] };
+  const to = { ...savedTunes[id] };
+  const same = Object.keys(to).every(key => from[key] === to[key]);
+  if (same) {
+    setProRackOpen(false);
+    return;
+  }
+  proReverting = true;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const t0 = performance.now();
+  const dur = reduce ? 0 : 380;
+  const tick = now => {
+    const u = dur === 0 ? 1 : Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - u, 3);
+    const mixed = {};
+    for (const key of Object.keys(to)) mixed[key] = from[key] + (to[key] - from[key]) * e;
+    riderState.tunes[id] = clampTune(mixed);
+    applyActiveRider();
+    for (const row of PRO_SLIDERS) paintSlider(row, mixed[row.key]);
+    const save = document.getElementById('proSave');
+    if (save) save.classList.toggle('dirty', u < 1);
+    if (u < 1) requestAnimationFrame(tick);
+    else {
+      riderState.tunes[id] = clampTune(to);
+      applyActiveRider();
+      proReverting = false;
+      setProRackOpen(false);
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+function cycleProSlider(dir) {
+  proSliderIndex = (proSliderIndex + dir + PRO_SLIDERS.length) % PRO_SLIDERS.length;
+  syncProSelection();
+}
+
+function nudgeProSlider(dir) {
+  const row = PRO_SLIDERS[proSliderIndex];
+  const lim = RIDER_LIMITS[row.key];
+  applySlider(row, riderState.tunes[riderState.id][row.key] + dir * lim.step);
+}
+
+function handleProKey(e) {
+  if (!document.body.classList.contains('pro-open')) return false;
+  if (proReverting) {
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'ArrowUp') { e.preventDefault(); cycleProSlider(-1); return true; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); cycleProSlider(1); return true; }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); nudgeProSlider(-1); return true; }
+  if (e.key === 'ArrowRight') { e.preventDefault(); nudgeProSlider(1); return true; }
+  if (e.key === 'Enter' && !e.repeat) { e.preventDefault(); saveProTune(); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); revertProAndClose(); return true; }
+  if ((e.key === 'c' || e.key === 'C') && !e.repeat) { e.preventDefault(); setProRackOpen(false); return true; }
+  return false;
+}
+
 function syncProRack() {
   const rider = riderById(riderState.id);
   const front = document.getElementById('proFront');
@@ -5616,6 +5708,7 @@ function syncProRack() {
     front.setAttribute('aria-pressed', card && card.classList.contains('flipped') ? 'true' : 'false');
   }
   for (const row of PRO_SLIDERS) paintSlider(row);
+  syncProSelection();
   const save = document.getElementById('proSave');
   if (save) save.classList.toggle('dirty', proTuneDirty());
   const nameBtn = document.getElementById('ghostLabelBtn');
@@ -5674,7 +5767,8 @@ function initProRack() {
       if (e.button) return;
       e.preventDefault();
       e.stopPropagation();
-      track.focus();
+      proSliderIndex = PRO_SLIDERS.indexOf(row);
+      syncProSelection();
       track.setPointerCapture(e.pointerId);
       applySlider(row, valueFromX(e.clientX));
     });
@@ -5682,15 +5776,6 @@ function initProRack() {
       if (!track.hasPointerCapture(e.pointerId)) return;
       e.preventDefault();
       applySlider(row, valueFromX(e.clientX));
-    });
-    track.addEventListener('keydown', e => {
-      let dir = 0;
-      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') dir = 1;
-      else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') dir = -1;
-      else return;
-      e.preventDefault();
-      e.stopPropagation();
-      applySlider(row, riderState.tunes[riderState.id][row.key] + dir * lim.step);
     });
   }
 
@@ -5700,7 +5785,10 @@ function initProRack() {
     document.body.classList.toggle('pro-open', open);
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     if (!open && card) card.classList.remove('flipped');
-    if (open) syncProRack();
+    if (open) {
+      proSliderIndex = 0;
+      syncProRack();
+    }
   };
   setProRackOpen = setRackOpen;
   bindChromeTap(btn, () => setRackOpen(!rack.classList.contains('open')));
@@ -5724,12 +5812,7 @@ function initProRack() {
   };
   bindStep(document.getElementById('proPrev'), -1);
   bindStep(document.getElementById('proNext'), 1);
-  bindChromeTap(document.getElementById('proSave'), () => {
-    savedTunes[riderState.id] = clampTune(riderState.tunes[riderState.id]);
-    riderState.tunes[riderState.id] = clampTune(savedTunes[riderState.id]);
-    persistSavedRiders();
-    syncProRack();
-  });
+  bindChromeTap(document.getElementById('proSave'), () => saveProTune());
   bindChromeTap(document.getElementById('proReset'), () => {
     const stock = clampTune(presetTune(riderById(riderState.id)));
     riderState.tunes[riderState.id] = stock;

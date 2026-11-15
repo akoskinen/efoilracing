@@ -351,6 +351,11 @@
 	  transform: translateY(-50%);
 	  pointer-events: none;
 	}
+	.proSlider.active .proSliderHead { color: #7fd4ff; }
+	.proSlider.active .proThumb {
+	  height: 26px;
+	  background: #7fd4ff;
+	}
 	.proActions {
 	  display: flex;
 	  justify-content: space-between;
@@ -750,7 +755,7 @@
   <div id="rideChrome">
 	<a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
 	<div id="proDock">
-	  <button type="button" class="hudLink" id="pickProBtn" aria-expanded="false" aria-controls="proRack">Pick a Pro</button>
+	  <button type="button" class="hudLink" id="pickProBtn" aria-expanded="false" aria-controls="proRack">C Pick a Pro</button>
 	  <button type="button" class="hudLink" id="ghostLabelBtn" aria-pressed="true">O Ghost name</button>
 	  <div id="proRack">
 		<div id="proName"></div>
