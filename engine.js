@@ -4175,17 +4175,18 @@ function drawTelemetry() {
   ctx.restore();
 }
 
-// Local +Y is the nose (it maps onto the heading). The tail is the flat edge at -Y.
+// Local +Y is the nose (it maps onto the heading). The rails curve all the
+// way aft; only the last edge of the tail is flat.
 function traceBoard() {
   ctx.beginPath();
   ctx.moveTo(0, 13);
-  ctx.bezierCurveTo(3.8, 9, 4.6, 2.6, 4.5, -4);
-  ctx.lineTo(4.3, -11);
-  ctx.quadraticCurveTo(4.1, -12.4, 3.3, -12.4);
-  ctx.lineTo(-3.3, -12.4);
-  ctx.quadraticCurveTo(-4.1, -12.4, -4.3, -11);
-  ctx.lineTo(-4.5, -4);
-  ctx.bezierCurveTo(-4.6, 2.6, -3.8, 9, 0, 13);
+  ctx.bezierCurveTo(2.2, 11.4, 3.6, 7.4, 4.15, 3.4);
+  ctx.bezierCurveTo(4.55, -0.4, 4.15, -5.4, 3.15, -9);
+  ctx.quadraticCurveTo(2.55, -11.5, 1.9, -12.35);
+  ctx.lineTo(-1.9, -12.35);
+  ctx.quadraticCurveTo(-2.55, -11.5, -3.15, -9);
+  ctx.bezierCurveTo(-4.15, -5.4, -4.55, -0.4, -4.15, 3.4);
+  ctx.bezierCurveTo(-3.6, 7.4, -2.2, 11.4, 0, 13);
   ctx.closePath();
 }
 
@@ -4201,7 +4202,7 @@ function fillRiderBoard() {
   const meta = activeRider.meta;
   const stops = shineStops(BOARD_SHINE[meta.gloss]);
   if (stops.length) {
-    const g = ctx.createLinearGradient(0, 13, 0, -12.4);
+    const g = ctx.createLinearGradient(0, 13, 0, -12.35);
     stops.forEach(stop => g.addColorStop(stop.at, stop.color));
     ctx.fillStyle = g;
   } else {
@@ -5548,7 +5549,7 @@ function proTuneDirty() {
   return JSON.stringify(riderState.tunes[riderState.id]) !== JSON.stringify(savedTunes[riderState.id]);
 }
 
-const BOARD_PREVIEW_PATH = 'M70 16 C104 42 116 100 116 168 C116 240 114 290 110 304 Q106 316 94 316 L46 316 Q34 316 30 304 C26 290 24 240 24 168 C24 100 36 42 70 16 Z';
+const BOARD_PREVIEW_PATH = 'M70 18 C96 32 110 68 116 114 C122 162 116 208 106 250 C98 284 94 304 90 316 L50 316 C46 304 42 284 34 250 C24 208 18 162 24 114 C30 68 44 32 70 18 Z';
 
 function boardMarkup(rider) {
   const stops = shineStops(BOARD_SHINE[rider.gloss]);
@@ -5566,7 +5567,7 @@ function boardMarkup(rider) {
     ${gradient}
   </defs>
     <ellipse cx="70" cy="322" rx="30" ry="4" fill="rgba(0,0,0,0.35)"/>
-    <path d="${BOARD_PREVIEW_PATH}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="round"/>
+    <path d="${BOARD_PREVIEW_PATH}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="miter"/>
     <g clip-path="url(#proClip)">
       <path d="M78 46 C92 100 88 150 74 ${streakEnd}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity="${streakOpacity}"/>
     </g>

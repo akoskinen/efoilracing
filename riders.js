@@ -38,16 +38,18 @@ export const RIDER_LIMITS = {
 const TUNE_KEYS = Object.keys(RIDER_LIMITS);
 
 /**
- * Rack order. Piet stays on the slower lean. Manel, Carmine and Antti
- * all get the quick lean (60 °/s up to 30°, then 28 °/s).
+ * Rack order. Standard is the original cyan board (60 km/h in 18 s,
+ * lean 40 then 10 °/s, 72 m arc). KOSKINEN, MAKA and ARPA get the
+ * quick lean. VARKEVISSER keeps the slower lean.
  * gloss paints the board from nose to tail. Silver and red stay
  * their color through 70% of the length, then fall off to black.
  */
 export const RIDERS = [
-  { id: 'antti', name: 'Antti', color: '#141414', gloss: 'solid', topKmh: 60, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 62 },
-  { id: 'carmine', name: 'Carmine', color: '#d5d8de', gloss: 'silver', topKmh: 66, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 92 },
-  { id: 'piet', name: 'Piet', color: '#d4a017', gloss: 'gold', topKmh: 66, accelKmhS: 5.1, lean0: 40, lean30: 10, arc60: 100 },
-  { id: 'manel', name: 'Manel', color: '#e53935', gloss: 'red', topKmh: 66, accelKmhS: 5.1, lean0: 60, lean30: 28, arc60: 50 }
+  { id: 'standard', name: 'Standard', color: '#00ccff', gloss: 'solid', topKmh: 60, accelKmhS: 3.3, lean0: 40, lean30: 10, arc60: 72 },
+  { id: 'antti', name: 'KOSKINEN', color: '#141414', gloss: 'solid', topKmh: 60, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 62 },
+  { id: 'carmine', name: 'MAKA', color: '#d5d8de', gloss: 'silver', topKmh: 66, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 92 },
+  { id: 'piet', name: 'VARKEVISSER', color: '#d4a017', gloss: 'gold', topKmh: 66, accelKmhS: 5.1, lean0: 40, lean30: 10, arc60: 100 },
+  { id: 'manel', name: 'ARPA', color: '#e53935', gloss: 'red', topKmh: 66, accelKmhS: 5.1, lean0: 60, lean30: 28, arc60: 50 }
 ];
 
 /**
@@ -92,7 +94,7 @@ export function clampTune(tune) {
 }
 
 export function riderById(id) {
-  return RIDERS.find(r => r.id === id) || RIDERS.find(r => r.id === 'antti');
+  return RIDERS.find(r => r.id === id) || RIDERS.find(r => r.id === 'standard');
 }
 
 /** Scale only the 40 and 60 km/h rows so full lean at 60 km/h equals arc60. */
@@ -128,7 +130,7 @@ export function loadRiderState() {
   for (const rider of RIDERS) {
     tunes[rider.id] = clampTune({ ...presetTune(rider), ...(saved && saved.tunes && saved.tunes[rider.id]) });
   }
-  const id = RIDERS.some(r => r.id === (saved && saved.id)) ? saved.id : 'antti';
+  const id = RIDERS.some(r => r.id === (saved && saved.id)) ? saved.id : 'standard';
   return { id, showLabel: !(saved && saved.showLabel === false), tunes };
 }
 
