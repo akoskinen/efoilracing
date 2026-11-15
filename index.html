@@ -372,6 +372,68 @@
 	  padding: 0 2px;
 	  pointer-events: none;
 	}
+	#riderChrome {
+	  pointer-events: auto;
+	  width: 220px;
+	  margin-top: 4px;
+	  padding: 8px 10px 10px;
+	  box-sizing: border-box;
+	  background: rgba(12, 18, 24, 0.78);
+	  border: 1px solid rgba(255,255,255,0.14);
+	  border-radius: 12px;
+	  color: #fff;
+	  text-shadow: none;
+	  font-family: ui-sans-serif, system-ui, sans-serif;
+	  font-size: 12px;
+	  line-height: 1.3;
+	}
+	#riderChrome .riderPick,
+	#riderChrome .riderSlider {
+	  display: flex;
+	  flex-wrap: wrap;
+	  justify-content: space-between;
+	  align-items: center;
+	  gap: 2px 8px;
+	  margin: 0 0 6px;
+	  color: rgba(255,255,255,0.88);
+	  cursor: pointer;
+	}
+	#riderChrome b { font-weight: 600; color: #fff; }
+	#riderChrome select,
+	#riderChrome input[type="range"] {
+	  flex: 1 1 100%;
+	  width: 100%;
+	  margin: 0;
+	  pointer-events: auto;
+	  touch-action: none;
+	}
+	#riderChrome select {
+	  min-height: 44px;
+	  font: inherit;
+	  color: #fff;
+	  background: rgba(255,255,255,0.08);
+	  border: 1px solid rgba(255,255,255,0.22);
+	  border-radius: 8px;
+	  padding: 0 8px;
+	}
+	#riderChrome input[type="range"] {
+	  height: 36px;
+	  accent-color: #7fd4ff;
+	}
+	#viewChrome #ghostLabelBtn {
+	  display: block;
+	  width: 100%;
+	  min-height: 44px;
+	  margin-top: 2px;
+	  text-align: center;
+	  color: #fff;
+	  background: rgba(255,255,255,0.08);
+	  border: 1px solid rgba(255,255,255,0.22);
+	  border-radius: 8px;
+	  padding: 8px 6px;
+	}
+	#viewChrome #ghostLabelBtn.off { opacity: 0.45; }
+	#viewChrome #riderChrome button::after { content: none; }
 
 	#atlasHud {
 	  position: absolute;
@@ -549,6 +611,27 @@
 	</div>
 	<div class="viewChromeRow" id="pathChromeRow">
 	  <button type="button" id="pathBtn">P Hide Path</button>
+	</div>
+	<div id="riderChrome">
+	  <label class="riderPick" for="riderSelect">Rider
+	    <select id="riderSelect"></select>
+	  </label>
+	  <label class="riderSlider" for="riderTop">Top speed <b id="riderTopVal"></b>
+	    <input id="riderTop" type="range">
+	  </label>
+	  <label class="riderSlider" for="riderAccel">Acceleration <b id="riderAccelVal"></b>
+	    <input id="riderAccel" type="range">
+	  </label>
+	  <label class="riderSlider" for="riderLean0">Lean to 30° <b id="riderLean0Val"></b>
+	    <input id="riderLean0" type="range">
+	  </label>
+	  <label class="riderSlider" for="riderLean30">Lean past 30° <b id="riderLean30Val"></b>
+	    <input id="riderLean30" type="range">
+	  </label>
+	  <label class="riderSlider" for="riderArc">Arc at 60 km/h <b id="riderArcVal"></b>
+	    <input id="riderArc" type="range">
+	  </label>
+	  <button type="button" id="ghostLabelBtn" aria-pressed="true">O Name</button>
 	</div>
   </div>
   <div id="atlasHud">
