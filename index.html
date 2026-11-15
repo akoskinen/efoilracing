@@ -39,6 +39,7 @@
 	  transform: translateX(-50%);
 	  height: 100px;
 	  width: auto;
+	  max-width: min(240px, 50vw);
 	  z-index: 8;
 	  pointer-events: none;
 	  user-select: none;
@@ -209,6 +210,7 @@
 	  display: none;
 	}
 	#proRack.open {
+	  --pro-board-w: min(520px, calc(100vw - 24px), calc(60vh * 140 / 330));
 	  display: flex;
 	  align-items: center;
 	  justify-content: center;
@@ -234,8 +236,9 @@
 	  pointer-events: none;
 	}
 	.proArrow {
-	  position: relative;
-	  z-index: 2;
+	  position: absolute;
+	  top: 50%;
+	  z-index: 3;
 	  flex: 0 0 56px;
 	  width: 56px;
 	  height: 56px;
@@ -259,9 +262,17 @@
 	  transform: rotate(45deg);
 	}
 	.proArrowNext .proChevron { transform: rotate(-135deg); }
+	#proPrev {
+	  left: max(8px, calc(50% - var(--pro-board-w) / 2 - 60px));
+	  transform: translateY(-50%);
+	}
+	#proNext {
+	  left: min(calc(100% - 64px), calc(50% + var(--pro-board-w) / 2 + 4px));
+	  transform: translateY(-50%);
+	}
 	#proCard {
 	  position: relative;
-	  width: min(520px, calc(100vw - 128px));
+	  width: min(520px, calc(100vw - 24px));
 	  height: 60vh;
 	  transform-style: preserve-3d;
 	  transition: transform 0.6s cubic-bezier(0.2, 0.75, 0.2, 1);
@@ -370,12 +381,9 @@
 	#proSave.dirty { text-decoration: underline; }
 	@media (min-width: 1000px) {
 	  #proRack.open {
-	    display: grid;
-	    grid-template-columns: 72px minmax(0, 1fr) minmax(260px, 380px) 72px;
-	    align-items: center;
+	    --pro-board-w: min(42vw, calc(60vh * 140 / 330));
+	    display: block;
 	  }
-	  #proPrev { grid-column: 1; }
-	  #proNext { grid-column: 4; }
 	  #proCard {
 	    display: contents;
 	    width: auto;
@@ -384,31 +392,45 @@
 	  }
 	  #proCard.flipped { transform: none; }
 	  #proFront, #proTune {
-	    position: relative;
+	    position: absolute;
 	    inset: auto;
-	    transform: none;
 	    backface-visibility: visible;
 	    -webkit-backface-visibility: visible;
 	  }
 	  #proFront {
-	    grid-column: 2;
-	    justify-self: center;
-	    width: min(46vw, 520px);
+	    left: 50%;
+	    top: 50%;
+	    width: var(--pro-board-w);
 	    height: 60vh;
+	    transform: translate(-50%, -50%);
 	    cursor: grab;
 	  }
 	  #proFront:active { cursor: grabbing; }
 	  #proTune {
-	    grid-column: 3;
+	    top: 50%;
+	    left: calc(50% + var(--pro-board-w) / 2 + 72px);
+	    width: min(340px, calc(50vw - var(--pro-board-w) / 2 - 96px));
 	    height: auto;
 	    max-height: 70vh;
-	    padding: 0 36px 0 12px;
-	    overflow: visible;
+	    transform: translateY(-50%);
+	    padding: 0 8px 0 0;
+	    overflow: auto;
 	  }
 	  #proCard:not(.flipped) #proTune,
 	  #proCard.flipped #proFront { pointer-events: auto; }
 	}
+	@media (max-width: 999px) {
+	  #proRack.open:has(#proCard.flipped) #proPrev {
+	    left: max(8px, calc(50% - min(520px, calc(100vw - 24px)) / 2 - 60px));
+	  }
+	  #proRack.open:has(#proCard.flipped) #proNext {
+	    left: min(calc(100% - 64px), calc(50% + min(520px, calc(100vw - 24px)) / 2 + 4px));
+	  }
+	}
 	@media (max-width: 999px) and (max-height: 520px) {
+	  #proRack.open {
+	    --pro-board-w: min(520px, calc(100vw - 24px), calc(82vh * 140 / 330));
+	  }
 	  #proCard { height: 82vh; }
 	  #proName { top: 8px; }
 	}
@@ -551,13 +573,14 @@
 	}
 	#viewChrome {
 	  position: fixed;
-	  top: 10px;
-	  right: 10px;
+	  top: max(10px, env(safe-area-inset-top, 0px));
+	  right: max(10px, env(safe-area-inset-right, 0px));
 	  z-index: 1000;
 	  display: flex;
 	  flex-direction: column;
 	  align-items: flex-end;
 	  gap: 10px;
+	  max-width: calc(100vw - 20px);
 	  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 	  font-size: 13px;
 	  line-height: 1.35;
@@ -605,6 +628,7 @@
 	  width: auto;
 	  text-align: right;
 	}
+	#pathChromeRow[hidden] { display: none; }
 	#viewChrome a:hover,
 	#viewChrome button:hover { text-decoration: underline; }
 	#viewChrome .viewChromeSep {
@@ -807,8 +831,8 @@
 	  <span class="viewChromeSep" aria-hidden="true">•</span>
 	  <button type="button" id="fullscreenBtn">F Fullscreen</button>
 	</div>
-	<div class="viewChromeRow" id="pathChromeRow">
-	  <button type="button" id="pathBtn">P Hide Path</button>
+	<div class="viewChromeRow" id="pathChromeRow" hidden>
+	  <button type="button" id="pathBtn">P Show Path</button>
 	</div>
   </div>
   <div id="atlasHud">

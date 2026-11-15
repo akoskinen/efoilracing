@@ -26,18 +26,18 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 |---|---|
 | Arrows / IJKL | Steer and throttle |
 | **Z** | Cycle the camera: race zoom → **chase view** → **1 km** → **5 km** → race zoom. Pinch follows the same stops |
-| **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** |
+| **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** stays put when the course has a line |
 | G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map** |
 | **F** | Fullscreen. Top-right **F Fullscreen** |
 | **O** | Show or hide the ghost's rider name. Blue **O Ghost name** link above the ghost replay |
-| **C** | **C Pick a Pro**. The board fills the view: Standard, KOSKINEN, MAKA, VARKEVISSER, and ARPA. Swipe it or use the chevrons. On a desktop the sliders sit beside the board. On a phone, tap the board to flip to them. Up and Down move between the settings, Left and Right change the value, Enter saves, Esc eases the sliders back to the last save and closes. **Reset** restores that pro's stock setup |
+| **C** | **C Pick a Pro**. The board fills the view: Standard, KOSKINEN, MAKA, VARKEVISSER, and ARPA. Swipe it or use the blue arrows beside the board. On a desktop the sliders sit beside the board. On a phone, tap the board to flip to them. Up and Down move between the settings, Left and Right change the value, Enter saves, Esc eases the sliders back to the last save and closes. **Reset** restores that pro's stock setup |
 
 HUD chrome (T / F / P, and **Customize ghost**) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
 
 **Race zoom** uses an edge dead-zone follow camera (the rider stays in frame without wrapping the world). **Chase view** eases the camera down behind the rider and turns with heading, lagging a little so a quick lean does not spin the lake. Under about 10 km/h that wide tilt stays put. From there to 45 km/h the camera closes in to about 15 m behind the board and tips further forward, into a third-person view. The tilted view keeps the same satellite zoom and loads extra tiles around it, so the water does not end in an empty wedge. **1 km** and **5 km** ease back to a top-down view with the rider centered. Every step of Z, and every pinch between those stops, moves the camera rather than cutting.
 
-**T** opens a world map of saved geo tracks (country pins, then a dive to the venue). The flight always looks at the selected start, not a lerp from world-center, and race-level tiles crossfade in before the camera arrives. Mid-lap T pauses the race and music until you keep racing or leave. See [docs/MILESTONE-6.md](docs/MILESTONE-6.md).
+**T** opens a world map of saved geo tracks (country pins, then a dive to the venue). From the chase view the camera eases up to a top-down picture of the same water, then zooms out; the satellite stays on screen instead of fading to a cut. The flight always looks at the selected start, not a lerp from world-center, and race-level tiles crossfade in before the camera arrives. Mid-lap T pauses the race and music until you keep racing or leave. See [docs/MILESTONE-6.md](docs/MILESTONE-6.md).
 
 On geo tracks, satellite tiles **stream around the camera** and prefetch along heading/speed so panning and zoom-out should not flash empty water. Lower-zoom parents fill in while higher-zoom tiles load.
 

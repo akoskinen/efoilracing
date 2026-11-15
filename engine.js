@@ -1042,10 +1042,34 @@ function resizeCanvas(opts = {}) {
   }
   placeWorldPointOnScreen(pos.x, pos.y, sxFrac * w, syFrac * h);
 }
-window.addEventListener('resize', () => resizeCanvas());
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => resizeCanvas());
+function pinViewChrome() {
+  const el = document.getElementById('viewChrome');
+  if (!el) return;
+  const vv = window.visualViewport;
+  let top = 10;
+  let right = 10;
+  if (vv) {
+    top = Math.max(10, Math.round(vv.offsetTop + 10));
+    const rightGap = window.innerWidth - vv.offsetLeft - vv.width;
+    right = Math.max(10, Math.round(rightGap + 10));
+  }
+  el.style.top = `max(${top}px, env(safe-area-inset-top, 0px))`;
+  el.style.right = `max(${right}px, env(safe-area-inset-right, 0px))`;
 }
+
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  pinViewChrome();
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    resizeCanvas();
+    pinViewChrome();
+  });
+  window.visualViewport.addEventListener('scroll', pinViewChrome);
+}
+document.addEventListener('fullscreenchange', pinViewChrome);
+pinViewChrome();
 
 function savedTrackKey(id) {
   return 'saved_' + id;
@@ -1153,6 +1177,7 @@ let rideIntroPending = false;
 let rideIntroT0 = 0;
 let rideIntroFrame = null;
 let introCamReturning = false;
+let mapDepart = false;
 const rideHudEls = [
   document.getElementById('rideMeter'),
   document.getElementById('lapHistory'),
@@ -1530,7 +1555,10 @@ function startRideReveal() {
   rideIntroT0 = 0;
   rideIntroFrame = null;
   introCamReturning = false;
-  if (trackHasRacingLines(currentTrack)) setShowRacingLines(true);
+  if (trackHasPath(currentTrack)) {
+    revealHiddenPath(currentTrack);
+    setShowRacingLines(true);
+  }
   setRideHudOpacity(0);
 }
 
@@ -1734,8 +1762,16 @@ function beginAtlasWorldFlight() {
   setAtlasOpen(true);
 }
 
+function launchAtlasFlight() {
+  mapDepart = false;
+  const from = cameraLatLngZoom();
+  atlas.pendingFrom = from;
+  prefetchAtlasStops(from.lat, from.lng, from.zoom, ATLAS_WORLD.zoom);
+  beginAtlasWorldFlight();
+}
+
 function openAtlas({ immediate } = {}) {
-  if (atlas.open || atlas.concealing) return;
+  if (atlas.open || atlas.concealing || mapDepart) return;
   hideAtlasConfirm();
   if (immediate) {
     refreshAtlasChrome();
@@ -1750,12 +1786,22 @@ function openAtlas({ immediate } = {}) {
     setAtlasOpen(true);
     return;
   }
-  atlas.pendingFrom = cameraLatLngZoom();
-  atlas.concealing = true;
-  startRideConceal(() => {
-    atlas.concealing = false;
-    beginAtlasWorldFlight();
-  });
+  // Stay on the ride picture. A pitched chase view eases up to the same
+  // top-down frame, then the atlas zooms out from that exact lat/lng/zoom.
+  // Fading the ground out first was a cut, worst from the chase camera.
+  if (cameraIsFlat()) {
+    launchAtlasFlight();
+    return;
+  }
+  mapDepart = true;
+  const from = cameraLatLngZoom();
+  prefetchAtlasStops(from.lat, from.lng, from.zoom, ATLAS_WORLD.zoom);
+}
+
+function stepMapDepart() {
+  if (!mapDepart || atlas.open) return;
+  if (!cameraIsFlat()) return;
+  launchAtlasFlight();
 }
 
 function closeAtlas() {
@@ -1781,7 +1827,7 @@ function closeAtlas() {
 }
 
 function requestAtlas() {
-  if (atlas.concealing) return;
+  if (atlas.concealing || mapDepart) return;
   if (atlas.open) {
     closeAtlas();
     return;
@@ -2132,7 +2178,7 @@ function bindChromeTap(el, fn) {
 bindChromeTap(atlasEls.hint, () => requestAtlas());
 bindChromeTap(document.getElementById('fullscreenBtn'), () => toggleFullScreen());
 bindChromeTap(document.getElementById('pathBtn'), () => {
-  if (trackHasRacingLines(currentTrack)) setShowRacingLines(!showRacingLines);
+  toggleRacingPath();
 });
 bindChromeTap(document.getElementById('customizeGhostBtn'), () => {
   const panel = document.getElementById('ghostCustomize');
@@ -2302,6 +2348,32 @@ function trackHasRacingLines(track) {
   return (track?.racingLines || []).some(l => l.visible !== false && l.points?.length >= 2);
 }
 
+function trackHasPath(track) {
+  return (track?.racingLines || []).some(l => l.points?.length >= 2);
+}
+
+function pathIsShown(track) {
+  return showRacingLines && trackHasRacingLines(track);
+}
+
+function revealHiddenPath(track) {
+  const lines = track?.racingLines || [];
+  if (!lines.length || trackHasRacingLines(track)) return;
+  lines.forEach(l => {
+    if (l.points?.length >= 2) l.visible = true;
+  });
+}
+
+function toggleRacingPath() {
+  if (!trackHasPath(currentTrack)) return;
+  if (pathIsShown(currentTrack)) {
+    setShowRacingLines(false);
+    return;
+  }
+  revealHiddenPath(currentTrack);
+  setShowRacingLines(true);
+}
+
 function setShowRacingLines(on) {
   showRacingLines = !!on;
   updatePathButtonState();
@@ -2337,11 +2409,12 @@ function setGhostCustomizeOpen(on) {
 function updatePathButtonState() {
   const button = document.getElementById('pathBtn');
   const row = document.getElementById('pathChromeRow');
-  const hasPath = trackHasRacingLines(currentTrack);
-  if (row) row.style.display = hasPath ? '' : 'none';
+  const hasPath = trackHasPath(currentTrack);
+  if (row) row.hidden = !hasPath;
   if (!button) return;
-  button.textContent = showRacingLines ? 'P Hide Path' : 'P Show Path';
-  button.title = showRacingLines ? 'Hide racing line (P)' : 'Show racing line (P)';
+  const shown = pathIsShown(currentTrack);
+  button.textContent = shown ? 'P Hide Path' : 'P Show Path';
+  button.title = shown ? 'Hide racing line (P)' : 'Show racing line (P)';
 }
 
 function updateRacingLineToggleVisibility() {
@@ -2980,14 +3053,17 @@ function updateFollowCamera(dt) {
     if (dx * dx + dy * dy < 36) introCamReturning = false;
   }
 
-  const pitchA = 1 - Math.exp(-dt / PITCH_TAU);
-  const targetPitch = isChaseZoom() ? pose.pitch : 0;
+  const lifting = mapDepart;
+  const chasing = isChaseZoom() && !lifting;
+  const pitchTau = lifting ? 0.34 : PITCH_TAU;
+  const pitchA = 1 - Math.exp(-dt / pitchTau);
+  const targetPitch = chasing ? pose.pitch : 0;
   const flatD = focalLength(h) / Math.max(s, 1e-4);
-  const targetDist = isChaseZoom() ? pose.distance : flatD;
+  const targetDist = chasing ? pose.distance : flatD;
   if (!(viewDistance > 1)) viewDistance = targetDist;
   viewPitch += (targetPitch - viewPitch) * pitchA;
   viewDistance += (targetDist - viewDistance) * pitchA;
-  viewBearing = easeAngle(viewBearing, isChaseZoom() ? hd : FLAT_BEARING, dt, BEARING_TAU);
+  viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, lifting ? 0.34 : BEARING_TAU);
 }
 
 function worldMarkerScale() {
@@ -3090,6 +3166,7 @@ function strokeWorldLine(x1, y1, x2, y2) {
 }
 
 function cycleZoomStop(dir = 1) {
+  if (mapDepart) mapDepart = false;
   const n = ZOOM_STOPS.length;
   const step = dir < 0 ? -1 : 1;
   zoomStopIndex = (zoomStopIndex + step + n) % n;
@@ -3099,6 +3176,7 @@ function cycleZoomStop(dir = 1) {
 
 /** Discrete zoom for pinch: +1 zooms out (race→chase→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
 function nudgeZoomStop(dir) {
+  if (mapDepart) mapDepart = false;
   const n = ZOOM_STOPS.length;
   const next = zoomStopIndex + (dir < 0 ? -1 : 1);
   if (next < 0 || next >= n) return false;
@@ -3679,9 +3757,7 @@ document.addEventListener('keydown', function(e) {
 
   // Toggle 'P' to show/hide the racing line path
   if (e.key === 'p' || e.key === 'P') {
-    if (trackHasRacingLines(currentTrack)) {
-      setShowRacingLines(!showRacingLines);
-    }
+    toggleRacingPath();
   }
 
   // Toggle 'G' to keep the current ghost, or restore the previous lap
@@ -4504,6 +4580,15 @@ function gameLoop(timestamp) {
     update(dt);
   } else if (rideIntroFrame) {
     updateFollowCamera(dt);
+  }
+  stepMapDepart();
+  if (atlas.open) {
+    setGroundVisible(false);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawAtlas();
+    requestAnimationFrame(gameLoop);
+    return;
   }
 
   const flat = cameraIsFlat();
