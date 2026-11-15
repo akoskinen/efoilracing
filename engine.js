@@ -4229,13 +4229,19 @@ function drawBuoyDot(x, y, isTurn, passSide) {
   }
   // 1 km and 5 km: draw the real disc so it shrinks into a dot. The
   // usual marker scale would hold it at race size after the zoom settles.
+  // The white ring is the same one the tilted disc uses, so the mark does
+  // not change on the frame the camera finishes flattening.
   if (isOverviewZoom()) {
     const s = Math.max(followCam.scale || 1, 0.02);
-    const dot = Math.max(r, 0.9 / s);
+    const grow = Math.max(1, (0.9 / s) / r);
     ctx.save();
     ctx.translate(x, y);
     ctx.beginPath();
-    ctx.arc(0, 0, dot, 0, Math.PI * 2);
+    ctx.arc(0, 0, (r + ring / 2) * grow, 0, Math.PI * 2);
+    ctx.fillStyle = paint.stroke;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(0.4, (r - ring / 2) * grow), 0, Math.PI * 2);
     ctx.fillStyle = paint.fill;
     ctx.fill();
     ctx.restore();
