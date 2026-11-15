@@ -7,6 +7,10 @@
 ////////////////////////////////////////////////////////////
 
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
+import {
+  RIDERS, RIDER_LIMITS, BANK_ANGLE_MAX as RIDER_BANK_MAX,
+  riderById, riderDynamics, loadRiderState, saveRiderState
+} from "./riders.js";
 import { HighScoreManager } from './highscores.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
@@ -2332,11 +2336,7 @@ function updateFullscreenButtonState() {
 }
 
 // --- Game Physics and Control Variables ---
-const maxSpeed       = 100;
-const timeToMaxSpeed = 18;
-const accelRate      = maxSpeed / timeToMaxSpeed;
-const decelRate      = 12.333;
-const speedConversion= 0.6;
+const speedConversion = 0.6;  // HUD km/h = internal speed × this
 // Legacy pixel-speed tuning (built-ins at ~4 px/m). Kept only as the reference
 // for meter-based collision thresholds that were authored in canvas pixels.
 const SPEED_CALIBRATION_PX_PER_M = 4;
@@ -2376,9 +2376,7 @@ function advancePositionBySpeed(speedKmh, dt) {
   pos.y = p.y;
 }
 
-const BANK_ANGLE_MAX = 55;
-const bankRate0to30  = 40;
-const bankRate30to55 = 10;
+const BANK_ANGLE_MAX = RIDER_BANK_MAX;
 let bankAngleDeg     = 0;
 const bankDecay      = 0.9;
 
@@ -2396,7 +2394,7 @@ function updateBankAngle(dt) {
       bankAngleDeg = 0;
       sign = targetSign;
     }
-    let rate = (currentMag < 30) ? bankRate0to30 : bankRate30to55;
+    let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
     currentMag += rate * dt;
     if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
     bankAngleDeg = sign * currentMag;
@@ -2412,20 +2410,7 @@ function updateBankAngle(dt) {
 }
 
 // --- Turn Radius Interpolation ---
-const baseline30Data = [
-  { speed:10, radius:10 },
-  { speed:15, radius:15 },
-  { speed:30, radius:30 },
-  { speed:40, radius:65 },
-  { speed:60, radius:80 }
-];
-const reduceData = [
-  { speed:10, factor:0.85 },
-  { speed:15, factor:0.82 },
-  { speed:30, factor:0.83 },
-  { speed:40, factor:0.85 },
-  { speed:60, factor:0.90 }
-];
+// The 40 and 60 km/h rows come from the selected rider (see riders.js).
 
 function interpPiecewise(table, spd){
   let s = Math.max(10, Math.min(60, spd));
@@ -2449,8 +2434,8 @@ function interpPiecewise(table, spd){
 
 function getTurnRadius(speedKmh, angleDeg) {
   let ang = Math.max(0, Math.min(55, angleDeg));
-  const base30    = interpPiecewise(baseline30Data, speedKmh);
-  const factorMax = interpPiecewise(reduceData,          speedKmh);
+  const base30    = interpPiecewise(activeRider.baseline, speedKmh);
+  const factorMax = interpPiecewise(activeRider.reduce,  speedKmh);
   const radiusAt50= base30 * factorMax;
   
   if (ang < 30) {
@@ -2471,6 +2456,18 @@ const lowFactor = 0.02084;
 // --- Movement & Telemetry ---
 let heading = 0;
 let speed   = 0;
+
+let riderState = loadRiderState();
+let activeRider = null;
+
+function applyActiveRider() {
+  const id = riderState.id;
+  activeRider = riderDynamics(riderState.tunes[id]);
+  activeRider.meta = riderById(id);
+  if (speed > activeRider.maxSpeed) speed = activeRider.maxSpeed;
+}
+
+applyActiveRider();
 const pos   = { x: 0, y: 0 };
 let oldPos  = { x: 0, y: 0 };
 
@@ -2973,6 +2970,7 @@ function drawGhostFrame() {
     }
 
     drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame));
+    drawGhostRiderLabel(ghostX, ghostY);
 
     ghostWakeTrail.push({ x: ghostX, y: ghostY });
     const targetWakeLength = 200;
@@ -2994,6 +2992,47 @@ function drawGhost(x, y, heading) {
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
   });
+}
+
+function ghostNameText(ghost) {
+  if (!ghost) return '';
+  const raw = ghost.riderName || ghost.lineName || ghost.riderLabel || '';
+  const text = String(raw).replace(/\.[^.]+$/, '').trim();
+  if (!text) return '';
+  return text.length > 24 ? `${text.slice(0, 23)}…` : text;
+}
+
+function drawGhostRiderLabel(worldX, worldY) {
+  if (!riderState.showLabel || !currentGhost) return;
+  const name = ghostNameText(currentGhost);
+  if (!name) return;
+  const s = followCam.scale || 1;
+  const sx = worldX * s + followCam.tx;
+  const sy = worldY * s + followCam.ty;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = '600 13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const textW = ctx.measureText(name).width;
+  const h = 22;
+  const w = Math.ceil(textW) + 18;
+  const x = Math.round(sx - w / 2);
+  const y = Math.round(sy - 38);
+  ctx.fillStyle = 'rgba(10, 16, 22, 0.88)';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, 6);
+  else ctx.rect(x, y, w, h);
+  ctx.fill();
+  let accent = '#ff88ff';
+  if (currentGhost.riderId && RIDERS.some(r => r.id === currentGhost.riderId)) {
+    accent = currentGhost.riderId === 'antti' ? '#f2f2f2' : riderById(currentGhost.riderId).color;
+  }
+  ctx.fillStyle = accent;
+  ctx.fillRect(x, y, 3, h);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(name, x + 10, y + h / 2);
+  ctx.restore();
 }
 
 function startLap(){
@@ -3158,6 +3197,8 @@ function completeLap() {
             distance: distanceTraveled,
             time: currentLapTime,
             avgSpeed: avgSpeedKmh, // Store the calculated average speed
+            riderName: activeRider.meta.name,
+            riderId: activeRider.meta.id,
             frames: recordedGhost.map(frame => ({
                 ...frame,
                 finalLapTime: currentLapTime
@@ -3203,7 +3244,8 @@ const keys = {};
 
 document.addEventListener('keydown', function(e) {
   // Don't process keyboard shortcuts if game is paused or if typing in an input
-  if (gamePaused || (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+  const tag = e.target && e.target.tagName;
+  if (gamePaused || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
     return;
   }
 
@@ -3278,6 +3320,12 @@ document.addEventListener('keydown', function(e) {
   // Cycle Z: race zoom → 1 km → 5 km → race zoom
   if (e.key === 'z' || e.key === 'Z') {
     cycleZoomStop();
+  }
+
+  // O shows or hides the ghost's rider name. L stays lean-right.
+  if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+    e.preventDefault();
+    toggleGhostLabel();
   }
 });
 
@@ -3512,12 +3560,12 @@ function update(dt){
   prevPos.y = pos.y;
   
   if (keys['ArrowUp']) {
-    speed += accelRate * dt;
+    speed += activeRider.accelRate * dt;
   }
   if (keys['ArrowDown']) {
-    speed -= decelRate * dt;
+    speed -= activeRider.decelRate * dt;
   }
-  speed = Math.max(0, Math.min(maxSpeed, speed));
+  speed = Math.max(0, Math.min(activeRider.maxSpeed, speed));
   
   updateBankAngle(dt);
   
@@ -3532,7 +3580,7 @@ function update(dt){
 
   // Update wind volume based on speed and ensure it's playing
   AudioManager.ensureWindPlaying();
-  AudioManager.sounds.wind.volume = speed / maxSpeed;
+  AudioManager.sounds.wind.volume = speed / activeRider.maxSpeed;
   
   updateRideMeter(speedKmh);
 
@@ -3783,9 +3831,34 @@ function drawRacer() {
     ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
     ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
     ctx.closePath();
-    ctx.fillStyle = '#00ccff';
-    ctx.fill();
+    fillRiderBoard();
   });
+}
+
+function fillRiderBoard() {
+  const meta = activeRider.meta;
+  if (meta.gloss === 'gold') {
+    const g = ctx.createLinearGradient(-4, -14, 5, 14);
+    g.addColorStop(0, '#fff6cf');
+    g.addColorStop(0.38, '#f2d56a');
+    g.addColorStop(0.62, '#d4a017');
+    g.addColorStop(1, '#8a6410');
+    ctx.fillStyle = g;
+  } else if (meta.gloss === 'silver') {
+    const g = ctx.createLinearGradient(-4, -14, 5, 14);
+    g.addColorStop(0, '#ffffff');
+    g.addColorStop(0.42, '#e7e9ee');
+    g.addColorStop(0.72, '#b7bcc6');
+    g.addColorStop(1, '#7c838f');
+    ctx.fillStyle = g;
+  } else {
+    ctx.fillStyle = meta.color;
+  }
+  ctx.fill();
+  const dark = meta.id === 'antti';
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = dark ? 1.25 : 0.6;
+  ctx.stroke();
 }
 
 // --- Ideal Line Toggle ---
@@ -4058,7 +4131,7 @@ function gameLoop(timestamp) {
 
   if (!settleReveal && !rideSimPaused) {
     wakeTrail.push({ x: pos.x, y: pos.y });
-    const targetWakeLength = (speed / maxSpeed) * 200;
+    const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
     }
@@ -5021,7 +5094,7 @@ function updateRideMeter(speedKmh) {
     const bar = document.getElementById('speedBar');
     const fill = document.getElementById('speedBarFill');
     if (bar && fill) {
-      const pct = Math.max(0, Math.min(1, speed / maxSpeed));
+      const pct = Math.max(0, Math.min(1, speed / activeRider.maxSpeed));
       fill.style.width = `${pct * 100}%`;
       fill.style.backgroundSize = `${bar.clientWidth}px 100%`;
     }
@@ -5058,6 +5131,84 @@ export function resumeGame() {
 }
 
 const highScoreManager = new HighScoreManager();
+
+const RIDER_SLIDERS = [
+  { id: 'riderTop', key: 'topKmh', unit: 'km/h', digits: 1 },
+  { id: 'riderAccel', key: 'accelKmhS', unit: 'km/h/s', digits: 1 },
+  { id: 'riderLean0', key: 'lean0', unit: '°/s', digits: 0 },
+  { id: 'riderLean30', key: 'lean30', unit: '°/s', digits: 0 },
+  { id: 'riderArc', key: 'arc60', unit: 'm', digits: 0 }
+];
+
+function formatTuneValue(value, digits) {
+  return digits ? Number(value).toFixed(digits) : String(Math.round(value));
+}
+
+function syncRiderControls() {
+  const sel = document.getElementById('riderSelect');
+  if (!sel) return;
+  if (sel.value !== riderState.id) sel.value = riderState.id;
+  const tune = riderState.tunes[riderState.id];
+  for (const row of RIDER_SLIDERS) {
+    const input = document.getElementById(row.id);
+    const label = document.getElementById(row.id + 'Val');
+    if (input && document.activeElement !== input) input.value = String(tune[row.key]);
+    if (label) label.textContent = `${formatTuneValue(tune[row.key], row.digits)} ${row.unit}`;
+  }
+  const btn = document.getElementById('ghostLabelBtn');
+  if (btn) {
+    btn.setAttribute('aria-pressed', riderState.showLabel ? 'true' : 'false');
+    btn.classList.toggle('off', !riderState.showLabel);
+  }
+}
+
+function toggleGhostLabel() {
+  riderState.showLabel = !riderState.showLabel;
+  saveRiderState(riderState);
+  syncRiderControls();
+}
+
+function initRiderChrome() {
+  const sel = document.getElementById('riderSelect');
+  if (!sel) return;
+  for (const rider of RIDERS) {
+    const opt = document.createElement('option');
+    opt.value = rider.id;
+    opt.textContent = rider.name;
+    sel.appendChild(opt);
+  }
+  for (const row of RIDER_SLIDERS) {
+    const input = document.getElementById(row.id);
+    if (!input) continue;
+    const lim = RIDER_LIMITS[row.key];
+    input.min = String(lim.min);
+    input.max = String(lim.max);
+    input.step = String(lim.step);
+    input.addEventListener('input', () => {
+      riderState.tunes[riderState.id] = {
+        ...riderState.tunes[riderState.id],
+        [row.key]: Number(input.value)
+      };
+      applyActiveRider();
+      saveRiderState(riderState);
+      const label = document.getElementById(row.id + 'Val');
+      if (label) {
+        label.textContent = `${formatTuneValue(riderState.tunes[riderState.id][row.key], row.digits)} ${row.unit}`;
+      }
+    });
+  }
+  sel.addEventListener('change', () => {
+    riderState.id = sel.value;
+    applyActiveRider();
+    saveRiderState(riderState);
+    syncRiderControls();
+  });
+  const btn = document.getElementById('ghostLabelBtn');
+  if (btn) bindChromeTap(btn, toggleGhostLabel);
+  syncRiderControls();
+}
+
+initRiderChrome();
 
 requestAnimationFrame(gameLoop);
 
