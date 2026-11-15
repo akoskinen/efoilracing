@@ -8,7 +8,7 @@
 
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
 import {
-  FLAT_BEARING, CHASE_PITCH, chaseLookahead, makeCamera, project, unproject,
+  FLAT_BEARING, CHASE_PITCH, chaseLookahead, makeCamera, project,
   easeAngle, isFlatView
 } from "./chaseCam.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
@@ -333,10 +333,9 @@ function screenToWorld(sx, sy, s, tx, ty) {
   s = s ?? followCam.scale ?? 1;
   tx = tx ?? followCam.tx;
   ty = ty ?? followCam.ty;
-  if (!cameraIsFlat()) {
-    const cam = viewCamera({ scale: s, tx, ty });
-    return unproject(cam, sx, sy, horizonReach());
-  }
+  // Tile keys always come from the flat camera at this scale. A pitched view
+  // reuses those same tiles and only changes how they are projected, so a
+  // tilt does not fetch a coarser zoom or a neighboring place.
   return { x: (sx - tx) / s, y: (sy - ty) / s };
 }
 
@@ -2871,11 +2870,6 @@ function updateFollowCamera(dt) {
 function worldMarkerScale() {
   const s = followCam.scale || 1;
   return s < 0.995 ? 1 / s : 1;
-}
-
-function horizonReach() {
-  const ppm = pixelsPerMeter() || 4;
-  return 1800 * ppm;
 }
 
 function viewCamera(overrides) {
