@@ -156,7 +156,7 @@ export function createGroundRenderer(canvas) {
 export function groundQuads(camera, blits) {
   const out = [];
   const near = 2;
-  function push(img, dest, u0, v0, u1, v1, level) {
+  function push(img, dest, u0, v0, u1, v1, level, behind) {
     const pts = [
       { x: dest.x, y: dest.y, u: u0, v: v0 },
       { x: dest.x + dest.w, y: dest.y, u: u1, v: v0 },
@@ -165,22 +165,24 @@ export function groundQuads(camera, blits) {
     ];
     const depths = pts.map(p => viewDepth(camera, p.x, p.y));
     if (depths.every(d => d > near)) {
-      out.push({ img, pts, depth: Math.min(...depths) });
+      // Backdrop tiles span the sharp view too. Sort them behind so the
+      // higher zoom paints over them and only the empty horizon shows through.
+      out.push({ img, pts, depth: behind ? 1e9 : Math.min(...depths) });
       return;
     }
-    if (depths.every(d => d <= near) || level >= 3) return;
+    if (depths.every(d => d <= near) || level >= 6) return;
     const hw = dest.w / 2;
     const hh = dest.h / 2;
     const mu = (u0 + u1) / 2;
     const mv = (v0 + v1) / 2;
     const mx = dest.x + hw;
     const my = dest.y + hh;
-    push(img, { x: dest.x, y: dest.y, w: hw, h: hh }, u0, v0, mu, mv, level + 1);
-    push(img, { x: mx, y: dest.y, w: hw, h: hh }, mu, v0, u1, mv, level + 1);
-    push(img, { x: dest.x, y: my, w: hw, h: hh }, u0, mv, mu, v1, level + 1);
-    push(img, { x: mx, y: my, w: hw, h: hh }, mu, mv, u1, v1, level + 1);
+    push(img, { x: dest.x, y: dest.y, w: hw, h: hh }, u0, v0, mu, mv, level + 1, behind);
+    push(img, { x: mx, y: dest.y, w: hw, h: hh }, mu, v0, u1, mv, level + 1, behind);
+    push(img, { x: dest.x, y: my, w: hw, h: hh }, u0, mv, mu, v1, level + 1, behind);
+    push(img, { x: mx, y: my, w: hw, h: hh }, mu, mv, u1, v1, level + 1, behind);
   }
-  for (const b of blits) push(b.img, b.dest, b.u0, b.v0, b.u1, b.v1, 0);
+  for (const b of blits) push(b.img, b.dest, b.u0, b.v0, b.u1, b.v1, 0, !!b.behind);
   out.sort((a, b) => b.depth - a.depth);
   return out;
 }

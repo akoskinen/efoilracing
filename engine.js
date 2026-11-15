@@ -8,8 +8,8 @@
 
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
 import {
-  FLAT_BEARING, CHASE_PITCH, chaseLookahead, makeCamera, project,
-  easeAngle, isFlatView
+  FLAT_BEARING, chaseFraming, makeCamera, project, unproject, viewDepth,
+  easeAngle, isFlatView, focalLength, expandTileIndexRange
 } from "./chaseCam.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
@@ -333,9 +333,9 @@ function screenToWorld(sx, sy, s, tx, ty) {
   s = s ?? followCam.scale ?? 1;
   tx = tx ?? followCam.tx;
   ty = ty ?? followCam.ty;
-  // Tile keys always come from the flat camera at this scale. A pitched view
-  // reuses those same tiles and only changes how they are projected, so a
-  // tilt does not fetch a coarser zoom or a neighboring place.
+  // The zoom level stays on this flat camera. A pitched view widens the
+  // same-zoom rectangle and fills past it with coarser parents, so the tilt
+  // never swaps the whole view onto a different zoom.
   return { x: (sx - tx) / s, y: (sy - ty) / s };
 }
 
@@ -597,20 +597,87 @@ function currentGeoTilePlan(forPrefetch) {
   const world = cameraWorldBounds(forPrefetch ? 0.15 : 0.06, look, s, tx, ty);
   const merc = worldBoundsToMercator(world);
   const range = chooseDrawZoom(merc, tZoom);
-  if (!forPrefetch) return range;
-
-  const tilePx = 256 * Math.pow(2, tZoom - range.z) * geoCanvasTransform.scale;
-  const extra = Math.max(GEO_PREFETCH_PAD_TILES, Math.ceil(look / Math.max(tilePx, 1)));
-  const hx = Math.cos(heading);
-  const hy = Math.sin(heading);
-  range.tx0 -= GEO_PREFETCH_PAD_TILES + (hx < -0.3 ? extra : 0);
-  range.tx1 += GEO_PREFETCH_PAD_TILES + (hx > 0.3 ? extra : 0);
-  range.ty0 -= GEO_PREFETCH_PAD_TILES + (hy < -0.3 ? extra : 0);
-  range.ty1 += GEO_PREFETCH_PAD_TILES + (hy > 0.3 ? extra : 0);
-  return range;
+  if (forPrefetch) {
+    const tilePx = 256 * Math.pow(2, tZoom - range.z) * geoCanvasTransform.scale;
+    const extra = Math.max(GEO_PREFETCH_PAD_TILES, Math.ceil(look / Math.max(tilePx, 1)));
+    const hx = Math.cos(heading);
+    const hy = Math.sin(heading);
+    range.tx0 -= GEO_PREFETCH_PAD_TILES + (hx < -0.3 ? extra : 0);
+    range.tx1 += GEO_PREFETCH_PAD_TILES + (hx > 0.3 ? extra : 0);
+    range.ty0 -= GEO_PREFETCH_PAD_TILES + (hy < -0.3 ? extra : 0);
+    range.ty1 += GEO_PREFETCH_PAD_TILES + (hy > 0.3 ? extra : 0);
+  }
+  return expandChaseTileRange(range, forPrefetch);
 }
 
-function enqueueTileRange(range, basePriority) {
+function wantsChaseTiles() {
+  return isChaseZoom() || !cameraIsFlat();
+}
+
+// How far past the rider a tilted view may ask for imagery, in ground meters.
+// Zoom stays locked; only the tile rectangle grows.
+const CHASE_TILE_REACH_M = 520;
+
+function expandChaseTileRange(range, forPrefetch) {
+  if (!range || !wantsChaseTiles() || !canvas.width || !geoCanvasTransform) return range;
+  let cam = viewCamera();
+  if (forPrefetch && isChaseZoom()) {
+    const pose = currentChasePose(canvas.height, followCam.scale || 1);
+    cam = viewCamera({ pitch: pose.pitch, bearing: heading, distance: pose.distance });
+  }
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const reach = CHASE_TILE_REACH_M * ppm;
+  const k = Math.pow(2, range.z - geoCanvasTransform.zoom);
+  const extras = [];
+  const w = canvas.width;
+  const h = canvas.height;
+  for (let iy = 0; iy <= 5; iy++) {
+    for (let ix = 0; ix <= 5; ix++) {
+      const p = unproject(cam, (w * ix) / 5, (h * iy) / 5, reach);
+      const merc = canvasToMercator(p.x, p.y);
+      extras.push({
+        tx: Math.floor(merc.x * k / 256),
+        ty: Math.floor(merc.y * k / 256)
+      });
+    }
+  }
+  const widened = expandTileIndexRange(range, extras, { pad: 2, cap: 160 });
+  widened.backdrop = chaseBackdropRanges(range.z, extras);
+  return widened;
+}
+
+function chaseBackdropRanges(fineZ, extras) {
+  const out = [];
+  for (const drop of [2, 1]) {
+    const z = fineZ - drop;
+    if (z < 8) continue;
+    const n = 1 << drop;
+    const div = (v) => Math.floor(v / n);
+    let tx0 = Infinity;
+    let tx1 = -Infinity;
+    let ty0 = Infinity;
+    let ty1 = -Infinity;
+    for (const e of extras) {
+      if (!Number.isFinite(e.tx) || !Number.isFinite(e.ty)) continue;
+      const tx = div(e.tx);
+      const ty = div(e.ty);
+      if (tx < tx0) tx0 = tx;
+      if (tx > tx1) tx1 = tx;
+      if (ty < ty0) ty0 = ty;
+      if (ty > ty1) ty1 = ty;
+    }
+    if (!Number.isFinite(tx0)) continue;
+    const coarse = expandTileIndexRange(
+      { z, tx0, tx1, ty0, ty1 },
+      [],
+      { pad: 1, cap: drop === 1 ? 64 : 24 }
+    );
+    out.push(coarse);
+  }
+  return out;
+}
+
+function enqueueTileRange(range, basePriority, parentLevels = 1, parentPriority = null) {
   if (!range) return new Set();
   const n = 1 << range.z;
   const keep = new Set();
@@ -621,16 +688,29 @@ function enqueueTileRange(range, basePriority) {
       if (e) keep.add(geoTileKey(e.z, e.x, e.y));
     }
   }
-  // Low-res parents so zoom-out / first pan has coverage while children load
-  if (range.z > 8) {
-    const pz = range.z - 1;
+  // Low-res parents so the tilted view has coverage past the sharp tiles
+  // while those children load. Parents stay geographically aligned.
+  const pPri = parentPriority == null ? basePriority + 2 : parentPriority;
+  for (let k = 1; k <= parentLevels && range.z - k >= 8; k++) {
+    const pz = range.z - k;
     const pn = 1 << pz;
-    for (let ty = range.ty0 >> 1; ty <= range.ty1 >> 1; ty++) {
+    const shift = k;
+    for (let ty = range.ty0 >> shift; ty <= range.ty1 >> shift; ty++) {
       if (ty < 0 || ty >= pn) continue;
-      for (let tx = range.tx0 >> 1; tx <= range.tx1 >> 1; tx++) {
-        const e = requestGeoTile(pz, tx, ty, basePriority + 2);
+      for (let tx = range.tx0 >> shift; tx <= range.tx1 >> shift; tx++) {
+        const e = requestGeoTile(pz, tx, ty, pPri);
         if (e) keep.add(geoTileKey(e.z, e.x, e.y));
       }
+    }
+  }
+  // Wider, coarser imagery behind the sharp tiles so the tilted horizon
+  // is water and beach instead of the empty background.
+  if (range.backdrop) {
+    for (let i = 0; i < range.backdrop.length; i++) {
+      const b = range.backdrop[i];
+      const pri = i === 0 ? -1 : 0;
+      const extra = enqueueTileRange(b, pri, 1, -1);
+      if (extra) extra.forEach(k => keep.add(k));
     }
   }
   return keep;
@@ -686,13 +766,21 @@ function syncGroundSize() {
 }
 
 function drawChaseHorizonFade() {
-  if (viewPitch < 0.15) return;
-  const g = ctx.createLinearGradient(0, 0, 0, canvas.height * 0.62);
-  g.addColorStop(0, 'rgba(12,26,34,0.9)');
-  g.addColorStop(0.5, 'rgba(12,26,34,0.35)');
+  const h = canvas.height;
+  const pitch = viewPitch;
+  if (!(pitch > 0.2) || !h) return;
+  // Only the sky above the horizon. At the wide walking tilt the horizon is
+  // still off the top of the screen, so the water is left alone.
+  const horizon = h / 2 - focalLength(h) * Math.cos(pitch) / Math.sin(pitch);
+  if (horizon < 12) return;
+  const band = Math.min(horizon + h * 0.08, h * 0.5);
+  const g = ctx.createLinearGradient(0, 0, 0, band);
+  g.addColorStop(0, 'rgba(12,26,34,0.92)');
+  const edge = Math.min(0.92, Math.max(0.2, horizon / band));
+  g.addColorStop(edge, 'rgba(12,26,34,0.45)');
   g.addColorStop(1, 'rgba(12,26,34,0)');
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, canvas.width, canvas.height * 0.62);
+  ctx.fillRect(0, 0, canvas.width, band);
 }
 
 function drawChaseGround() {
@@ -703,18 +791,38 @@ function drawChaseGround() {
   if (geoCanvasTransform) {
     const vis = currentGeoTilePlan(false);
     const pre = currentGeoTilePlan(true);
-    const keep = enqueueTileRange(pre, 1) || new Set();
-    const visKeep = enqueueTileRange(vis, 0);
+    const keep = enqueueTileRange(pre, 1, 3, 0) || new Set();
+    const visKeep = enqueueTileRange(vis, 0, 3, 0);
     if (visKeep) visKeep.forEach(k => keep.add(k));
     const blits = [];
     if (vis) {
-      const n = 1 << vis.z;
-      for (let ty = vis.ty0; ty <= vis.ty1; ty++) {
-        if (ty < 0 || ty >= n) continue;
-        for (let tx = vis.tx0; tx <= vis.tx1; tx++) {
-          for (const b of tileBlits(vis.z, tx, ty)) blits.push(b);
+      const pushRange = (r, behind) => {
+        const n = 1 << r.z;
+        for (let ty = r.ty0; ty <= r.ty1; ty++) {
+          if (ty < 0 || ty >= n) continue;
+          for (let tx = r.tx0; tx <= r.tx1; tx++) {
+            for (const b of tileBlits(r.z, tx, ty)) {
+              if (behind) {
+                const camNow = viewCamera();
+                const d = b.dest;
+                const near = [
+                  [d.x, d.y], [d.x + d.w, d.y],
+                  [d.x + d.w, d.y + d.h], [d.x, d.y + d.h]
+                ].some(([x, y]) => viewDepth(camNow, x, y) <= 8);
+                // Coarse tiles that reach the board are covered by the sharp
+                // set. Skipping them avoids splitting them into the near plane.
+                if (near) continue;
+                b.behind = true;
+              }
+              blits.push(b);
+            }
+          }
         }
+      };
+      if (vis.backdrop) {
+        for (const b of vis.backdrop) pushRange(b, true);
       }
+      pushRange(vis, false);
     }
     pruneGeoTileCache(keep);
     updateGeoAttribution(blits.length > 0);
@@ -724,7 +832,10 @@ function drawChaseGround() {
   }
   if (!groundCanvas) return;
   if (groundRenderer == null) {
-    try { groundRenderer = createGroundRenderer(groundCanvas) || false; }
+    try {
+      groundRenderer = createGroundRenderer(groundCanvas) || false;
+      if (!groundRenderer) console.warn('Chase ground: no WebGL context');
+    }
     catch (err) {
       console.warn('Chase ground unavailable', err);
       groundRenderer = false;
@@ -2728,6 +2839,7 @@ const BEARING_TAU = 0.4;
 const CHASE_CENTER_TAU = 0.55;
 let viewPitch = 0;
 let viewBearing = FLAT_BEARING;
+let viewDistance = 0;
 let zoomHintUntil = 0;
 let groundRenderer = null;
 
@@ -2770,23 +2882,33 @@ function nextZoomHint() {
   return next.meters >= 1000 ? `Z · ${next.meters / 1000} km overview` : `Z · ${next.title}`;
 }
 
+function currentChasePose(viewH, scale) {
+  return chaseFraming(
+    speed * speedConversion,
+    viewH || canvas.height || 1,
+    scale || followCam.scale || 1,
+    pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M
+  );
+}
+
 function resetFollowCamera() {
   const s = followTargetScale();
   followCam.scale = s;
+  const pose = currentChasePose(canvas.height, s);
   if (isOverviewZoom() && canvas.width) {
     followCam.tx = canvas.width / 2 - pos.x * s;
     followCam.ty = canvas.height / 2 - pos.y * s;
   } else if (isChaseZoom() && canvas.width) {
-    const ahead = chaseLookahead(canvas.height, s, CHASE_PITCH);
-    const lx = pos.x + Math.cos(heading) * ahead;
-    const ly = pos.y + Math.sin(heading) * ahead;
+    const lx = pos.x + Math.cos(heading) * pose.ahead;
+    const ly = pos.y + Math.sin(heading) * pose.ahead;
     followCam.tx = canvas.width / 2 - lx * s;
     followCam.ty = canvas.height / 2 - ly * s;
   } else {
     followCam.tx = pos.x * (1 - s);
     followCam.ty = pos.y * (1 - s);
   }
-  viewPitch = isChaseZoom() ? CHASE_PITCH : 0;
+  viewPitch = isChaseZoom() ? pose.pitch : 0;
+  viewDistance = isChaseZoom() ? pose.distance : focalLength(canvas.height || 1) / Math.max(s, 1e-4);
   viewBearing = isChaseZoom() ? heading : FLAT_BEARING;
 }
 
@@ -2813,10 +2935,10 @@ function updateFollowCamera(dt) {
   let tx;
   let ty;
   let tau = isOverviewZoom() ? OVERVIEW_CENTER_TAU : FOLLOW_TAU;
+  const pose = currentChasePose(h, s);
   if (isChaseZoom()) {
-    const ahead = chaseLookahead(h, s, CHASE_PITCH);
-    const lx = px + Math.cos(hd) * ahead;
-    const ly = py + Math.sin(hd) * ahead;
+    const lx = px + Math.cos(hd) * pose.ahead;
+    const ly = py + Math.sin(hd) * pose.ahead;
     tx = w / 2 - lx * s;
     ty = h / 2 - ly * s;
     tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU;
@@ -2862,8 +2984,12 @@ function updateFollowCamera(dt) {
   }
 
   const pitchA = 1 - Math.exp(-dt / PITCH_TAU);
-  const targetPitch = isChaseZoom() ? CHASE_PITCH : 0;
+  const targetPitch = isChaseZoom() ? pose.pitch : 0;
+  const flatD = focalLength(h) / Math.max(s, 1e-4);
+  const targetDist = isChaseZoom() ? pose.distance : flatD;
+  if (!(viewDistance > 1)) viewDistance = targetDist;
   viewPitch += (targetPitch - viewPitch) * pitchA;
+  viewDistance += (targetDist - viewDistance) * pitchA;
   viewBearing = easeAngle(viewBearing, isChaseZoom() ? hd : FLAT_BEARING, dt, BEARING_TAU);
 }
 
@@ -2878,14 +3004,20 @@ function viewCamera(overrides) {
   const ty = overrides?.ty ?? followCam.ty;
   const w = canvas.width || 1;
   const h = canvas.height || 1;
+  const pitch = overrides?.pitch ?? viewPitch;
+  const bearing = overrides?.bearing ?? viewBearing;
+  const pitched = !isFlatView(pitch, bearing);
+  let distance = overrides?.distance;
+  if (!(distance > 0) && pitched && viewDistance > 1) distance = viewDistance;
   return makeCamera({
     lx: (w / 2 - tx) / s,
     ly: (h / 2 - ty) / s,
     scale: s,
-    pitch: overrides?.pitch ?? viewPitch,
-    bearing: overrides?.bearing ?? viewBearing,
+    pitch,
+    bearing,
     viewW: w,
-    viewH: h
+    viewH: h,
+    distance
   });
 }
 
@@ -2909,12 +3041,21 @@ function displayHeading(worldHeading, x, y) {
   return Math.atan2(p1.y - p0.y, p1.x - p0.x);
 }
 
+// Close third-person would otherwise blow the flat-view sprites up by the
+// full perspective factor. Cap it so the board stays a readable marker
+// while the ground itself still comes up to the camera.
+const CHASE_MARKER_MAX_SCALE = 4;
+
+function perspectiveFactor(depth) {
+  const cam = viewCamera();
+  return Math.min(cam.f / Math.max(depth, 1), CHASE_MARKER_MAX_SCALE);
+}
+
 function withWorldMarker(x, y, fn) {
   if (!cameraIsFlat()) {
     const p = projectWorld(x, y);
     if (!p) return;
-    const cam = viewCamera();
-    const m = worldMarkerScale() * (cam.f / Math.max(p.depth, 1));
+    const m = worldMarkerScale() * perspectiveFactor(p.depth);
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.scale(m, m);
@@ -2943,7 +3084,7 @@ function strokeWorldLine(x1, y1, x2, y2) {
   if (!a || !b) return;
   const width = ctx.lineWidth;
   const depth = Math.max(1, (a.depth + b.depth) * 0.5);
-  ctx.lineWidth = width * (viewCamera().f / depth);
+  ctx.lineWidth = width * perspectiveFactor(depth);
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
   ctx.lineTo(b.x, b.y);
@@ -3504,7 +3645,7 @@ document.addEventListener('keydown', function(e) {
     requestAtlas();
   }
 
-  // Cycle Z: race zoom → 1 km → 5 km → race zoom
+  // Cycle Z: race zoom → chase view → 1 km → 5 km
   if (e.key === 'z' || e.key === 'Z') {
     cycleZoomStop();
   }

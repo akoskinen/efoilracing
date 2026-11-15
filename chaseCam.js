@@ -6,11 +6,19 @@
 /** Top-down bearing: canvas +x is screen right, canvas +y is screen down. */
 export const FLAT_BEARING = -Math.PI / 2;
 
-/** Tilt down from straight overhead, in radians (~56°). */
+/** Tilt at a walking pace, down from straight overhead (~56°). */
 export const CHASE_PITCH = 56 * Math.PI / 180;
 
-/** Where the rider sits down the screen in chase view (0 top, 1 bottom). */
+/** Tilt once up to speed: lower and more forward, a third-person view. */
+export const CHASE_PITCH_FAST = 73 * Math.PI / 180;
+
+/** Where the rider sits down the screen (0 top, 1 bottom). */
 export const CHASE_RIDER_SCREEN = 0.62;
+const CHASE_RIDER_SCREEN_FAST = 0.72;
+
+const CHASE_SLOW_KMH = 10;
+const CHASE_FAST_KMH = 45;
+const CHASE_FAST_BEHIND_M = 15;
 
 export function focalLength(viewH) {
   return 0.9 * Math.max(viewH, 1);
@@ -33,15 +41,22 @@ export function isFlatView(pitch, bearing) {
   return Math.abs(pitch) < 0.004 && Math.abs(angleDelta(bearing, FLAT_BEARING)) < 0.004;
 }
 
+/** 0 at or below 10 km/h, 1 at or above 45 km/h. */
+export function chaseSpeedBlend(kmh) {
+  if (!(kmh > CHASE_SLOW_KMH)) return 0;
+  if (kmh >= CHASE_FAST_KMH) return 1;
+  return (kmh - CHASE_SLOW_KMH) / (CHASE_FAST_KMH - CHASE_SLOW_KMH);
+}
+
 /**
  * World pixels to put the look-at point ahead of the rider so the rider
- * lands near CHASE_RIDER_SCREEN once the pitch has arrived.
+ * lands near `riderScreen` for this pitch and camera distance.
  */
-export function chaseLookahead(viewH, scale, pitch) {
+export function chaseLookahead(viewH, scale, pitch, distance, riderScreen = CHASE_RIDER_SCREEN) {
   if (!(pitch > 0.01) || !(viewH > 0)) return 0;
   const f = focalLength(viewH);
-  const D = f / Math.max(scale, 1e-4);
-  const off = (CHASE_RIDER_SCREEN - 0.5) * viewH;
+  const D = distance > 0 ? distance : f / Math.max(scale, 1e-4);
+  const off = (riderScreen - 0.5) * viewH;
   const s = Math.sin(pitch);
   const c = Math.cos(pitch);
   const denom = off * s + f * c;
@@ -49,9 +64,83 @@ export function chaseLookahead(viewH, scale, pitch) {
   return off * D / denom;
 }
 
-export function makeCamera({ lx, ly, scale, pitch, bearing, viewW, viewH }) {
+/**
+ * Ray distance that puts the camera `behindPx` world pixels behind the rider
+ * at this pitch, with the rider at `riderScreen`.
+ */
+export function distanceForBehind(viewH, pitch, behindPx, riderScreen) {
   const f = focalLength(viewH);
-  const D = f / Math.max(scale, 1e-4);
+  const off = (riderScreen - 0.5) * viewH;
+  const s = Math.sin(pitch);
+  const c = Math.cos(pitch);
+  const denom = off * s + f * c;
+  const numer = c * (f * s - off * c);
+  if (!(numer > 1) || !(denom > 1)) return f / Math.max(c, 0.2);
+  return behindPx * denom / numer;
+}
+
+/**
+ * Slow (≤10 km/h) keeps the wide 56° chase. By 45 km/h the camera is 15 m
+ * behind the board and tilted further forward.
+ */
+/**
+ * Grow a tile index rectangle so a pitched view can see past the flat
+ * viewport. The original indices always stay, and the zoom level is never
+ * changed here — a wider view must not swap in a coarser tile set.
+ */
+export function expandTileIndexRange(range, extras, { pad = 2, cap = 150 } = {}) {
+  const baseCount = (range.tx1 - range.tx0 + 1) * (range.ty1 - range.ty0 + 1);
+  let tx0 = range.tx0 - pad;
+  let tx1 = range.tx1 + pad;
+  let ty0 = range.ty0 - pad;
+  let ty1 = range.ty1 + pad;
+  for (const e of extras || []) {
+    if (!Number.isFinite(e.tx) || !Number.isFinite(e.ty)) continue;
+    const tx = Math.floor(e.tx);
+    const ty = Math.floor(e.ty);
+    if (tx < tx0) tx0 = tx;
+    if (tx > tx1) tx1 = tx;
+    if (ty < ty0) ty0 = ty;
+    if (ty > ty1) ty1 = ty;
+  }
+  const limit = Math.max(baseCount, cap);
+  while ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) > limit) {
+    const growL = range.tx0 - tx0;
+    const growR = tx1 - range.tx1;
+    const growT = range.ty0 - ty0;
+    const growB = ty1 - range.ty1;
+    const m = Math.max(growL, growR, growT, growB);
+    if (m <= 0) break;
+    if (m === growL) tx0 += 1;
+    else if (m === growR) tx1 -= 1;
+    else if (m === growT) ty0 += 1;
+    else ty1 -= 1;
+  }
+  return { z: range.z, tx0, tx1, ty0, ty1 };
+}
+
+export function chaseFraming(kmh, viewH, scale, ppm) {
+  const t = chaseSpeedBlend(kmh);
+  const pitch = CHASE_PITCH + (CHASE_PITCH_FAST - CHASE_PITCH) * t;
+  const f = focalLength(viewH);
+  const slowD = f / Math.max(scale, 1e-4);
+  const fastD = distanceForBehind(
+    viewH, CHASE_PITCH_FAST, CHASE_FAST_BEHIND_M * Math.max(ppm, 0.25), CHASE_RIDER_SCREEN_FAST
+  );
+  const distance = slowD + (fastD - slowD) * t;
+  const riderScreen = CHASE_RIDER_SCREEN + (CHASE_RIDER_SCREEN_FAST - CHASE_RIDER_SCREEN) * t;
+  return {
+    pitch,
+    distance,
+    ahead: chaseLookahead(viewH, scale, pitch, distance, riderScreen),
+    blend: t,
+    riderScreen
+  };
+}
+
+export function makeCamera({ lx, ly, scale, pitch, bearing, viewW, viewH, distance }) {
+  const f = focalLength(viewH);
+  const D = distance > 0 ? distance : f / Math.max(scale, 1e-4);
   const fx = Math.cos(bearing);
   const fy = Math.sin(bearing);
   const rx = -fy;
