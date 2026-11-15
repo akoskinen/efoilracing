@@ -150,7 +150,8 @@
 	#rideChrome .hudLink,
 	#rideChrome #ghostCustomize,
 	#rideChrome #ghostTimeline,
-	#rideChrome #proDock {
+	#rideChrome #trackLinks,
+	#rideChrome #proRack {
 	  pointer-events: auto;
 	}
 	#rideChrome .hudLink {
@@ -172,30 +173,29 @@
 	  user-select: none;
 	  pointer-events: auto;
 	}
-	#designerLink.hudLink {
-	  position: relative;
-	  padding: 2px 0;
-	  min-height: 0;
+	#trackLinks {
+	  display: flex;
+	  flex-direction: column;
+	  align-items: flex-start;
+	  gap: 2px;
 	}
-	#designerLink.hudLink::after {
+	#trackLinks .hudLink {
+	  position: relative;
+	  padding: 10px 0;
+	  min-height: 44px;
+	  box-sizing: border-box;
+	}
+	#trackLinks .hudLink::after {
 	  content: '';
 	  position: absolute;
-	  top: -12px;
-	  right: -8px;
-	  bottom: -4px;
-	  left: -8px;
+	  inset: 0 -12px;
 	}
 	#rideChrome .hudLink:hover { text-decoration: underline; }
 	#ghostLabelBtn { white-space: nowrap; }
 	#ghostLabelBtn.off { opacity: 0.45; }
-	#proDock {
-	  position: relative;
-	  display: flex;
-	  flex-direction: column;
-	  align-items: flex-start;
-	}
 	body.pro-open #rideChrome { z-index: 40; }
 	body.pro-open #designerLink,
+	body.pro-open #editTrackLink,
 	body.pro-open #pickProBtn,
 	body.pro-open #ghostLabelBtn {
 	  position: relative;
@@ -223,7 +223,7 @@
 	}
 	#proName {
 	  position: absolute;
-	  top: max(72px, 8vh);
+	  top: max(96px, 11vh);
 	  left: 0;
 	  right: 0;
 	  z-index: 2;
@@ -653,6 +653,7 @@
 	#lapHistory {
 	  opacity: 1;
 	}
+	body.pro-open #atlasHud { visibility: hidden; }
 	body.atlas-open #rideMeter,
 	body.atlas-open #lapHistory,
 	body.atlas-open #customizeGhostBtn,
@@ -777,11 +778,11 @@
 
   <!-- Ride / atlas chrome -->
   <div id="rideChrome">
-	<a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
-	<div id="proDock">
-	  <button type="button" class="hudLink" id="pickProBtn" aria-expanded="false" aria-controls="proRack">C Pick a Pro</button>
-	  <button type="button" class="hudLink" id="ghostLabelBtn" aria-pressed="true">O Ghost name</button>
-	  <div id="proRack">
+	<div id="trackLinks">
+	  <a id="designerLink" class="hudLink" href="designer.html">Design a track &rarr;</a>
+	  <a id="editTrackLink" class="hudLink" href="designer.html">Edit current track</a>
+	</div>
+	<div id="proRack">
 		<div id="proName"></div>
 		<button type="button" class="proArrow" id="proPrev" aria-label="Previous pro"><span class="proChevron"></span></button>
 		<div id="proCard">
@@ -796,7 +797,6 @@
 		</div>
 		<button type="button" class="proArrow proArrowNext" id="proNext" aria-label="Next pro"><span class="proChevron"></span></button>
 	  </div>
-	</div>
 	<div id="ghostHud">
 	  <div id="ghostHudTitle">Ghost: —</div>
 	  <div id="ghostHudBody"></div>
@@ -826,6 +826,11 @@
 	</div>
   </div>
   <div id="viewChrome">
+	<div class="viewChromeRow">
+	  <button type="button" id="pickProBtn" aria-expanded="false" aria-controls="proRack">C Pick a Pro</button>
+	  <span class="viewChromeSep" aria-hidden="true">•</span>
+	  <button type="button" id="ghostLabelBtn" aria-pressed="true">O Ghost name</button>
+	</div>
 	<div class="viewChromeRow">
 	  <a id="atlasHint" href="#">T World Map</a>
 	  <span class="viewChromeSep" aria-hidden="true">•</span>

@@ -19,6 +19,7 @@ import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
+  saveDraft,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
   RACING_LINE_COLORS, trackFromSessionCsv, trackFromSessionGpx, sessionCsvToGhost, sessionGpxToGhost,
@@ -2533,6 +2534,19 @@ function addDesignerLink(text, href) {
   link.textContent = text;
 }
 
+// Same key the designer uses to remember which saved course is open.
+const ACTIVE_SAVED_TRACK_KEY = 'efoil_active_saved_track_id';
+
+function editCurrentTrack() {
+  saveDraft(currentTrack);
+  if (currentTrackKey.startsWith('saved_')) {
+    localStorage.setItem(ACTIVE_SAVED_TRACK_KEY, currentTrackKey.slice('saved_'.length));
+  } else {
+    localStorage.removeItem(ACTIVE_SAVED_TRACK_KEY);
+  }
+  window.location.href = 'designer.html';
+}
+
 // --- URL Parameter Handling ---
 function parseURLParams() {
   const params = new URLSearchParams(window.location.search);
@@ -3743,6 +3757,12 @@ document.addEventListener('keydown', function(e) {
     } else if (e.key === 't' || e.key === 'T') {
       e.preventDefault();
       closeAtlas();
+    } else if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
+      e.preventDefault();
+      setProRackOpen(true);
+    } else if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+      e.preventDefault();
+      toggleGhostLabel();
     }
     return;
   }
@@ -4324,7 +4344,7 @@ function drawTrack(intro) {
 
 function telemetryTopY() {
   const btn = document.getElementById('customizeGhostBtn');
-  const link = document.getElementById('designerLink');
+  const link = document.getElementById('editTrackLink') || document.getElementById('designerLink');
   const btnVisible = btn && getComputedStyle(btn).display !== 'none';
   const el = btnVisible ? btn : link;
   if (!el) return 88;
@@ -6023,6 +6043,7 @@ function initProRack() {
     syncProRack();
   });
   bindChromeTap(document.getElementById('ghostLabelBtn'), toggleGhostLabel);
+  bindChromeTap(document.getElementById('editTrackLink'), editCurrentTrack);
 
   rack.addEventListener('click', e => {
     if (e.target === rack) setRackOpen(false);
