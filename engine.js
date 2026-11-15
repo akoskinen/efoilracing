@@ -8,6 +8,10 @@
 
 import { playCommentary, resetCommentaryQueue } from "./commentary.js";
 import {
+  RIDERS, RIDER_LIMITS, BANK_ANGLE_MAX as RIDER_BANK_MAX, BOARD_SHINE,
+  riderById, riderDynamics, loadRiderState, saveRiderState, presetTune, clampTune
+} from "./riders.js";
+import {
   FLAT_BEARING, chaseFraming, makeCamera, project, unproject, viewDepth,
   easeAngle, isFlatView, focalLength, expandTileIndexRange
 } from "./chaseCam.js";
@@ -15,6 +19,7 @@ import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
+  saveDraft,
   hasGeo, metersToLatLng, latLngToMeters, latLngToWorldPx, worldPxToLatLng,
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
   RACING_LINE_COLORS, trackFromSessionCsv, trackFromSessionGpx, sessionCsvToGhost, sessionGpxToGhost,
@@ -1038,10 +1043,34 @@ function resizeCanvas(opts = {}) {
   }
   placeWorldPointOnScreen(pos.x, pos.y, sxFrac * w, syFrac * h);
 }
-window.addEventListener('resize', () => resizeCanvas());
-if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', () => resizeCanvas());
+function pinViewChrome() {
+  const el = document.getElementById('viewChrome');
+  if (!el) return;
+  const vv = window.visualViewport;
+  let top = 10;
+  let right = 10;
+  if (vv) {
+    top = Math.max(10, Math.round(vv.offsetTop + 10));
+    const rightGap = window.innerWidth - vv.offsetLeft - vv.width;
+    right = Math.max(10, Math.round(rightGap + 10));
+  }
+  el.style.top = `max(${top}px, env(safe-area-inset-top, 0px))`;
+  el.style.right = `max(${right}px, env(safe-area-inset-right, 0px))`;
 }
+
+window.addEventListener('resize', () => {
+  resizeCanvas();
+  pinViewChrome();
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    resizeCanvas();
+    pinViewChrome();
+  });
+  window.visualViewport.addEventListener('scroll', pinViewChrome);
+}
+document.addEventListener('fullscreenchange', pinViewChrome);
+pinViewChrome();
 
 function savedTrackKey(id) {
   return 'saved_' + id;
@@ -1149,6 +1178,7 @@ let rideIntroPending = false;
 let rideIntroT0 = 0;
 let rideIntroFrame = null;
 let introCamReturning = false;
+let mapDepart = false;
 const rideHudEls = [
   document.getElementById('rideMeter'),
   document.getElementById('lapHistory'),
@@ -1526,7 +1556,10 @@ function startRideReveal() {
   rideIntroT0 = 0;
   rideIntroFrame = null;
   introCamReturning = false;
-  if (trackHasRacingLines(currentTrack)) setShowRacingLines(true);
+  if (trackHasPath(currentTrack)) {
+    revealHiddenPath(currentTrack);
+    setShowRacingLines(true);
+  }
   setRideHudOpacity(0);
 }
 
@@ -1730,8 +1763,16 @@ function beginAtlasWorldFlight() {
   setAtlasOpen(true);
 }
 
+function launchAtlasFlight() {
+  mapDepart = false;
+  const from = cameraLatLngZoom();
+  atlas.pendingFrom = from;
+  prefetchAtlasStops(from.lat, from.lng, from.zoom, ATLAS_WORLD.zoom);
+  beginAtlasWorldFlight();
+}
+
 function openAtlas({ immediate } = {}) {
-  if (atlas.open || atlas.concealing) return;
+  if (atlas.open || atlas.concealing || mapDepart) return;
   hideAtlasConfirm();
   if (immediate) {
     refreshAtlasChrome();
@@ -1746,12 +1787,22 @@ function openAtlas({ immediate } = {}) {
     setAtlasOpen(true);
     return;
   }
-  atlas.pendingFrom = cameraLatLngZoom();
-  atlas.concealing = true;
-  startRideConceal(() => {
-    atlas.concealing = false;
-    beginAtlasWorldFlight();
-  });
+  // Stay on the ride picture. A pitched chase view eases up to the same
+  // top-down frame, then the atlas zooms out from that exact lat/lng/zoom.
+  // Fading the ground out first was a cut, worst from the chase camera.
+  if (cameraIsFlat()) {
+    launchAtlasFlight();
+    return;
+  }
+  mapDepart = true;
+  const from = cameraLatLngZoom();
+  prefetchAtlasStops(from.lat, from.lng, from.zoom, ATLAS_WORLD.zoom);
+}
+
+function stepMapDepart() {
+  if (!mapDepart || atlas.open) return;
+  if (!cameraIsFlat()) return;
+  launchAtlasFlight();
 }
 
 function closeAtlas() {
@@ -1777,7 +1828,7 @@ function closeAtlas() {
 }
 
 function requestAtlas() {
-  if (atlas.concealing) return;
+  if (atlas.concealing || mapDepart) return;
   if (atlas.open) {
     closeAtlas();
     return;
@@ -2128,7 +2179,7 @@ function bindChromeTap(el, fn) {
 bindChromeTap(atlasEls.hint, () => requestAtlas());
 bindChromeTap(document.getElementById('fullscreenBtn'), () => toggleFullScreen());
 bindChromeTap(document.getElementById('pathBtn'), () => {
-  if (trackHasRacingLines(currentTrack)) setShowRacingLines(!showRacingLines);
+  toggleRacingPath();
 });
 bindChromeTap(document.getElementById('customizeGhostBtn'), () => {
   const panel = document.getElementById('ghostCustomize');
@@ -2298,6 +2349,32 @@ function trackHasRacingLines(track) {
   return (track?.racingLines || []).some(l => l.visible !== false && l.points?.length >= 2);
 }
 
+function trackHasPath(track) {
+  return (track?.racingLines || []).some(l => l.points?.length >= 2);
+}
+
+function pathIsShown(track) {
+  return showRacingLines && trackHasRacingLines(track);
+}
+
+function revealHiddenPath(track) {
+  const lines = track?.racingLines || [];
+  if (!lines.length || trackHasRacingLines(track)) return;
+  lines.forEach(l => {
+    if (l.points?.length >= 2) l.visible = true;
+  });
+}
+
+function toggleRacingPath() {
+  if (!trackHasPath(currentTrack)) return;
+  if (pathIsShown(currentTrack)) {
+    setShowRacingLines(false);
+    return;
+  }
+  revealHiddenPath(currentTrack);
+  setShowRacingLines(true);
+}
+
 function setShowRacingLines(on) {
   showRacingLines = !!on;
   updatePathButtonState();
@@ -2333,11 +2410,12 @@ function setGhostCustomizeOpen(on) {
 function updatePathButtonState() {
   const button = document.getElementById('pathBtn');
   const row = document.getElementById('pathChromeRow');
-  const hasPath = trackHasRacingLines(currentTrack);
-  if (row) row.style.display = hasPath ? '' : 'none';
+  const hasPath = trackHasPath(currentTrack);
+  if (row) row.hidden = !hasPath;
   if (!button) return;
-  button.textContent = showRacingLines ? 'P Hide Path' : 'P Show Path';
-  button.title = showRacingLines ? 'Hide racing line (P)' : 'Show racing line (P)';
+  const shown = pathIsShown(currentTrack);
+  button.textContent = shown ? 'P Hide Path' : 'P Show Path';
+  button.title = shown ? 'Hide racing line (P)' : 'Show racing line (P)';
 }
 
 function updateRacingLineToggleVisibility() {
@@ -2456,6 +2534,19 @@ function addDesignerLink(text, href) {
   link.textContent = text;
 }
 
+// Same key the designer uses to remember which saved course is open.
+const ACTIVE_SAVED_TRACK_KEY = 'efoil_active_saved_track_id';
+
+function editCurrentTrack() {
+  saveDraft(currentTrack);
+  if (currentTrackKey.startsWith('saved_')) {
+    localStorage.setItem(ACTIVE_SAVED_TRACK_KEY, currentTrackKey.slice('saved_'.length));
+  } else {
+    localStorage.removeItem(ACTIVE_SAVED_TRACK_KEY);
+  }
+  window.location.href = 'designer.html';
+}
+
 // --- URL Parameter Handling ---
 function parseURLParams() {
   const params = new URLSearchParams(window.location.search);
@@ -2563,11 +2654,7 @@ function updateFullscreenButtonState() {
 }
 
 // --- Game Physics and Control Variables ---
-const maxSpeed       = 100;
-const timeToMaxSpeed = 18;
-const accelRate      = maxSpeed / timeToMaxSpeed;
-const decelRate      = 12.333;
-const speedConversion= 0.6;
+const speedConversion = 0.6; // HUD km/h = internal speed × this
 // Legacy pixel-speed tuning (built-ins at ~4 px/m). Kept only as the reference
 // for meter-based collision thresholds that were authored in canvas pixels.
 const SPEED_CALIBRATION_PX_PER_M = 4;
@@ -2607,9 +2694,7 @@ function advancePositionBySpeed(speedKmh, dt) {
   pos.y = p.y;
 }
 
-const BANK_ANGLE_MAX = 55;
-const bankRate0to30  = 40;
-const bankRate30to55 = 10;
+const BANK_ANGLE_MAX = RIDER_BANK_MAX;
 let bankAngleDeg     = 0;
 const bankDecay      = 0.9;
 
@@ -2627,7 +2712,7 @@ function updateBankAngle(dt) {
       bankAngleDeg = 0;
       sign = targetSign;
     }
-    let rate = (currentMag < 30) ? bankRate0to30 : bankRate30to55;
+    let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
     currentMag += rate * dt;
     if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
     bankAngleDeg = sign * currentMag;
@@ -2643,20 +2728,7 @@ function updateBankAngle(dt) {
 }
 
 // --- Turn Radius Interpolation ---
-const baseline30Data = [
-  { speed:10, radius:10 },
-  { speed:15, radius:15 },
-  { speed:30, radius:30 },
-  { speed:40, radius:65 },
-  { speed:60, radius:80 }
-];
-const reduceData = [
-  { speed:10, factor:0.85 },
-  { speed:15, factor:0.82 },
-  { speed:30, factor:0.83 },
-  { speed:40, factor:0.85 },
-  { speed:60, factor:0.90 }
-];
+// The 40 and 60 km/h rows come from the selected rider (see riders.js).
 
 function interpPiecewise(table, spd){
   let s = Math.max(10, Math.min(60, spd));
@@ -2680,8 +2752,8 @@ function interpPiecewise(table, spd){
 
 function getTurnRadius(speedKmh, angleDeg) {
   let ang = Math.max(0, Math.min(55, angleDeg));
-  const base30    = interpPiecewise(baseline30Data, speedKmh);
-  const factorMax = interpPiecewise(reduceData,          speedKmh);
+  const base30    = interpPiecewise(activeRider.baseline, speedKmh);
+  const factorMax = interpPiecewise(activeRider.reduce, speedKmh);
   const radiusAt50= base30 * factorMax;
   
   if (ang < 30) {
@@ -2702,6 +2774,18 @@ const lowFactor = 0.02084;
 // --- Movement & Telemetry ---
 let heading = 0;
 let speed   = 0;
+
+let riderState = loadRiderState();
+let activeRider = null;
+
+function applyActiveRider() {
+  const id = riderState.id;
+  activeRider = riderDynamics(riderState.tunes[id]);
+  activeRider.meta = riderById(id);
+  if (speed > activeRider.maxSpeed) speed = activeRider.maxSpeed;
+}
+
+applyActiveRider();
 const pos   = { x: 0, y: 0 };
 let oldPos  = { x: 0, y: 0 };
 
@@ -2983,14 +3067,17 @@ function updateFollowCamera(dt) {
     if (dx * dx + dy * dy < 36) introCamReturning = false;
   }
 
-  const pitchA = 1 - Math.exp(-dt / PITCH_TAU);
-  const targetPitch = isChaseZoom() ? pose.pitch : 0;
+  const lifting = mapDepart;
+  const chasing = isChaseZoom() && !lifting;
+  const pitchTau = lifting ? 0.34 : PITCH_TAU;
+  const pitchA = 1 - Math.exp(-dt / pitchTau);
+  const targetPitch = chasing ? pose.pitch : 0;
   const flatD = focalLength(h) / Math.max(s, 1e-4);
-  const targetDist = isChaseZoom() ? pose.distance : flatD;
+  const targetDist = chasing ? pose.distance : flatD;
   if (!(viewDistance > 1)) viewDistance = targetDist;
   viewPitch += (targetPitch - viewPitch) * pitchA;
   viewDistance += (targetDist - viewDistance) * pitchA;
-  viewBearing = easeAngle(viewBearing, isChaseZoom() ? hd : FLAT_BEARING, dt, BEARING_TAU);
+  viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, lifting ? 0.34 : BEARING_TAU);
 }
 
 function worldMarkerScale() {
@@ -3042,20 +3129,40 @@ function displayHeading(worldHeading, x, y) {
 }
 
 // Close third-person would otherwise blow the flat-view sprites up by the
-// full perspective factor. Cap it so the board stays a readable marker
-// while the ground itself still comes up to the camera.
+// full perspective factor. Cap it so a buoy stays a readable marker while
+// the ground itself still comes up to the camera.
 const CHASE_MARKER_MAX_SCALE = 4;
+// The rider is drawn as a big marker on purpose. Once the camera is in
+// close, that same marker reads as an oversized board, so tuck it down.
+const CHASE_CLOSE_BOARD = 0.6;
 
 function perspectiveFactor(depth) {
   const cam = viewCamera();
   return Math.min(cam.f / Math.max(depth, 1), CHASE_MARKER_MAX_SCALE);
 }
 
-function withWorldMarker(x, y, fn) {
+// 0 at the wide walking chase, 1 when the camera has come in behind the board.
+function chaseCloseAmount() {
+  if (cameraIsFlat()) return 0;
+  const h = canvas.height || 1;
+  const s = followCam.scale || 1;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const wide = chaseFraming(0, h, s, ppm).distance;
+  const tucked = chaseFraming(99, h, s, ppm).distance;
+  if (!(wide > tucked + 1)) return 0;
+  const d = viewDistance > 1 ? viewDistance : wide;
+  return Math.max(0, Math.min(1, (wide - d) / (wide - tucked)));
+}
+
+function riderMarkerMul() {
+  return 1 - chaseCloseAmount() * (1 - CHASE_CLOSE_BOARD);
+}
+
+function withWorldMarker(x, y, fn, scaleMul = 1) {
   if (!cameraIsFlat()) {
     const p = projectWorld(x, y);
     if (!p) return;
-    const m = worldMarkerScale() * perspectiveFactor(p.depth);
+    const m = worldMarkerScale() * perspectiveFactor(p.depth) * scaleMul;
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.scale(m, m);
@@ -3093,6 +3200,7 @@ function strokeWorldLine(x1, y1, x2, y2) {
 }
 
 function cycleZoomStop(dir = 1) {
+  if (mapDepart) mapDepart = false;
   const n = ZOOM_STOPS.length;
   const step = dir < 0 ? -1 : 1;
   zoomStopIndex = (zoomStopIndex + step + n) % n;
@@ -3102,6 +3210,7 @@ function cycleZoomStop(dir = 1) {
 
 /** Discrete zoom for pinch: +1 zooms out (race→chase→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
 function nudgeZoomStop(dir) {
+  if (mapDepart) mapDepart = false;
   const n = ZOOM_STOPS.length;
   const next = zoomStopIndex + (dir < 0 ? -1 : 1);
   if (next < 0 || next >= n) return false;
@@ -3112,6 +3221,7 @@ function nudgeZoomStop(dir) {
 }
 
 function drawZoomHint() {
+  if (document.body.classList.contains('pro-open')) return;
   const now = performance.now();
   ctx.save();
   ctx.textAlign = 'center';
@@ -3343,6 +3453,7 @@ function drawGhostFrame() {
     }
 
     drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame));
+    drawGhostRiderLabel(ghostX, ghostY);
 
     ghostWakeTrail.push({ x: ghostX, y: ghostY });
     const targetWakeLength = 200;
@@ -3356,14 +3467,59 @@ function drawGhost(x, y, heading) {
   withWorldMarker(x, y, () => {
     ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
     ctx.globalAlpha *= 0.25;
-    ctx.beginPath();
-    ctx.moveTo(0, 12.5);
-    ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
-    ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
-    ctx.closePath();
+    traceBoard();
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
-  });
+  }, riderMarkerMul());
+}
+
+function ghostNameText(ghost) {
+  if (!ghost) return '';
+  const raw = ghost.riderName || ghost.lineName || ghost.riderLabel || '';
+  const text = String(raw).replace(/\.[^.]+$/, '').trim();
+  if (!text) return '';
+  return text.length > 24 ? `${text.slice(0, 23)}…` : text;
+}
+
+function ghostScreenPoint(worldX, worldY) {
+  if (typeof cameraIsFlat === 'function' && !cameraIsFlat()) {
+    const p = projectWorld(worldX, worldY);
+    return p ? { x: p.x, y: p.y } : null;
+  }
+  const s = followCam.scale || 1;
+  return { x: worldX * s + followCam.tx, y: worldY * s + followCam.ty };
+}
+
+function drawGhostRiderLabel(worldX, worldY) {
+  if (!riderState.showLabel || !currentGhost) return;
+  const name = ghostNameText(currentGhost);
+  if (!name) return;
+  const screen = ghostScreenPoint(worldX, worldY);
+  if (!screen) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = '600 13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  const textW = ctx.measureText(name).width;
+  const h = 22;
+  const w = Math.ceil(textW) + 18;
+  const x = Math.round(screen.x - w / 2);
+  const y = Math.round(screen.y - 42);
+  ctx.fillStyle = 'rgba(10, 16, 22, 0.88)';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, 6);
+  else ctx.rect(x, y, w, h);
+  ctx.fill();
+  let accent = '#ff88ff';
+  if (currentGhost.riderId && RIDERS.some(r => r.id === currentGhost.riderId)) {
+    accent = currentGhost.riderId === 'antti' ? '#f2f2f2' : riderById(currentGhost.riderId).color;
+  }
+  ctx.fillStyle = accent;
+  ctx.fillRect(x, y, 3, h);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(name, x + 10, y + h / 2);
+  ctx.restore();
 }
 
 function startLap(){
@@ -3528,6 +3684,8 @@ function completeLap() {
             distance: distanceTraveled,
             time: currentLapTime,
             avgSpeed: avgSpeedKmh, // Store the calculated average speed
+            riderName: activeRider.meta.name,
+            riderId: activeRider.meta.id,
             frames: recordedGhost.map(frame => ({
                 ...frame,
                 finalLapTime: currentLapTime
@@ -3573,9 +3731,12 @@ const keys = {};
 
 document.addEventListener('keydown', function(e) {
   // Don't process keyboard shortcuts if game is paused or if typing in an input
-  if (gamePaused || (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) {
+  const tag = e.target && e.target.tagName;
+  if (gamePaused || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
     return;
   }
+  if (handleProKey(e)) return;
+  if (e.target && e.target.closest && e.target.closest('#proRack')) return;
 
   if (atlasEls.confirm.classList.contains('open')) {
     if (e.key === 'Escape') keepRacingFromAtlasConfirm();
@@ -3596,10 +3757,16 @@ document.addEventListener('keydown', function(e) {
     } else if (e.key === 't' || e.key === 'T') {
       e.preventDefault();
       closeAtlas();
+    } else if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
+      e.preventDefault();
+      setProRackOpen(true);
+    } else if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+      e.preventDefault();
+      toggleGhostLabel();
     }
     return;
   }
-  
+
   switch(e.key) {
     case 'ArrowUp':
     case 'i':
@@ -3630,9 +3797,7 @@ document.addEventListener('keydown', function(e) {
 
   // Toggle 'P' to show/hide the racing line path
   if (e.key === 'p' || e.key === 'P') {
-    if (trackHasRacingLines(currentTrack)) {
-      setShowRacingLines(!showRacingLines);
-    }
+    toggleRacingPath();
   }
 
   // Toggle 'G' to keep the current ghost, or restore the previous lap
@@ -3648,6 +3813,18 @@ document.addEventListener('keydown', function(e) {
   // Cycle Z: race zoom → chase view → 1 km → 5 km
   if (e.key === 'z' || e.key === 'Z') {
     cycleZoomStop();
+  }
+
+  if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
+    e.preventDefault();
+    setProRackOpen(true);
+    return;
+  }
+
+  // O shows or hides the ghost's rider name. L stays lean-right.
+  if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+    e.preventDefault();
+    toggleGhostLabel();
   }
 });
 
@@ -3882,12 +4059,12 @@ function update(dt){
   prevPos.y = pos.y;
   
   if (keys['ArrowUp']) {
-    speed += accelRate * dt;
+    speed += activeRider.accelRate * dt;
   }
   if (keys['ArrowDown']) {
-    speed -= decelRate * dt;
+    speed -= activeRider.decelRate * dt;
   }
-  speed = Math.max(0, Math.min(maxSpeed, speed));
+  speed = Math.max(0, Math.min(activeRider.maxSpeed, speed));
   
   updateBankAngle(dt);
   
@@ -3902,7 +4079,7 @@ function update(dt){
 
   // Update wind volume based on speed and ensure it's playing
   AudioManager.ensureWindPlaying();
-  AudioManager.sounds.wind.volume = speed / maxSpeed;
+  AudioManager.sounds.wind.volume = speed / activeRider.maxSpeed;
   
   updateRideMeter(speedKmh);
 
@@ -3966,16 +4143,37 @@ function totalTrailDistance(trail){
   return d;
 }
 
+function strokeSlimWake(x1, y1, x2, y2) {
+  // Screen pixels. The pitched view used to thicken this with the same
+  // factor as the board, which turned the wake into a ribbon up close.
+  const width = 2 * (cameraIsFlat() ? worldMarkerScale() : 1);
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (cameraIsFlat()) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    return;
+  }
+  const a = projectWorld(x1, y1);
+  const b = projectWorld(x2, y2);
+  if (!a || !b) return;
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y);
+  ctx.lineTo(b.x, b.y);
+  ctx.stroke();
+}
+
 function drawWake(){
-  const m = worldMarkerScale();
   // Draw player wake
   if (wakeTrail.length < 2) return;
   for (let i = 1; i < wakeTrail.length; i++){
     const t = i / wakeTrail.length;
     const alpha = t;
     ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
-    ctx.lineWidth = 2 * m;
-    strokeWorldLine(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
+    strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
   }
 
   // Draw ghost wake during active laps or free preview
@@ -3984,23 +4182,97 @@ function drawWake(){
       const t = i / ghostWakeTrail.length;
       const alpha = t;
       ctx.strokeStyle = `rgba(255,136,255,${alpha.toFixed(2)})`;
-      ctx.lineWidth = 2 * m;
-      strokeWorldLine(ghostWakeTrail[i - 1].x, ghostWakeTrail[i - 1].y, ghostWakeTrail[i].x, ghostWakeTrail[i].y);
+      strokeSlimWake(ghostWakeTrail[i - 1].x, ghostWakeTrail[i - 1].y, ghostWakeTrail[i].x, ghostWakeTrail[i].y);
     }
   }
+}
+
+// A buoy disc drawn in world pixels on the water plane, clipped at the
+// near plane so the part still in front of the camera stays visible.
+function groundDiscPoints(cx, cy, radius) {
+  const cam = viewCamera();
+  const segments = 36;
+  const near = 1.25;
+  const ring = [];
+  for (let i = 0; i <= segments; i++) {
+    const a = (i / segments) * Math.PI * 2;
+    ring.push({
+      x: cx + Math.cos(a) * radius,
+      y: cy + Math.sin(a) * radius
+    });
+  }
+  ring.forEach(p => { p.d = viewDepth(cam, p.x, p.y); });
+  const out = [];
+  for (let i = 0; i < ring.length - 1; i++) {
+    const a = ring[i];
+    const b = ring[i + 1];
+    const av = a.d >= near;
+    const bv = b.d >= near;
+    if (av) {
+      const p = project(cam, a.x, a.y);
+      if (p) out.push(p);
+    }
+    if (av !== bv && a.d !== b.d) {
+      const t = (near - a.d) / (b.d - a.d);
+      const p = project(cam, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+      if (p) out.push(p);
+    }
+  }
+  return out;
+}
+
+function fillGroundDisc(cx, cy, radius, color) {
+  if (!(radius > 0.4)) return;
+  const poly = groundDiscPoints(cx, cy, radius);
+  if (poly.length < 3) return;
+  ctx.beginPath();
+  ctx.moveTo(poly[0].x, poly[0].y);
+  for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
 }
 
 function drawBuoyDot(x, y, isTurn, passSide) {
   const paint = isTurn
     ? turnBuoyPaint(currentTrack.buoyColorScheme, passSide)
     : { fill: MARKER_BUOY_FILL, stroke: '#fff' };
+  const r = isTurn ? 8 : 4;
+  const ring = isTurn ? 2 : 1.5;
+  // On the tilted water the buoy is a disc in the ground plane, so it
+  // grows and flattens with the same perspective as the surface. The
+  // number above it stays a screen marker.
+  if (!cameraIsFlat()) {
+    fillGroundDisc(x, y, r + ring / 2, paint.stroke);
+    fillGroundDisc(x, y, Math.max(0.6, r - ring / 2), paint.fill);
+    return;
+  }
+  // 1 km and 5 km: draw the real disc so it shrinks into a dot. The
+  // usual marker scale would hold it at race size after the zoom settles.
+  // The white ring is the same one the tilted disc uses, so the mark does
+  // not change on the frame the camera finishes flattening.
+  if (isOverviewZoom()) {
+    const s = Math.max(followCam.scale || 1, 0.02);
+    const grow = Math.max(1, (0.9 / s) / r);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.beginPath();
+    ctx.arc(0, 0, (r + ring / 2) * grow, 0, Math.PI * 2);
+    ctx.fillStyle = paint.stroke;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, 0, Math.max(0.4, (r - ring / 2) * grow), 0, Math.PI * 2);
+    ctx.fillStyle = paint.fill;
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
   withWorldMarker(x, y, () => {
-    const r = isTurn ? 8 : 4;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, 2 * Math.PI);
     ctx.fillStyle = paint.fill;
     ctx.fill();
-    ctx.lineWidth = isTurn ? 2 : 1.5;
+    ctx.lineWidth = ring;
     ctx.strokeStyle = paint.stroke;
     ctx.stroke();
   });
@@ -4072,7 +4344,7 @@ function drawTrack(intro) {
 
 function telemetryTopY() {
   const btn = document.getElementById('customizeGhostBtn');
-  const link = document.getElementById('designerLink');
+  const link = document.getElementById('editTrackLink') || document.getElementById('designerLink');
   const btnVisible = btn && getComputedStyle(btn).display !== 'none';
   const el = btnVisible ? btn : link;
   if (!el) return 88;
@@ -4080,6 +4352,7 @@ function telemetryTopY() {
 }
 
 function drawTelemetry() {
+  if (document.body.classList.contains('pro-open')) return;
   updateGhostStats();
   ctx.save();
   ctx.font = '14px monospace';
@@ -4113,17 +4386,44 @@ function drawTelemetry() {
   ctx.restore();
 }
 
+// Local +Y is the nose (it maps onto the heading). The rails curve all the
+// way aft; only the last edge of the tail is flat.
+function traceBoard() {
+  ctx.beginPath();
+  ctx.moveTo(0, 13);
+  ctx.bezierCurveTo(2.2, 11.4, 3.6, 7.4, 4.15, 3.4);
+  ctx.bezierCurveTo(4.55, -0.4, 4.15, -5.4, 3.15, -9);
+  ctx.quadraticCurveTo(2.55, -11.5, 1.9, -12.35);
+  ctx.lineTo(-1.9, -12.35);
+  ctx.quadraticCurveTo(-2.55, -11.5, -3.15, -9);
+  ctx.bezierCurveTo(-4.15, -5.4, -4.55, -0.4, -4.15, 3.4);
+  ctx.bezierCurveTo(-3.6, 7.4, -2.2, 11.4, 0, 13);
+  ctx.closePath();
+}
+
 function drawRacer() {
   withWorldMarker(pos.x, pos.y, () => {
     ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
-    ctx.beginPath();
-    ctx.moveTo(0, 12.5);
-    ctx.bezierCurveTo(4, 7.5, 4, -7.5, 0, -12.5);
-    ctx.bezierCurveTo(-4, -7.5, -4, 7.5, 0, 12.5);
-    ctx.closePath();
-    ctx.fillStyle = '#00ccff';
-    ctx.fill();
-  });
+    traceBoard();
+    fillRiderBoard();
+  }, riderMarkerMul());
+}
+
+function fillRiderBoard() {
+  const meta = activeRider.meta;
+  const stops = shineStops(BOARD_SHINE[meta.gloss]);
+  if (stops.length) {
+    const g = ctx.createLinearGradient(0, 13, 0, -12.35);
+    stops.forEach(stop => g.addColorStop(stop.at, stop.color));
+    ctx.fillStyle = g;
+  } else {
+    ctx.fillStyle = meta.color;
+  }
+  ctx.fill();
+  const lightEdge = meta.id === 'antti' || meta.gloss === 'silver' || meta.gloss === 'red';
+  ctx.strokeStyle = lightEdge ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6);
+  ctx.stroke();
 }
 
 // --- Ideal Line Toggle ---
@@ -4408,13 +4708,22 @@ function gameLoop(timestamp) {
 
   if (!settleReveal && !rideSimPaused) {
     wakeTrail.push({ x: pos.x, y: pos.y });
-    const targetWakeLength = (speed / maxSpeed) * 200;
+    const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
     }
     update(dt);
   } else if (rideIntroFrame) {
     updateFollowCamera(dt);
+  }
+  stepMapDepart();
+  if (atlas.open) {
+    setGroundVisible(false);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawAtlas();
+    requestAnimationFrame(gameLoop);
+    return;
   }
 
   const flat = cameraIsFlat();
@@ -5383,7 +5692,7 @@ function updateRideMeter(speedKmh) {
     const bar = document.getElementById('speedBar');
     const fill = document.getElementById('speedBarFill');
     if (bar && fill) {
-      const pct = Math.max(0, Math.min(1, speed / maxSpeed));
+      const pct = Math.max(0, Math.min(1, speed / activeRider.maxSpeed));
       fill.style.width = `${pct * 100}%`;
       fill.style.backgroundSize = `${bar.clientWidth}px 100%`;
     }
@@ -5420,6 +5729,369 @@ export function resumeGame() {
 }
 
 const highScoreManager = new HighScoreManager();
+
+let setProRackOpen = () => {};
+let proSliderIndex = 0;
+let proReverting = false;
+
+function shineStops(shine) {
+  if (!shine || !shine.length) return [];
+  return shine.map((stop, i) => (
+    typeof stop === 'string'
+      ? { at: shine.length === 1 ? 0 : i / (shine.length - 1), color: stop }
+      : stop
+  ));
+}
+
+const PRO_SLIDERS = [
+  { id: 'riderTop', key: 'topKmh', label: 'Top speed', unit: 'km/h', digits: 1 },
+  { id: 'riderAccel', key: 'accelKmhS', label: 'Acceleration', unit: 'km/h/s', digits: 1 },
+  { id: 'riderLean0', key: 'lean0', label: 'Lean to 30°', unit: '°/s', digits: 0 },
+  { id: 'riderLean30', key: 'lean30', label: 'Lean past 30°', unit: '°/s', digits: 0 },
+  { id: 'riderArc', key: 'arc60', label: 'Arc at 60 km/h', unit: 'm', digits: 0 }
+];
+
+let savedTunes = JSON.parse(JSON.stringify(riderState.tunes));
+
+function formatTuneValue(value, digits) {
+  return digits ? Number(value).toFixed(digits) : String(Math.round(value));
+}
+
+function persistSavedRiders() {
+  saveRiderState({
+    id: riderState.id,
+    showLabel: riderState.showLabel,
+    tunes: savedTunes
+  });
+}
+
+function proTuneDirty() {
+  return JSON.stringify(riderState.tunes[riderState.id]) !== JSON.stringify(savedTunes[riderState.id]);
+}
+
+const BOARD_PREVIEW_PATH = 'M70 18 C96 32 110 68 116 114 C122 162 116 208 106 250 C98 284 94 304 90 316 L50 316 C46 304 42 284 34 250 C24 208 18 162 24 114 C30 68 44 32 70 18 Z';
+
+function boardMarkup(rider) {
+  const stops = shineStops(BOARD_SHINE[rider.gloss]);
+  const gradient = stops.length
+    ? `<linearGradient id="proShine" x1="0" y1="0" x2="0" y2="1">${stops.map(s => `<stop offset="${s.at * 100}%" stop-color="${s.color}"/>`).join('')}</linearGradient>`
+    : '';
+  const fill = stops.length ? 'url(#proShine)' : rider.color;
+  const lightEdge = rider.id === 'antti' || rider.gloss === 'silver' || rider.gloss === 'red';
+  const stroke = lightEdge ? 'rgba(255,255,255,0.82)' : 'rgba(0,0,0,0.35)';
+  const sw = rider.id === 'antti' ? 2.5 : 1.25;
+  const streakEnd = rider.gloss === 'silver' || rider.gloss === 'red' ? 190 : 250;
+  const streakOpacity = rider.gloss === 'gold' ? 0.72 : (stops.length ? 0.42 : 0.18);
+  return `<svg viewBox="0 0 140 330" aria-hidden="true"><defs>
+    <clipPath id="proClip"><path d="${BOARD_PREVIEW_PATH}"/></clipPath>
+    ${gradient}
+  </defs>
+    <ellipse cx="70" cy="322" rx="30" ry="4" fill="rgba(0,0,0,0.35)"/>
+    <path d="${BOARD_PREVIEW_PATH}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" stroke-linejoin="miter"/>
+    <g clip-path="url(#proClip)">
+      <path d="M78 46 C92 100 88 150 74 ${streakEnd}" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity="${streakOpacity}"/>
+    </g>
+  </svg>`;
+}
+
+const proWide = window.matchMedia('(min-width: 1000px)');
+function rackIsWide() { return proWide.matches; }
+
+function paintSlider(row, value = riderState.tunes[riderState.id][row.key]) {
+  const lim = RIDER_LIMITS[row.key];
+  const t = (value - lim.min) / (lim.max - lim.min);
+  const fill = document.getElementById(row.id + 'Fill');
+  const thumb = document.getElementById(row.id + 'Thumb');
+  const label = document.getElementById(row.id + 'Val');
+  const track = document.getElementById(row.id);
+  const text = `${formatTuneValue(value, row.digits)} ${row.unit}`;
+  if (fill) fill.style.width = `${t * 100}%`;
+  if (thumb) thumb.style.left = `${t * 100}%`;
+  if (label) label.textContent = text;
+  if (track) {
+    track.setAttribute('aria-valuenow', String(value));
+    track.setAttribute('aria-valuetext', text);
+  }
+}
+
+function applySlider(row, raw) {
+  riderState.tunes[riderState.id] = clampTune({
+    ...riderState.tunes[riderState.id],
+    [row.key]: raw
+  });
+  applyActiveRider();
+  paintSlider(row);
+  const save = document.getElementById('proSave');
+  if (save) save.classList.toggle('dirty', proTuneDirty());
+}
+
+function syncProSelection() {
+  const rows = document.querySelectorAll('#proSliders .proSlider');
+  rows.forEach((row, i) => {
+    const on = i === proSliderIndex;
+    row.classList.toggle('active', on);
+    const track = row.querySelector('.proTrack');
+    if (track) track.tabIndex = on ? 0 : -1;
+  });
+  if (!document.body.classList.contains('pro-open')) return;
+  const track = rows[proSliderIndex] && rows[proSliderIndex].querySelector('.proTrack');
+  if (track && document.activeElement !== track) track.focus({ preventScroll: true });
+}
+
+function saveProTune() {
+  savedTunes[riderState.id] = clampTune(riderState.tunes[riderState.id]);
+  riderState.tunes[riderState.id] = clampTune(savedTunes[riderState.id]);
+  persistSavedRiders();
+  syncProRack();
+}
+
+function revertProAndClose() {
+  if (proReverting) return;
+  const id = riderState.id;
+  const from = { ...riderState.tunes[id] };
+  const to = { ...savedTunes[id] };
+  const same = Object.keys(to).every(key => from[key] === to[key]);
+  if (same) {
+    setProRackOpen(false);
+    return;
+  }
+  proReverting = true;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const t0 = performance.now();
+  const dur = reduce ? 0 : 380;
+  const tick = now => {
+    const u = dur === 0 ? 1 : Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - u, 3);
+    const mixed = {};
+    for (const key of Object.keys(to)) mixed[key] = from[key] + (to[key] - from[key]) * e;
+    riderState.tunes[id] = clampTune(mixed);
+    applyActiveRider();
+    for (const row of PRO_SLIDERS) paintSlider(row, mixed[row.key]);
+    const save = document.getElementById('proSave');
+    if (save) save.classList.toggle('dirty', u < 1);
+    if (u < 1) requestAnimationFrame(tick);
+    else {
+      riderState.tunes[id] = clampTune(to);
+      applyActiveRider();
+      proReverting = false;
+      setProRackOpen(false);
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+function cycleProSlider(dir) {
+  proSliderIndex = (proSliderIndex + dir + PRO_SLIDERS.length) % PRO_SLIDERS.length;
+  syncProSelection();
+}
+
+function nudgeProSlider(dir) {
+  const row = PRO_SLIDERS[proSliderIndex];
+  const lim = RIDER_LIMITS[row.key];
+  applySlider(row, riderState.tunes[riderState.id][row.key] + dir * lim.step);
+}
+
+function handleProKey(e) {
+  if (!document.body.classList.contains('pro-open')) return false;
+  if (proReverting) {
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'ArrowUp') { e.preventDefault(); cycleProSlider(-1); return true; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); cycleProSlider(1); return true; }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); nudgeProSlider(-1); return true; }
+  if (e.key === 'ArrowRight') { e.preventDefault(); nudgeProSlider(1); return true; }
+  if (e.key === 'Enter' && !e.repeat) { e.preventDefault(); saveProTune(); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); revertProAndClose(); return true; }
+  if ((e.key === 'c' || e.key === 'C') && !e.repeat) { e.preventDefault(); setProRackOpen(false); return true; }
+  return false;
+}
+
+function syncProRack() {
+  const rider = riderById(riderState.id);
+  const front = document.getElementById('proFront');
+  if (!front) return;
+  const wide = rackIsWide();
+  const card = document.getElementById('proCard');
+  if (wide && card) card.classList.remove('flipped');
+  front.innerHTML = `<div class="proBoard">${boardMarkup(rider)}</div>`;
+  const name = document.getElementById('proName');
+  if (name) name.textContent = rider.name;
+  if (wide) {
+    front.removeAttribute('role');
+    front.removeAttribute('aria-pressed');
+    front.tabIndex = -1;
+    front.setAttribute('aria-label', `${rider.name}'s board`);
+  } else {
+    front.setAttribute('role', 'button');
+    front.tabIndex = 0;
+    front.setAttribute('aria-label', `Flip ${rider.name}'s board to customize`);
+    front.setAttribute('aria-pressed', card && card.classList.contains('flipped') ? 'true' : 'false');
+  }
+  for (const row of PRO_SLIDERS) paintSlider(row);
+  syncProSelection();
+  const save = document.getElementById('proSave');
+  if (save) save.classList.toggle('dirty', proTuneDirty());
+  const nameBtn = document.getElementById('ghostLabelBtn');
+  if (nameBtn) {
+    nameBtn.setAttribute('aria-pressed', riderState.showLabel ? 'true' : 'false');
+    nameBtn.classList.toggle('off', !riderState.showLabel);
+  }
+}
+
+function selectPro(id) {
+  if (!RIDERS.some(r => r.id === id)) return;
+  riderState.id = id;
+  applyActiveRider();
+  persistSavedRiders();
+  syncProRack();
+}
+
+function stepPro(dir) {
+  const i = RIDERS.findIndex(r => r.id === riderState.id);
+  const next = RIDERS[(i + dir + RIDERS.length) % RIDERS.length];
+  selectPro(next.id);
+}
+
+function toggleGhostLabel() {
+  riderState.showLabel = !riderState.showLabel;
+  persistSavedRiders();
+  syncProRack();
+}
+
+function initProRack() {
+  const btn = document.getElementById('pickProBtn');
+  const rack = document.getElementById('proRack');
+  const front = document.getElementById('proFront');
+  if (!btn || !rack || !front) return;
+
+  const sliders = document.getElementById('proSliders');
+  for (const row of PRO_SLIDERS) {
+    const lim = RIDER_LIMITS[row.key];
+    const wrap = document.createElement('div');
+    wrap.className = 'proSlider';
+    wrap.innerHTML = `<div class="proSliderHead"><span>${row.label}</span><b id="${row.id}Val"></b></div>
+      <div class="proTrack" id="${row.id}" role="slider" tabindex="0" aria-label="${row.label}" aria-orientation="horizontal" aria-valuemin="${lim.min}" aria-valuemax="${lim.max}">
+        <div class="proTrackLine"></div>
+        <div class="proTrackFill" id="${row.id}Fill"></div>
+        <div class="proThumb" id="${row.id}Thumb"></div>
+      </div>`;
+    sliders.appendChild(wrap);
+    const track = wrap.querySelector('.proTrack');
+    const valueFromX = clientX => {
+      const rect = track.getBoundingClientRect();
+      const span = rect.width || 1;
+      const t = Math.max(0, Math.min(1, (clientX - rect.left) / span));
+      return lim.min + t * (lim.max - lim.min);
+    };
+    track.addEventListener('pointerdown', e => {
+      if (e.button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      proSliderIndex = PRO_SLIDERS.indexOf(row);
+      syncProSelection();
+      track.setPointerCapture(e.pointerId);
+      applySlider(row, valueFromX(e.clientX));
+    });
+    track.addEventListener('pointermove', e => {
+      if (!track.hasPointerCapture(e.pointerId)) return;
+      e.preventDefault();
+      applySlider(row, valueFromX(e.clientX));
+    });
+  }
+
+  const card = document.getElementById('proCard');
+  const setRackOpen = open => {
+    rack.classList.toggle('open', open);
+    document.body.classList.toggle('pro-open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (!open && card) card.classList.remove('flipped');
+    if (open) {
+      proSliderIndex = 0;
+      syncProRack();
+    }
+  };
+  setProRackOpen = setRackOpen;
+  bindChromeTap(btn, () => setRackOpen(!rack.classList.contains('open')));
+  const bindStep = (el, dir) => {
+    if (!el) return;
+    let swallowClick = 0;
+    el.addEventListener('pointerdown', e => {
+      if (e.button) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.pointerType === 'mouse') return;
+      swallowClick = performance.now() + 700;
+      stepPro(dir);
+    });
+    el.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (performance.now() < swallowClick) return;
+      stepPro(dir);
+    });
+  };
+  bindStep(document.getElementById('proPrev'), -1);
+  bindStep(document.getElementById('proNext'), 1);
+  bindChromeTap(document.getElementById('proSave'), () => saveProTune());
+  bindChromeTap(document.getElementById('proReset'), () => {
+    const stock = clampTune(presetTune(riderById(riderState.id)));
+    riderState.tunes[riderState.id] = stock;
+    savedTunes[riderState.id] = stock;
+    applyActiveRider();
+    persistSavedRiders();
+    syncProRack();
+  });
+  bindChromeTap(document.getElementById('ghostLabelBtn'), toggleGhostLabel);
+  bindChromeTap(document.getElementById('editTrackLink'), editCurrentTrack);
+
+  rack.addEventListener('click', e => {
+    if (e.target === rack) setRackOpen(false);
+  });
+  proWide.addEventListener('change', () => {
+    if (rackIsWide() && card) card.classList.remove('flipped');
+    syncProRack();
+  });
+
+  let drag = null;
+  front.addEventListener('pointerdown', e => {
+    if (e.button) return;
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+    front.setPointerCapture(e.pointerId);
+  });
+  front.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 10) drag.moved = true;
+  });
+  const endDrag = e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    const moved = drag.moved;
+    drag = null;
+    if (Math.abs(dx) >= 42 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      stepPro(dx < 0 ? 1 : -1);
+      return;
+    }
+    if (!moved && !rackIsWide()) {
+      card.classList.toggle('flipped');
+      syncProRack();
+    }
+  };
+  front.addEventListener('pointerup', endDrag);
+  front.addEventListener('pointercancel', () => { drag = null; });
+  front.addEventListener('keydown', e => {
+    if (rackIsWide()) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    card.classList.toggle('flipped');
+    syncProRack();
+  });
+
+  syncProRack();
+}
+
+initProRack();
 
 requestAnimationFrame(gameLoop);
 
