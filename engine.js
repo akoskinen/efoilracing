@@ -5899,6 +5899,11 @@ function handleProKey(e) {
   }
   if (e.key === 'ArrowUp') { e.preventDefault(); cycleProSlider(-1); return true; }
   if (e.key === 'ArrowDown') { e.preventDefault(); cycleProSlider(1); return true; }
+  if (e.shiftKey && rackIsWide() && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    if (!e.repeat) stepPro(e.key === 'ArrowRight' ? 1 : -1);
+    return true;
+  }
   if (e.key === 'ArrowLeft') { e.preventDefault(); nudgeProSlider(-1); return true; }
   if (e.key === 'ArrowRight') { e.preventDefault(); nudgeProSlider(1); return true; }
   if (e.key === 'Enter' && !e.repeat) { e.preventDefault(); saveProTune(); return true; }

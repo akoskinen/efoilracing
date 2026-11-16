@@ -38,19 +38,26 @@ export const RIDER_LIMITS = {
 const TUNE_KEYS = Object.keys(RIDER_LIMITS);
 
 /**
- * Rack order. Standard is the original cyan board (60 km/h in 18 s,
- * lean 40 then 10 °/s, 72 m arc). KOSKINEN, MAKA and ARPA get the
- * quick lean. VARKEVISSER keeps the slower lean.
+ * Rack order. These are the stock tunes. Reset restores them.
  * gloss paints the board from nose to tail. Silver and red stay
  * their color through 70% of the length, then fall off to black.
  */
 export const RIDERS = [
-  { id: 'standard', name: 'Standard', color: '#00ccff', gloss: 'solid', topKmh: 60, accelKmhS: 3.3, lean0: 40, lean30: 10, arc60: 72 },
-  { id: 'antti', name: 'KOSKINEN', color: '#141414', gloss: 'solid', topKmh: 60, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 62 },
-  { id: 'carmine', name: 'MAKA', color: '#d5d8de', gloss: 'silver', topKmh: 66, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 92 },
-  { id: 'piet', name: 'VARKEVISSER', color: '#d4a017', gloss: 'gold', topKmh: 66, accelKmhS: 5.1, lean0: 40, lean30: 10, arc60: 100 },
-  { id: 'manel', name: 'ARPA', color: '#e53935', gloss: 'red', topKmh: 66, accelKmhS: 5.1, lean0: 60, lean30: 28, arc60: 50 }
+  { id: 'standard', name: 'Standard', color: '#00ccff', gloss: 'solid', topKmh: 48, accelKmhS: 3.3, lean0: 40, lean30: 10, arc60: 72 },
+  { id: 'antti', name: 'KOSKINEN', color: '#141414', gloss: 'solid', topKmh: 52, accelKmhS: 3.4, lean0: 60, lean30: 28, arc60: 62 },
+  { id: 'carmine', name: 'MAKA', color: '#d5d8de', gloss: 'silver', topKmh: 54.5, accelKmhS: 4.5, lean0: 70, lean30: 30, arc60: 66 },
+  { id: 'piet', name: 'VARKEVISSER', color: '#d4a017', gloss: 'gold', topKmh: 57.5, accelKmhS: 5, lean0: 61, lean30: 22, arc60: 70 },
+  { id: 'manel', name: 'ARPA', color: '#e53935', gloss: 'red', topKmh: 59.5, accelKmhS: 5.2, lean0: 72, lean30: 42, arc60: 50 }
 ];
+
+/** Stock before this tune pass. A save that still matches it takes the new stock. */
+const PREVIOUS_STOCK = {
+  standard: { topKmh: 60, accelKmhS: 3.3, lean0: 40, lean30: 10, arc60: 72 },
+  antti: { topKmh: 60, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 62 },
+  carmine: { topKmh: 66, accelKmhS: 3.3, lean0: 60, lean30: 28, arc60: 92 },
+  piet: { topKmh: 66, accelKmhS: 5.1, lean0: 40, lean30: 10, arc60: 100 },
+  manel: { topKmh: 66, accelKmhS: 5.1, lean0: 60, lean30: 28, arc60: 50 }
+};
 
 /**
  * Nose-to-tail paint. `at` is 0 at the nose and 1 at the tail.
@@ -123,12 +130,25 @@ export function riderDynamics(tune) {
   };
 }
 
+function tunesMatch(a, b) {
+  const left = clampTune(a);
+  const right = clampTune(b);
+  return TUNE_KEYS.every(key => left[key] === right[key]);
+}
+
 export function loadRiderState() {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch { saved = null; }
   const tunes = {};
   for (const rider of RIDERS) {
-    tunes[rider.id] = clampTune({ ...presetTune(rider), ...(saved && saved.tunes && saved.tunes[rider.id]) });
+    const preset = clampTune(presetTune(rider));
+    const stored = saved && saved.tunes && saved.tunes[rider.id];
+    const previous = PREVIOUS_STOCK[rider.id];
+    if (stored && !(previous && tunesMatch(stored, previous))) {
+      tunes[rider.id] = clampTune({ ...preset, ...stored });
+    } else {
+      tunes[rider.id] = preset;
+    }
   }
   const id = RIDERS.some(r => r.id === (saved && saved.id)) ? saved.id : 'standard';
   return { id, showLabel: !(saved && saved.showLabel === false), tunes };
