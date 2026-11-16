@@ -31,9 +31,9 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map**. **C** and **O** still work while the map is open |
 | **F** | Fullscreen. Top-right **F Fullscreen** |
 | **O** | Show or hide the ghost's rider name. Top-right **O Ghost name**, in the same group as the other blue links |
-| **C** | **C Pick a Pro**, including from the world map. The board fills the view: Standard, KOSKINEN, MAKA, VARKEVISSER, and ARPA. Swipe it or use the blue arrows beside the board. On a desktop the sliders sit beside the board, and Shift+Left / Shift+Right move between boards. On a phone, tap the board to flip to the sliders. Up and Down move between the settings, Left and Right change the value, Enter saves, Esc eases the sliders back to the last save and closes. **Reset** restores that pro's stock setup |
+| **C** | **C Custom boards**, including from the world map. The board fills the view: Standard, KOSKINEN, MAKA, VARKEVISSER, and ARPA. Swipe it or use the blue arrows beside the board. On a desktop the sliders sit beside the board, and Shift+Left / Shift+Right move between boards. On a phone, tap the board to flip to the sliders. Up and Down move between the settings, Left and Right change the value, Enter saves, Esc eases the sliders back to the last save and closes. **Reset** restores that board's stock setup |
 
-The top-right group is **C Pick a Pro** • **O Ghost name**, then **T World Map** • **F Fullscreen**, then **P Hide Path** when the course has a line. Top-left stays **Design a track**, with **Edit current track** under it. That opens the designer on the course you are riding.
+The top-right group is **C Custom boards** • **O Ghost name**, then **T World Map** • **F Fullscreen**, then **P Hide Path** when the course has a line. Top-left stays **Design a track**, with **Edit current track** under it. That opens the designer on the course you are riding.
 
 HUD chrome (T / F / P / C / O, **Edit current track**, and **Customize ghost**) must work with a **finger** as well as a mouse. The race canvas captures touches for steer/throttle; new overlay controls need a ~44 px hit target and `bindChromeTap` (pointer/touch down, not `click` alone) so the canvas cannot steal the tap. Always verify on a touch device, not only with a cursor.
 
