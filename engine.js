@@ -3760,7 +3760,7 @@ document.addEventListener('keydown', function(e) {
     } else if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
       e.preventDefault();
       setProRackOpen(true);
-    } else if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+    } else if ((e.key === 'n' || e.key === 'N') && !e.repeat) {
       e.preventDefault();
       toggleGhostLabel();
     }
@@ -3821,8 +3821,8 @@ document.addEventListener('keydown', function(e) {
     return;
   }
 
-  // O shows or hides the ghost's rider name. L stays lean-right.
-  if ((e.key === 'o' || e.key === 'O') && !e.repeat) {
+  // N shows or hides the ghost's rider name. L stays lean-right.
+  if ((e.key === 'n' || e.key === 'N') && !e.repeat) {
     e.preventDefault();
     toggleGhostLabel();
   }

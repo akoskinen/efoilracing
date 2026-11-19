@@ -35,7 +35,7 @@ Attribution stays on-screen: Imagery © Esri — Maxar, Earthstar Geographics.
 
 ### Session CSV → ghost
 
-Onboard logs (`session_*.csv`) import as ghosts. Timing prefers real `lap_elapsed_s`; otherwise wall-clock `t_unix` (some files have `lap_index: -1` and elapsed all 0). Positions go through the **active track’s geo.origin**, never a re-centered origin. Ghosts preview immediately (loop until the rider starts a lap). Heading space is track meters.
+Onboard logs (`session_*.csv`) import as ghosts. The ghost is the whole file, timed on wall-clock `t_unix` so a ride before the gate is not collapsed by `lap_elapsed_s` staying at 0. `lap_elapsed_s` is only the clock when the file has no usable timestamps. Positions go through the **active track’s geo.origin**, never a re-centered origin. Ghosts preview immediately (loop until the rider starts a lap). Heading space is track meters.
 
 ### Designer: Tracks vs presets
 
