@@ -1234,7 +1234,7 @@ export function loadDraft() {
 
 // --- Session CSV (eFoil Racing iOS app) → simulator ghost ---
 
-function parseCsvLine(line) {
+function parseCsvLine(line, delimiter = ',') {
   const out = [];
   let cur = '';
   let inQuotes = false;
@@ -1247,7 +1247,7 @@ function parseCsvLine(line) {
       } else cur += ch;
     } else if (ch === '"') {
       inQuotes = true;
-    } else if (ch === ',') {
+    } else if (ch === delimiter) {
       out.push(cur);
       cur = '';
     } else {
@@ -1256,6 +1256,21 @@ function parseCsvLine(line) {
   }
   out.push(cur);
   return out;
+}
+
+// A header can be comma, semicolon, or tab separated. Pick the split that
+// actually yields the column names (a semicolon file is one field if split on commas).
+function csvHeaderMatch(line) {
+  let best = null;
+  for (const delimiter of [',', ';', '\t']) {
+    const cols = parseCsvLine(line, delimiter).map(c => c.trim().toLowerCase());
+    const looksHeader = cols.some(c => SESSION_CSV_LAT_NAMES.includes(c))
+      || cols[0] === 'time'
+      || cols[0] === 'time_utc';
+    if (!looksHeader) continue;
+    if (!best || cols.length > best.cols.length) best = { delimiter, cols };
+  }
+  return best;
 }
 
 // Admin/backend exports use short column names; map them onto the app's.
@@ -1274,8 +1289,12 @@ const SESSION_CSV_LAT_NAMES = ['lat_deg', ...SESSION_CSV_ALIASES.lat_deg];
 const SESSION_CSV_MAX_HACC_M = 50;
 
 function numOrNaN(v) {
-  if (v == null || String(v).trim() === '') return NaN;
-  return Number(v);
+  if (v == null) return NaN;
+  let s = String(v).trim();
+  if (!s) return NaN;
+  // Semicolon-delimited logs keep a comma as the decimal mark (60,1712).
+  if (/^-?\d+,\d+$/.test(s)) s = s.replace(',', '.');
+  return Number(s);
 }
 
 function sessionCsvColumnMap(headers) {
@@ -1293,6 +1312,7 @@ export function parseSessionCsv(text) {
   const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
   const meta = {};
   let headerIdx = -1;
+  let delimiter = ',';
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -1301,9 +1321,10 @@ export function parseSessionCsv(text) {
       if (m) meta[m[1].trim()] = m[2].trim();
       continue;
     }
-    const cols = parseCsvLine(line).map(c => c.trim().toLowerCase());
-    if (line.toLowerCase().startsWith('time,') || cols.some(c => SESSION_CSV_LAT_NAMES.includes(c))) {
+    const match = csvHeaderMatch(line);
+    if (match) {
       headerIdx = i;
+      delimiter = match.delimiter;
       break;
     }
   }
@@ -1311,15 +1332,20 @@ export function parseSessionCsv(text) {
     return { meta, headers: [], rows: [], errors: ['No CSV header row found (expected lat_deg or lat / lon columns)'] };
   }
 
-  const headers = parseCsvLine(lines[headerIdx]).map(h => h.trim());
-  const aliases = sessionCsvColumnMap(headers);
+  let headers = parseCsvLine(lines[headerIdx], delimiter).map(h => h.trim());
+  let aliases = sessionCsvColumnMap(headers);
   const rows = [];
   let droppedInaccurate = 0;
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line || line.startsWith('#')) continue;
-    const cols = parseCsvLine(line);
-    if (cols.length < 8) continue;
+    const cols = parseCsvLine(line, delimiter);
+    // A later table (lap summary, then the full log) brings its own header.
+    if (csvHeaderMatch(line)) {
+      headers = cols.map(h => h.trim());
+      aliases = sessionCsvColumnMap(headers);
+      continue;
+    }
     const row = {};
     headers.forEach((h, idx) => { row[h] = cols[idx] ?? ''; });
     for (const [canon, src] of Object.entries(aliases)) row[canon] = row[src];
@@ -1333,16 +1359,16 @@ export function parseSessionCsv(text) {
     }
     row._lat = lat;
     row._lon = lon;
-    row._speedKmh = Number(row.speed_kmh);
-    if (!Number.isFinite(row._speedKmh) && Number.isFinite(Number(row.speed_mps))) {
-      row._speedKmh = Number(row.speed_mps) * 3.6;
+    row._speedKmh = numOrNaN(row.speed_kmh);
+    if (!Number.isFinite(row._speedKmh) && Number.isFinite(numOrNaN(row.speed_mps))) {
+      row._speedKmh = numOrNaN(row.speed_mps) * 3.6;
     }
     // Blank heading is "unknown", not due north.
     row._headingDeg = numOrNaN(row.heading_deg);
-    row._lapElapsed = Number(row.lap_elapsed_s);
-    const lapIdx = Number(row.lap_index);
+    row._lapElapsed = numOrNaN(row.lap_elapsed_s);
+    const lapIdx = numOrNaN(row.lap_index);
     row._lapIndex = Number.isFinite(lapIdx) ? lapIdx : null;
-    const tUnix = Number(row.t_unix);
+    const tUnix = numOrNaN(row.t_unix);
     if (Number.isFinite(tUnix)) {
       row._tUnix = tUnix;
     } else if (row.t_iso) {
@@ -1435,64 +1461,51 @@ export function compassToTrackHeadingRad(compassDeg, rotationDeg = 0) {
   return Math.atan2(dy, dx);
 }
 
-function sessionLapGroups(rows) {
-  const groups = new Map();
-  for (const row of rows) {
-    // lap_index -1 / missing means "not in a timed lap" in app exports
-    const key = Number.isFinite(row._lapIndex) && row._lapIndex >= 0
-      ? row._lapIndex
-      : (row.Lap && String(row.Lap).trim() && !/^$/.test(row.Lap) ? String(row.Lap).trim() : 'session');
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(row);
-  }
-  return groups;
-}
-
 function groupWallElapsed(group) {
-  const a = group.find(r => Number.isFinite(r._tUnix));
-  const b = [...group].reverse().find(r => Number.isFinite(r._tUnix));
-  if (a && b) return Math.max(0, b._tUnix - a._tUnix);
-  return 0;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const row of group) {
+    if (!Number.isFinite(row._tUnix)) continue;
+    if (row._tUnix < min) min = row._tUnix;
+    if (row._tUnix > max) max = row._tUnix;
+  }
+  return max > min ? max - min : 0;
 }
 
 function groupLapElapsed(group) {
-  const timed = group.filter(r => Number.isFinite(r._lapElapsed));
-  if (timed.length < 2) return 0;
-  const span = timed[timed.length - 1]._lapElapsed - timed[0]._lapElapsed;
+  let min = Infinity;
+  let max = -Infinity;
+  let n = 0;
+  for (const row of group) {
+    if (!Number.isFinite(row._lapElapsed)) continue;
+    n++;
+    if (row._lapElapsed < min) min = row._lapElapsed;
+    if (row._lapElapsed > max) max = row._lapElapsed;
+  }
+  if (n < 2) return 0;
+  const span = max - min;
   // All zeros (common when lap_index is -1) is not usable lap timing
   if (span <= 0.05) return 0;
   return span;
 }
 
-function pickBestSessionLap(rows) {
-  const groups = sessionLapGroups(rows);
-  let best = null;
-  for (const [key, group] of groups) {
-    if (!group.length) continue;
-    const moving = group.filter(r => (r._speedKmh || 0) > 3).length;
-    let dist = 0;
-    for (let i = 1; i < group.length; i++) {
-      dist += haversineMeters(
-        { lat: group[i - 1]._lat, lng: group[i - 1]._lon },
-        { lat: group[i]._lat, lng: group[i]._lon }
-      );
-    }
-    const lapElapsed = groupLapElapsed(group);
-    const wallElapsed = groupWallElapsed(group);
-    const elapsed = lapElapsed > 0 ? lapElapsed : wallElapsed;
-    const score = dist + moving * 5;
-    if (!best || score > best.score) {
-      best = {
-        key,
-        rows: group,
-        dist,
-        elapsed,
-        useLapElapsed: lapElapsed > 0,
-        score
-      };
-    }
-  }
-  return best;
+// Keep every sample. lap_elapsed_s stays 0 until the timed lap, so using it
+// as the clock squeezes the rest of the ride onto one frame and it disappears.
+function orderSessionRows(rows) {
+  const wall = groupWallElapsed(rows);
+  const lap = groupLapElapsed(rows);
+  const useLapElapsed = !(wall > 0.05) && lap > 0;
+  const ordered = rows.map((row, index) => ({ row, index }));
+  ordered.sort((a, b) => {
+    const ta = useLapElapsed ? a.row._lapElapsed : a.row._tUnix;
+    const tb = useLapElapsed ? b.row._lapElapsed : b.row._tUnix;
+    const aOk = Number.isFinite(ta);
+    const bOk = Number.isFinite(tb);
+    if (aOk && bOk && ta !== tb) return ta - tb;
+    if (aOk !== bOk) return aOk ? -1 : 1;
+    return a.index - b.index;
+  });
+  return { rows: ordered.map(item => item.row), useLapElapsed };
 }
 
 function rowGhostTime(row, t0, useLapElapsed) {
@@ -1790,19 +1803,18 @@ function ghostFromSessionRows(parsed, geo, options = {}) {
   }
 
   const warnings = [];
-  const best = pickBestSessionLap(parsed.rows);
-  if (!best || best.rows.length < 2) {
+  // The whole file is the ride. Picking the "best" lap drops the path before
+  // the gate and any later laps, even though those points are in the CSV.
+  const ride = orderSessionRows(parsed.rows);
+  if (ride.rows.length < 2) {
     return { ghost: null, track: null, errors: ['Not enough GPS samples to build a ghost'], warnings };
   }
 
-  const lapRows = best.rows;
-  const useLapElapsed = !!best.useLapElapsed;
+  const lapRows = ride.rows;
+  const useLapElapsed = ride.useLapElapsed;
   const t0 = useLapElapsed
     ? lapRows.find(r => Number.isFinite(r._lapElapsed))?._lapElapsed ?? 0
     : lapRows.find(r => Number.isFinite(r._tUnix))?._tUnix ?? 0;
-  if (!useLapElapsed) {
-    warnings.push('No lap markers — using full session wall-clock time');
-  }
 
   const distToOrigin = sessionDistanceToGeoOrigin(lapRows, geo);
   if (Number.isFinite(distToOrigin) && distToOrigin > 800) {
@@ -1834,8 +1846,8 @@ function ghostFromSessionRows(parsed, geo, options = {}) {
     prevM = m;
 
     let elapsed = rowGhostTime(row, t0, useLapElapsed);
-    if (elapsed == null) elapsed = frames.length * 0.05;
     const prevFrame = frames[frames.length - 1];
+    if (elapsed == null) elapsed = prevFrame ? prevFrame.time + 0.05 : 0;
     if (prevFrame && Math.abs(elapsed - prevFrame.time) < 0.01) return;
     const speedKmh = Number.isFinite(row._speedKmh) ? row._speedKmh : 0;
     const speedRounded = Math.round(speedKmh * 10) / 10;
@@ -1869,8 +1881,8 @@ function ghostFromSessionRows(parsed, geo, options = {}) {
     warnings.push(`Smoothed ${smoothed.sampleHz.toFixed(1)} Hz GPS to ${SESSION_GHOST_TARGET_HZ} Hz`);
   }
 
-  if (best.dist < 15) {
-    warnings.push(`Selected lap only covers ~${best.dist.toFixed(1)} m — replay will look nearly stationary`);
+  if (distance < 15) {
+    warnings.push(`Session only covers ~${distance.toFixed(1)} m — replay will look nearly stationary`);
   }
 
   const time = frames[frames.length - 1].time;
@@ -1890,7 +1902,7 @@ function ghostFromSessionRows(parsed, geo, options = {}) {
     frames
   };
 
-  return { ghost, track: null, errors: [], warnings, meta: parsed.meta, lapKey: best.key };
+  return { ghost, track: null, errors: [], warnings, meta: parsed.meta, lapKey: 'session' };
 }
 
 /** Convert an eFoil Racing session CSV into a simulator ghost. */
