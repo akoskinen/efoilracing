@@ -3088,8 +3088,9 @@ function resetFollowCamera() {
     followCam.tx = canvas.width / 2 - pos.x * s;
     followCam.ty = canvas.height / 2 - pos.y * s;
   } else if (isChaseZoom() && canvas.width) {
-    const lx = pos.x + Math.cos(heading) * pose.ahead;
-    const ly = pos.y + Math.sin(heading) * pose.ahead;
+    const mid = boardMiddle(pos.x, pos.y, heading);
+    const lx = mid.x + Math.cos(heading) * pose.ahead;
+    const ly = mid.y + Math.sin(heading) * pose.ahead;
     followCam.tx = canvas.width / 2 - lx * s;
     followCam.ty = canvas.height / 2 - ly * s;
   } else {
@@ -3149,8 +3150,9 @@ function updateFollowCamera(dt) {
     const ahead = focus
       ? pose.ahead
       : Math.max(0, viewDistance * Math.sin(viewPitch) - pose.behindM * ppm);
-    const lx = px + Math.cos(dir) * ahead;
-    const ly = py + Math.sin(dir) * ahead;
+    const mid = focus ? { x: px, y: py } : boardMiddle(px, py, hd);
+    const lx = mid.x + Math.cos(dir) * ahead;
+    const ly = mid.y + Math.sin(dir) * ahead;
     tx = w / 2 - lx * s;
     ty = h / 2 - ly * s;
     tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU * Math.max(0.02, chaseLag(pose));
@@ -3598,9 +3600,10 @@ function drawGhost(x, y, heading, liftM = 0) {
     ctx.fill();
   };
   if (!cameraIsFlat()) {
-    drawBoardShadow(x, y, heading, liftM);
+    const deck = boardMiddle(x, y, heading);
+    drawBoardShadow(deck.x, deck.y, heading, liftM);
     drawMast(x, y, heading, foilStance(liftM, 0), 'rgba(255,136,255,0.25)');
-    drawBoardOnGround(x, y, heading, paint, liftM, 0);
+    drawBoardOnGround(deck.x, deck.y, heading, paint, liftM, 0);
     return;
   }
   withWorldMarker(x, y, () => {
@@ -4641,11 +4644,11 @@ function traceBoard() {
   ctx.closePath();
 }
 
-// Foiling, the wing at the foot of the 85 cm mast is the pivot and `pos`
-// is where it runs. The wing holds the depth it had at full lift, so a lean
+// The wing at the foot of the 85 cm mast is the pivot and `pos` is where it
+// runs. Foiling, the wing holds the depth it had at full lift, so a lean
 // swings the deck to the inside of the turn and lowers it, and the mast
 // crosses the water between the wing and the deck. Off the foil the board
-// sits on `pos`. Sideways offsets are metres along the board's right.
+// rolls flat on the water. Sideways offsets are metres along the board's right.
 const MAST_M = 0.85;
 function foilStance(liftM, rollRad) {
   const rise = Math.min(1, Math.max(0, liftM) / BOARD_LIFT_M);
@@ -4664,9 +4667,15 @@ function foilStance(liftM, rollRad) {
 const MAST_CHORD_M = 0.24;
 const MAST_THICK_M = 0.04;
 const MAST_TRAILING_FROM_TAIL_M = 0.5;
-function mastAheadM() {
+// `pos` is the mast, so the board turns about it. This is how far the
+// board's middle sits ahead of the mast.
+function boardAheadOfMastM() {
   const tailM = BOARD_LENGTH_M * -BOARD_TAIL / (BOARD_NOSE - BOARD_TAIL);
-  return MAST_TRAILING_FROM_TAIL_M + MAST_CHORD_M / 2 - tailM;
+  return tailM - MAST_TRAILING_FROM_TAIL_M - MAST_CHORD_M / 2;
+}
+
+function boardMiddle(x, y, worldHeading) {
+  return offsetRight(x, y, worldHeading, 0, boardAheadOfMastM());
 }
 
 function offsetRight(x, y, worldHeading, meters, aheadM = 0) {
@@ -4678,7 +4687,7 @@ function offsetRight(x, y, worldHeading, meters, aheadM = 0) {
 
 function wakeOrigin() {
   const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
-  return offsetRight(pos.x, pos.y, heading, stance.waterSideM, mastAheadM());
+  return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
 }
 
 // The part of the mast above the water, from the waterline up to the deck.
@@ -4692,9 +4701,8 @@ function drawMast(x, y, worldHeading, stance, color) {
   const ry = fx;
   const c = Math.cos(stance.rollRad);
   const s = Math.sin(stance.rollRad);
-  const ahead = mastAheadM();
-  const base = { ...offsetRight(x, y, worldHeading, stance.waterSideM, ahead), z: 0 };
-  const top = { ...offsetRight(x, y, worldHeading, stance.deckSideM, ahead), z: stance.deckM * ppm };
+  const base = { ...offsetRight(x, y, worldHeading, stance.waterSideM), z: 0 };
+  const top = { ...offsetRight(x, y, worldHeading, stance.deckSideM), z: stance.deckM * ppm };
   const strip = (dx, dy, dz) => [
     { x: base.x - dx, y: base.y - dy, z: base.z - dz },
     { x: base.x + dx, y: base.y + dy, z: base.z + dz },
@@ -4721,7 +4729,7 @@ function drawMast(x, y, worldHeading, stance, color) {
 function drawRacer() {
   if (!cameraIsFlat()) {
     const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
-    const deck = offsetRight(pos.x, pos.y, heading, stance.deckSideM);
+    const deck = offsetRight(pos.x, pos.y, heading, stance.deckSideM, boardAheadOfMastM());
     drawBoardShadow(deck.x, deck.y, heading, stance.deckM);
     drawMast(pos.x, pos.y, heading, stance, '#1a1d22');
     drawBoardOnGround(deck.x, deck.y, heading, fillRiderBoard, stance.deckM, stance.rollRad);
