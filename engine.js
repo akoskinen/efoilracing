@@ -2724,35 +2724,32 @@ function stepBoardLift(dt) {
   shownBoardLiftM += (target - shownBoardLiftM) * a;
   if (Math.abs(shownBoardLiftM - target) < 0.002) shownBoardLiftM = target;
 }
-const bankDecay      = 0.9;
+// Left/right move the lean and it stays where it is let go, so a set angle
+// holds hands-off through a long arc. Leaning in uses the rider's lean rates;
+// heading back toward upright is twice as quick. Pressing through upright
+// pauses there for LEAN_UPRIGHT_PAUSE_S so riding straight is easy to find.
+const LEAN_UPRIGHT_PAUSE_S = 0.2;
+let leanUprightPause = 0;
 
 function updateBankAngle(dt) {
-  let targetSign = 0;
-  if (keys['ArrowLeft'])  targetSign = -1;
-  if (keys['ArrowRight']) targetSign =  1;
-  
-  if (targetSign !== 0) {
-    let currentMag = Math.abs(bankAngleDeg);
-    let sign = Math.sign(bankAngleDeg);
-    if (sign === 0) sign = targetSign;
-    if (sign !== targetSign) {
-      currentMag = 0;
-      bankAngleDeg = 0;
-      sign = targetSign;
-    }
-    let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
-    currentMag += rate * dt;
-    if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
-    bankAngleDeg = sign * currentMag;
-  } else {
-    if (Math.abs(bankAngleDeg) < 0.5) {
-      bankAngleDeg = 0;
-    } else {
-      const decayPow = Math.pow(bankDecay, 60 * dt);
-      bankAngleDeg *= decayPow;
-      if (Math.abs(bankAngleDeg) < 0.05) bankAngleDeg = 0;
-    }
+  const dir = (keys['ArrowRight'] ? 1 : 0) - (keys['ArrowLeft'] ? 1 : 0);
+  if (!dir) {
+    leanUprightPause = 0;
+    return;
   }
+  if (leanUprightPause > 0) {
+    leanUprightPause -= dt;
+    return;
+  }
+  const mag = Math.abs(bankAngleDeg);
+  const towardUpright = mag > 0 && Math.sign(bankAngleDeg) !== dir;
+  const rate = (mag < 30 ? activeRider.lean0 : activeRider.lean30) * (towardUpright ? 2 : 1);
+  let next = bankAngleDeg + dir * rate * dt;
+  if (towardUpright && Math.sign(next) !== Math.sign(bankAngleDeg)) {
+    next = 0;
+    leanUprightPause = LEAN_UPRIGHT_PAUSE_S;
+  }
+  bankAngleDeg = Math.max(-BANK_ANGLE_MAX, Math.min(BANK_ANGLE_MAX, next));
 }
 
 // --- Turn Radius Interpolation ---
@@ -3053,6 +3050,9 @@ function chaseLag(pose) {
 }
 
 function chaseLookDir(pose, hd) {
+  return viewBearing + angleDelta(viewBearing, hd) * chaseLag(pose);
+}
+
 // Head tilt at the closest camera. Quick left-right steering is ignored:
 // only a lean held unchanged for HEAD_TILT_HOLD_S becomes the new tilt, and
 // every change eases in and out over HEAD_TILT_EASE_S. A change that
@@ -3099,9 +3099,6 @@ function stepHeadTilt(dt, closest) {
   headTilt.vel = ((6 * s2 - 6 * s) * p0 + (3 * s2 - 4 * s + 1) * m0 + (6 * s - 6 * s2) * p1) / T;
 }
 
-  return viewBearing + angleDelta(viewBearing, hd) * chaseLag(pose);
-}
-
 function resetFollowCamera() {
   const s = followTargetScale();
   followCam.scale = s;
@@ -3118,10 +3115,10 @@ function resetFollowCamera() {
     followCam.tx = pos.x * (1 - s);
     followCam.ty = pos.y * (1 - s);
   }
-  resetHeadTilt();
   viewPitch = isChaseZoom() ? pose.pitch : 0;
   viewDistance = isChaseZoom() ? pose.distance : focalLength(canvas.height || 1) / Math.max(s, 1e-4);
   viewBearing = isChaseZoom() ? heading : FLAT_BEARING;
+  resetHeadTilt();
 }
 
 function updateFollowCamera(dt) {
@@ -3157,10 +3154,10 @@ function updateFollowCamera(dt) {
   const targetDist = chasing ? pose.distance : flatD;
   if (!(viewDistance > 1)) viewDistance = targetDist;
   viewPitch += (targetPitch - viewPitch) * pitchA;
-  stepHeadTilt(dt, chasing && !focus && pose.blend >= 1);
   viewDistance += (targetDist - viewDistance) * pitchA;
   const bearingTau = lifting ? 0.34 : (chasing ? BEARING_TAU * Math.max(0.25, chaseLag(pose)) : BEARING_TAU);
   viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, bearingTau);
+  stepHeadTilt(dt, chasing && !focus && pose.blend >= 1);
   if (isChaseZoom()) {
     const dir = focus ? hd : chaseLookDir(pose, hd);
     // Aim from the eased tilt and distance, not their targets, so the eye
@@ -6060,8 +6057,8 @@ function formatLapClock(sec) {
 function updateRideMeter(speedKmh) {
     const bankEl = document.getElementById('bankAngleDisplay');
     if (bankEl) {
-      const bank = Math.round(bankAngleDeg);
-      bankEl.textContent = `${bank}°`;
+      const bank = Math.round(bankAngleDeg * 10) / 10;
+      bankEl.textContent = `${bank === 0 ? '0' : bank.toFixed(1)}°`;
     }
     const speedEl = document.getElementById('speedDisplay');
     if (speedEl) speedEl.textContent = (Number(speedKmh) || 0).toFixed(1);
