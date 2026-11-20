@@ -327,7 +327,7 @@ function samplePanel(panel, u, v) {
   );
 }
 
-function rasterTriangles(ctx, cam, tris) {
+function rasterTriangles(ctx, cam, tris, ss = 1) {
   if (!tris.length) return;
   let minX = Infinity;
   let minY = Infinity;
@@ -350,7 +350,12 @@ function rasterTriangles(ctx, cam, tris) {
   const w = x1 - x0 + 1;
   const h = y1 - y0 + 1;
   if (w < 2 || h < 2 || w * h > cam.viewW * cam.viewH) return;
-  const buf = rasterBuffer(w, h);
+  // Small buoys are drawn ss times finer and scaled down, so a buoy a few
+  // dozen pixels tall averages many samples per pixel instead of snapping
+  // its edges and plate from pixel to pixel as the camera drifts.
+  const W = w * ss;
+  const H = h * ss;
+  const buf = rasterBuffer(W, H);
   const pixels = buf.pix;
   const zbuf = buf.z;
 
@@ -359,12 +364,12 @@ function rasterTriangles(ctx, cam, tris) {
     const s1 = tri[1].screen;
     const s2 = tri[2].screen;
     if (!s0 || !s1 || !s2) continue;
-    const ax = s0.x - x0;
-    const ay = s0.y - y0;
-    const bx = s1.x - x0;
-    const by = s1.y - y0;
-    const cx = s2.x - x0;
-    const cy = s2.y - y0;
+    const ax = (s0.x - x0) * ss;
+    const ay = (s0.y - y0) * ss;
+    const bx = (s1.x - x0) * ss;
+    const by = (s1.y - y0) * ss;
+    const cx = (s2.x - x0) * ss;
+    const cy = (s2.y - y0) * ss;
     const denom = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
     const absDen = Math.abs(denom);
     if (absDen < 1e-4) continue;
@@ -372,19 +377,18 @@ function rasterTriangles(ctx, cam, tris) {
     const e20 = Math.hypot(ax - cx, ay - cy) || 1;
     const e01 = Math.hypot(bx - ax, by - ay) || 1;
     const minSX = Math.max(0, Math.floor(Math.min(ax, bx, cx) - 2));
-    const maxSX = Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx) + 2));
+    const maxSX = Math.min(W - 1, Math.ceil(Math.max(ax, bx, cx) + 2));
     const minSY = Math.max(0, Math.floor(Math.min(ay, by, cy) - 2));
-    const maxSY = Math.min(h - 1, Math.ceil(Math.max(ay, by, cy) + 2));
+    const maxSY = Math.min(H - 1, Math.ceil(Math.max(ay, by, cy) + 2));
     const b0 = tri[0].shade.base;
     const b1 = tri[1].shade.base;
     const b2 = tri[2].shade.base;
     const p0 = tri[0].shade.spec;
     const p1 = tri[1].shade.spec;
     const p2 = tri[2].shade.spec;
-    const bias = tri.depthBias || 1;
-    const d0 = s0.depth * bias;
-    const d1 = s1.depth * bias;
-    const d2 = s2.depth * bias;
+    const d0 = s0.depth;
+    const d1 = s1.depth;
+    const d2 = s2.depth;
     for (let y = minSY; y <= maxSY; y++) {
       const py = y + 0.5;
       for (let x = minSX; x <= maxSX; x++) {
@@ -411,7 +415,7 @@ function rasterTriangles(ctx, cam, tris) {
         const iw1 = cw1 / Math.max(d1, 1e-3);
         const iw2 = cw2 / Math.max(d2, 1e-3);
         const inv = iw0 + iw1 + iw2;
-        const pi = y * w + x;
+        const pi = y * W + x;
         // An edge pixel must not replace vinyl that already covers it, or
         // every shared edge turns into a translucent crack.
         if (solid) {
@@ -435,8 +439,12 @@ function rasterTriangles(ctx, cam, tris) {
     }
   }
 
-  buf.ctx.putImageData(new ImageData(pixels.subarray(0, w * h * 4), w, h), 0, 0);
-  ctx.drawImage(buf.canvas, 0, 0, w, h, x0, y0, w, h);
+  buf.ctx.putImageData(new ImageData(pixels.subarray(0, W * H * 4), W, H), 0, 0);
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(buf.canvas, 0, 0, W, H, x0, y0, w, h);
+  ctx.restore();
 }
 
 function fillPoly(ctx, poly, color) {
@@ -487,7 +495,9 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
   // past a facing cutoff, made the shape jump as the buoy grew or turned.
   // A coarser grid when small is the same surface with fewer points, so
   // the outline does not change, only the cost.
-  const stride = pxH < 36 ? 4 : (pxH < 110 ? 2 : 1);
+  const ss = pxH < 48 ? 4 : (pxH < 140 ? 2 : 1);
+  const fine = pxH * ss;
+  const stride = fine < 36 ? 4 : (fine < 110 ? 2 : 1);
 
   const vertex = (item) => {
     if (item.cached) return item.cached;
@@ -512,9 +522,13 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
     for (let k = 1; k < poly.length - 1; k++) {
       const t = [poly[0], poly[k], poly[k + 1]];
       if (!t.every(v => v.screen)) continue;
-      // Two panels meet at the same depth along a seam. Pushing the side
-      // turned away a hair further back keeps it from speckling through.
-      if (frontFacing(t, cam).facing > 0) t.depthBias = 1.01;
+      // The hull is closed above the water, so any triangle turned away from
+      // the eye is hidden by one that faces it. Dropping those leaves no pair
+      // of surfaces at nearly the same depth to fight over a pixel. A depth
+      // nudge flipped on and off as the camera turned and made far buoys
+      // flicker. Uses the drawn triangle, not the smooth vertex normals,
+      // which lean around the puff and punched holes in the face.
+      if (frontFacing(t, cam).facing > 0) continue;
       tris.push(t);
     }
   };
@@ -536,7 +550,7 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
     }
   }
 
-  rasterTriangles(ctx, cam, tris);
+  rasterTriangles(ctx, cam, tris, ss);
   // The plate is the real PNG, scaled by the browser and painted over the
   // mesh. It fades out as its face turns edge-on instead of switching off,
   // and is never baked into the mesh, where a hidden face's letters would
