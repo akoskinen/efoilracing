@@ -3056,50 +3056,28 @@ function chaseLookDir(pose, hd) {
   return viewBearing + angleDelta(viewBearing, hd) * chaseLag(pose);
 }
 
-// Head tilt at the closest camera. Quick left-right steering is ignored:
-// only a lean held unchanged for HEAD_TILT_HOLD_S becomes the new tilt, and
-// every change eases in and out over HEAD_TILT_EASE_S. A change that
-// arrives mid-move carries the current tilt speed, so it never jerks.
-const HEAD_TILT_HOLD_S = 0.6;
-const HEAD_TILT_EASE_S = 1.2;
-const headTilt = { deg: 0, vel: 0, from: 0, fromVel: 0, to: 0, t: HEAD_TILT_EASE_S, lean: 0, heldFor: 0 };
+// Head tilt at the closest camera: a quarter of the lean, trailing it through
+// a critically damped spring so it follows about HEAD_TILT_LAG_S behind and
+// never starts or stops with a jerk.
+const HEAD_TILT_SHARE = 0.25;
+const HEAD_TILT_LAG_S = 0.25;
+const headTilt = { deg: 0, vel: 0 };
 
 function resetHeadTilt() {
-  Object.assign(headTilt, { deg: 0, vel: 0, from: 0, fromVel: 0, to: 0, t: HEAD_TILT_EASE_S, lean: bankAngleDeg, heldFor: 0 });
+  headTilt.deg = 0;
+  headTilt.vel = 0;
 }
 
 function stepHeadTilt(dt, closest) {
-  if (bankAngleDeg !== headTilt.lean) {
-    headTilt.lean = bankAngleDeg;
-    headTilt.heldFor = 0;
-  } else {
-    headTilt.heldFor += dt;
-  }
-  let target = headTilt.to;
-  if (!closest) target = 0;
-  else if (headTilt.heldFor >= HEAD_TILT_HOLD_S) target = bankAngleDeg;
-  if (target !== headTilt.to) {
-    headTilt.from = headTilt.deg;
-    headTilt.fromVel = headTilt.vel;
-    headTilt.to = target;
-    headTilt.t = 0;
-  }
-  if (headTilt.t >= HEAD_TILT_EASE_S) {
-    headTilt.deg = headTilt.to;
-    headTilt.vel = 0;
-    return;
-  }
-  headTilt.t = Math.min(HEAD_TILT_EASE_S, headTilt.t + dt);
-  // Cubic Hermite from (from, fromVel) to (to, 0).
-  const T = HEAD_TILT_EASE_S;
-  const s = headTilt.t / T;
-  const s2 = s * s;
-  const s3 = s2 * s;
-  const p0 = headTilt.from;
-  const m0 = headTilt.fromVel * T;
-  const p1 = headTilt.to;
-  headTilt.deg = (2 * s3 - 3 * s2 + 1) * p0 + (s3 - 2 * s2 + s) * m0 + (3 * s2 - 2 * s3) * p1;
-  headTilt.vel = ((6 * s2 - 6 * s) * p0 + (3 * s2 - 4 * s + 1) * m0 + (6 * s - 6 * s2) * p1) / T;
+  if (!(dt > 0)) return;
+  const target = closest ? bankAngleDeg * HEAD_TILT_SHARE : 0;
+  const w = 2 / HEAD_TILT_LAG_S;
+  // Exact step of x'' = w²(target - x) - 2w x', stable for any dt.
+  const e = Math.exp(-w * dt);
+  const x0 = headTilt.deg - target;
+  const c = headTilt.vel + w * x0;
+  headTilt.deg = target + (x0 + c * dt) * e;
+  headTilt.vel = (c - w * (x0 + c * dt)) * e;
 }
 
 function resetFollowCamera() {
