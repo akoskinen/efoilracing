@@ -780,15 +780,28 @@ function drawChaseHorizonFade() {
   // Only the sky above the horizon. At the wide walking tilt the horizon is
   // still off the top of the screen, so the water is left alone.
   const horizon = h / 2 - focalLength(h) * Math.cos(pitch) / Math.sin(pitch);
-  if (horizon < 12) return;
+  const roll = headTilt.deg * Math.PI / 180;
+  // Rolled, the band is laid out level and turned about the screen centre,
+  // padded so its ends still reach the corners.
+  const pad = roll ? Math.hypot(canvas.width, h) / 2 : 0;
+  if (horizon < 12 - pad) return;
   const band = Math.min(horizon + h * 0.08, h * 0.5);
-  const g = ctx.createLinearGradient(0, 0, 0, band);
+  const top = -pad;
+  if (band - top < 2) return;
+  const g = ctx.createLinearGradient(0, top, 0, band);
   g.addColorStop(0, 'rgba(12,26,34,0.92)');
-  const edge = Math.min(0.92, Math.max(0.2, horizon / band));
+  const edge = Math.min(0.92, Math.max(0.2, (horizon - top) / (band - top)));
   g.addColorStop(edge, 'rgba(12,26,34,0.45)');
   g.addColorStop(1, 'rgba(12,26,34,0)');
+  ctx.save();
+  if (roll) {
+    ctx.translate(canvas.width / 2, h / 2);
+    ctx.rotate(-roll);
+    ctx.translate(-canvas.width / 2, -h / 2);
+  }
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, canvas.width, band);
+  ctx.fillRect(-pad, top, canvas.width + pad * 2, band - top);
+  ctx.restore();
 }
 
 function drawChaseGround() {
@@ -3040,6 +3053,52 @@ function chaseLag(pose) {
 }
 
 function chaseLookDir(pose, hd) {
+// Head tilt at the closest camera. Quick left-right steering is ignored:
+// only a lean held unchanged for HEAD_TILT_HOLD_S becomes the new tilt, and
+// every change eases in and out over HEAD_TILT_EASE_S. A change that
+// arrives mid-move carries the current tilt speed, so it never jerks.
+const HEAD_TILT_HOLD_S = 0.6;
+const HEAD_TILT_EASE_S = 1.2;
+const headTilt = { deg: 0, vel: 0, from: 0, fromVel: 0, to: 0, t: HEAD_TILT_EASE_S, lean: 0, heldFor: 0 };
+
+function resetHeadTilt() {
+  Object.assign(headTilt, { deg: 0, vel: 0, from: 0, fromVel: 0, to: 0, t: HEAD_TILT_EASE_S, lean: bankAngleDeg, heldFor: 0 });
+}
+
+function stepHeadTilt(dt, closest) {
+  if (bankAngleDeg !== headTilt.lean) {
+    headTilt.lean = bankAngleDeg;
+    headTilt.heldFor = 0;
+  } else {
+    headTilt.heldFor += dt;
+  }
+  let target = headTilt.to;
+  if (!closest) target = 0;
+  else if (headTilt.heldFor >= HEAD_TILT_HOLD_S) target = bankAngleDeg;
+  if (target !== headTilt.to) {
+    headTilt.from = headTilt.deg;
+    headTilt.fromVel = headTilt.vel;
+    headTilt.to = target;
+    headTilt.t = 0;
+  }
+  if (headTilt.t >= HEAD_TILT_EASE_S) {
+    headTilt.deg = headTilt.to;
+    headTilt.vel = 0;
+    return;
+  }
+  headTilt.t = Math.min(HEAD_TILT_EASE_S, headTilt.t + dt);
+  // Cubic Hermite from (from, fromVel) to (to, 0).
+  const T = HEAD_TILT_EASE_S;
+  const s = headTilt.t / T;
+  const s2 = s * s;
+  const s3 = s2 * s;
+  const p0 = headTilt.from;
+  const m0 = headTilt.fromVel * T;
+  const p1 = headTilt.to;
+  headTilt.deg = (2 * s3 - 3 * s2 + 1) * p0 + (s3 - 2 * s2 + s) * m0 + (3 * s2 - 2 * s3) * p1;
+  headTilt.vel = ((6 * s2 - 6 * s) * p0 + (3 * s2 - 4 * s + 1) * m0 + (6 * s - 6 * s2) * p1) / T;
+}
+
   return viewBearing + angleDelta(viewBearing, hd) * chaseLag(pose);
 }
 
@@ -3059,6 +3118,7 @@ function resetFollowCamera() {
     followCam.tx = pos.x * (1 - s);
     followCam.ty = pos.y * (1 - s);
   }
+  resetHeadTilt();
   viewPitch = isChaseZoom() ? pose.pitch : 0;
   viewDistance = isChaseZoom() ? pose.distance : focalLength(canvas.height || 1) / Math.max(s, 1e-4);
   viewBearing = isChaseZoom() ? heading : FLAT_BEARING;
@@ -3097,6 +3157,7 @@ function updateFollowCamera(dt) {
   const targetDist = chasing ? pose.distance : flatD;
   if (!(viewDistance > 1)) viewDistance = targetDist;
   viewPitch += (targetPitch - viewPitch) * pitchA;
+  stepHeadTilt(dt, chasing && !focus && pose.blend >= 1);
   viewDistance += (targetDist - viewDistance) * pitchA;
   const bearingTau = lifting ? 0.34 : (chasing ? BEARING_TAU * Math.max(0.25, chaseLag(pose)) : BEARING_TAU);
   viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, bearingTau);
@@ -3182,7 +3243,8 @@ function viewCamera(overrides) {
     bearing,
     viewW: w,
     viewH: h,
-    distance
+    distance,
+    roll: overrides?.roll ?? (pitched ? headTilt.deg * Math.PI / 180 : 0)
   });
 }
 

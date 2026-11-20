@@ -7,7 +7,7 @@
 ////////////////////////////////////////////////////////////
 
 import * as THREE from './lib/three/three.module.min.js';
-import { depthAt, projectClipped } from './chaseCam.js';
+import { depthAt, projectClipped, projectHeight } from './chaseCam.js';
 import { buildInflatedTetra } from './inflatedTetraBuoy.js';
 
 /** Tip height above the water, in meters. */
@@ -197,8 +197,8 @@ function setCamera(cam, x0, y0, bw, bh, near, far) {
   const ex = cam.eyeX;
   const ey = -cam.eyeY;
   const ez = cam.eyeZ;
-  const r = [cam.rx, -cam.ry, 0];
-  const u = [cam.fx * cam.cp, -cam.fy * cam.cp, cam.sp];
+  const r = [cam.r3[0], -cam.r3[1], cam.r3[2]];
+  const u = [cam.u3[0], -cam.u3[1], cam.u3[2]];
   const back = [-cam.fx * cam.sp, cam.fy * cam.sp, cam.cp];
   const t = (v) => -(v[0] * ex + v[1] * ey + v[2] * ez);
   camera.matrixWorldInverse.set(
@@ -243,17 +243,15 @@ function screenBox(cam, list, ppm) {
           const d = depthAt(cam, x, y, z);
           minD = Math.min(minD, d);
           maxD = Math.max(maxD, d);
-          if (d < 1) {
+          const p = d < 1 ? null : projectHeight(cam, x, y, z);
+          if (!p) {
             behind = true;
             continue;
           }
-          const sx = cam.cx + cam.f * ((x - cam.eyeX) * cam.rx + (y - cam.eyeY) * cam.ry) / d;
-          const along = (x - cam.eyeX) * cam.fx + (y - cam.eyeY) * cam.fy;
-          const sy = cam.cy - cam.f * (along * cam.cp + (z - cam.eyeZ) * cam.sp) / d;
-          minX = Math.min(minX, sx);
-          maxX = Math.max(maxX, sx);
-          minY = Math.min(minY, sy);
-          maxY = Math.max(maxY, sy);
+          minX = Math.min(minX, p.x);
+          maxX = Math.max(maxX, p.x);
+          minY = Math.min(minY, p.y);
+          maxY = Math.max(maxY, p.y);
         }
       }
     }

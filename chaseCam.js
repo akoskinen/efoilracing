@@ -155,7 +155,11 @@ export function chaseFraming(kmh, ppm, settings = CHASE_DEFAULTS, liftM = 0) {
   };
 }
 
-export function makeCamera({ lx, ly, scale, pitch, bearing, viewW, viewH, distance }) {
+/**
+ * `roll` tilts the eye about its view axis in radians. Positive drops the
+ * right ear, so the horizon rises on the right of the screen.
+ */
+export function makeCamera({ lx, ly, scale, pitch, bearing, viewW, viewH, distance, roll = 0 }) {
   const f = focalLength(viewH);
   const D = distance > 0 ? distance : f / Math.max(scale, 1e-4);
   const fx = Math.cos(bearing);
@@ -164,12 +168,20 @@ export function makeCamera({ lx, ly, scale, pitch, bearing, viewW, viewH, distan
   const ry = fx;
   const sp = Math.sin(pitch);
   const cp = Math.cos(pitch);
+  const cr = Math.cos(roll);
+  const sr = Math.sin(roll);
+  const ux = fx * cp;
+  const uy = fy * cp;
+  const uz = sp;
   return {
-    lx, ly, scale, pitch, bearing, f, D,
+    lx, ly, scale, pitch, bearing, roll, f, D,
     viewW, viewH,
     cx: viewW / 2,
     cy: viewH / 2,
     fx, fy, rx, ry, sp, cp,
+    // Screen right and screen up in world space, after the roll.
+    r3: [rx * cr - ux * sr, ry * cr - uy * sr, -uz * sr],
+    u3: [ux * cr + rx * sr, uy * cr + ry * sr, uz * cr],
     eyeX: lx - fx * (D * sp),
     eyeY: ly - fy * (D * sp),
     eyeZ: D * cp
@@ -181,9 +193,11 @@ function viewRay(cam, x, y, z) {
   const dy = y - cam.eyeY;
   const dz = z - cam.eyeZ;
   const along = dx * cam.fx + dy * cam.fy;
+  const r = cam.r3;
+  const u = cam.u3;
   return {
-    vx: dx * cam.rx + dy * cam.ry,
-    vu: along * cam.cp + dz * cam.sp,
+    vx: dx * r[0] + dy * r[1] + dz * r[2],
+    vu: dx * u[0] + dy * u[1] + dz * u[2],
     vd: along * cam.sp - dz * cam.cp
   };
 }
@@ -257,12 +271,13 @@ export function projectClipped(cam, points, near = 1.25) {
  */
 export function unproject(cam, sx, sy, maxDist) {
   const vx = sx - cam.cx;
-  const vy = sy - cam.cy;
-  const upScale = -vy;
-  const fwdScale = cam.f;
-  const dirX = cam.rx * vx + cam.fx * (cam.cp * upScale + cam.sp * fwdScale);
-  const dirY = cam.ry * vx + cam.fy * (cam.cp * upScale + cam.sp * fwdScale);
-  const dirZ = cam.sp * upScale - cam.cp * fwdScale;
+  const vu = cam.cy - sy;
+  const r = cam.r3;
+  const u = cam.u3;
+  const f = cam.f;
+  const dirX = r[0] * vx + u[0] * vu + cam.fx * cam.sp * f;
+  const dirY = r[1] * vx + u[1] * vu + cam.fy * cam.sp * f;
+  const dirZ = r[2] * vx + u[2] * vu - cam.cp * f;
   const reach = maxDist > 0 ? maxDist : cam.D * 30;
   let x;
   let y;
