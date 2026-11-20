@@ -2,7 +2,7 @@
 // inflatableBuoy.js — chase-view adapter for the inflated tetrahedron.
 // Geometry lives in inflatedTetraBuoy.js (panels, puff, seams, normals).
 // This draws it on the flat canvas: smooth shading, a tight vinyl
-// highlight, welded seams, and the SFT plate. Overhead views stay discs.
+// highlight, and the SFT plate. Overhead views stay discs.
 ////////////////////////////////////////////////////////////
 
 import { depthAt, projectClipped, projectHeight } from './chaseCam.js';
@@ -11,7 +11,7 @@ import { buildInflatedTetra } from './inflatedTetraBuoy.js';
 /** Tip height above the water, in meters. */
 export const INFLATABLE_HEIGHT_M = 1.5;
 
-const SEGMENTS = 16;
+const SEGMENTS = 32;
 const TUBE_SIDES = 4;
 const LIGHT_UP = 0.94;
 
@@ -265,8 +265,56 @@ function ensureLogoPixels(logo) {
   const g = c.getContext('2d');
   g.drawImage(logo, 0, 0);
   const data = g.getImageData(0, 0, c.width, c.height);
-  logoPixels = { data: data.data, width: c.width, height: c.height, _src: logo };
+  const levels = buildLogoMips(data.data, c.width, c.height);
+  logoPixels = { data: data.data, width: c.width, height: c.height, levels, _src: logo };
   return logoPixels;
+}
+
+// Each level is a box-filtered, premultiplied-correct shrink of the plate.
+// Sampling the full image when the plate is only a few dozen pixels wide
+// turned the letters into a noisy block.
+function buildLogoMips(src, width, height) {
+  const levels = [{ data: src, width, height }];
+  let data = src;
+  let w = width;
+  let h = height;
+  while (w > 1 || h > 1) {
+    const nw = Math.max(1, w >> 1);
+    const nh = Math.max(1, h >> 1);
+    const dst = new Uint8ClampedArray(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      const y0 = Math.min(h - 1, y * 2);
+      const y1 = Math.min(h - 1, y0 + 1);
+      for (let x = 0; x < nw; x++) {
+        const x0 = Math.min(w - 1, x * 2);
+        const x1 = Math.min(w - 1, x0 + 1);
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let a = 0;
+        const samples = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]];
+        for (let s = 0; s < samples.length; s++) {
+          const oi = (samples[s][1] * w + samples[s][0]) * 4;
+          const pa = data[oi + 3] * (1 / 255);
+          r += data[oi] * pa;
+          g += data[oi + 1] * pa;
+          b += data[oi + 2] * pa;
+          a += pa;
+        }
+        const oi = (y * nw + x) * 4;
+        const inv = a > 1e-4 ? 1 / a : 0;
+        dst[oi] = r * inv;
+        dst[oi + 1] = g * inv;
+        dst[oi + 2] = b * inv;
+        dst[oi + 3] = a * (255 / samples.length);
+      }
+    }
+    levels.push({ data: dst, width: nw, height: nh });
+    data = dst;
+    w = nw;
+    h = nh;
+  }
+  return levels;
 }
 
 // A vertex just in front of the camera projects to a huge screen coordinate
@@ -375,6 +423,35 @@ function frontFacing(tri, cam) {
   return { facing: facing / scale };
 }
 
+// u = b + 0.5·c and v = c on the flat panel, so a logo corner can be
+// picked back out of the puffed grid.
+function samplePanel(panel, u, v) {
+  const n = SEGMENTS;
+  const c = Math.min(1, Math.max(0, v));
+  const b = Math.min(1 - c, Math.max(0, u - 0.5 * c));
+  let i = Math.min(n - 1e-4, Math.max(0, b * n));
+  let j = Math.min(n - i - 1e-4, Math.max(0, c * n));
+  const i0 = i | 0;
+  const j0 = j | 0;
+  const fi = i - i0;
+  const fj = j - j0;
+  const rows = panel.rows;
+  const mix = (A, B, C, wa, wb, wc) => {
+    const p = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      p[k] = A.p[k] * wa + B.p[k] * wb + C.p[k] * wc;
+    }
+    return p;
+  };
+  if (fi + fj <= 1) {
+    return mix(rows[i0][j0], rows[i0 + 1][j0], rows[i0][j0 + 1], 1 - fi - fj, fi, fj);
+  }
+  return mix(
+    rows[i0 + 1][j0], rows[i0 + 1][j0 + 1], rows[i0][j0 + 1],
+    1 - fj, fi + fj - 1, 1 - fi
+  );
+}
+
 function panelFacesCamera(panel, pose, cam, ppm) {
   const n = SEGMENTS;
   const corners = [panel.rows[0][0], panel.rows[n][0], panel.rows[0][n]];
@@ -384,7 +461,10 @@ function panelFacesCamera(panel, pose, cam, ppm) {
 
 // Bilinear, premultiplied, so the plate edge doesn't sparkle as texels
 // cross a pixel while the camera moves.
-function sampleLogo(src, lw, lh, iu, iv) {
+function sampleLogo(level, iu, iv) {
+  const src = level.data;
+  const lw = level.width;
+  const lh = level.height;
   const fx = Math.min(lw - 1.001, Math.max(0, iu * (lw - 1)));
   const fy = Math.min(lh - 1.001, Math.max(0, (1 - iv) * (lh - 1)));
   const x0 = fx | 0;
@@ -417,6 +497,23 @@ function sampleLogo(src, lw, lh, iu, iv) {
   ];
 }
 
+function sampleLogoMips(levels, lod, iu, iv) {
+  const max = levels.length - 1;
+  const l = Math.max(0, Math.min(max, lod));
+  const l0 = l | 0;
+  const l1 = l0 < max ? l0 + 1 : l0;
+  const a = sampleLogo(levels[l0], iu, iv);
+  if (l1 === l0) return a;
+  const t = l - l0;
+  const b = sampleLogo(levels[l1], iu, iv);
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+    a[3] + (b[3] - a[3]) * t
+  ];
+}
+
 function rasterTriangles(ctx, cam, tris, logo, logoBox) {
   if (!tris.length) return;
   let minX = Infinity;
@@ -443,9 +540,7 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
   const buf = rasterBuffer(w, h);
   const pixels = buf.pix;
   const zbuf = buf.z;
-  const lw = logo ? logo.width : 0;
-  const lh = logo ? logo.height : 0;
-  const src = logo ? logo.data : null;
+  const levels = logo ? logo.levels : null;
 
   for (const tri of tris) {
     const s0 = tri[0].screen;
@@ -461,16 +556,13 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
     const denom = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
     const absDen = Math.abs(denom);
     if (absDen < 0.05) continue;
-    // Half a pixel past each edge, so shared edges don't leave a crack
-    // that flashes the background or the plate's cutouts as the view moves.
-    const pxBias = 0.65;
-    const eps0 = pxBias * Math.hypot(cx - bx, cy - by) / absDen;
-    const eps1 = pxBias * Math.hypot(ax - cx, ay - cy) / absDen;
-    const eps2 = pxBias * Math.hypot(bx - ax, by - ay) / absDen;
-    const minSX = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
-    const maxSX = Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx)));
-    const minSY = Math.max(0, Math.floor(Math.min(ay, by, cy)));
-    const maxSY = Math.min(h - 1, Math.ceil(Math.max(ay, by, cy)));
+    const e12 = Math.hypot(cx - bx, cy - by) || 1;
+    const e20 = Math.hypot(ax - cx, ay - cy) || 1;
+    const e01 = Math.hypot(bx - ax, by - ay) || 1;
+    const minSX = Math.max(0, Math.floor(Math.min(ax, bx, cx) - 1));
+    const maxSX = Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx) + 1));
+    const minSY = Math.max(0, Math.floor(Math.min(ay, by, cy) - 1));
+    const maxSY = Math.min(h - 1, Math.ceil(Math.max(ay, by, cy) + 1));
     const b0 = tri[0].shade.base;
     const b1 = tri[1].shade.base;
     const b2 = tri[2].shade.base;
@@ -484,6 +576,19 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
     const uv0 = tri[0].uv;
     const uv1 = tri[1].uv;
     const uv2 = tri[2].uv;
+    let lod = 0;
+    if (levels && uv0 && uv1 && uv2) {
+      const du = Math.max(
+        Math.abs(uv1.u - uv0.u) / e01,
+        Math.abs(uv2.u - uv0.u) / e20
+      );
+      const dv = Math.max(
+        Math.abs(uv1.v - uv0.v) / e01,
+        Math.abs(uv2.v - uv0.v) / e20
+      );
+      const rho = Math.max(du * levels[0].width, dv * levels[0].height);
+      lod = Math.log2(Math.max(rho, 1e-4));
+    }
     for (let y = minSY; y <= maxSY; y++) {
       const py = y + 0.5;
       for (let x = minSX; x <= maxSX; x++) {
@@ -491,29 +596,42 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
         const w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / denom;
         const w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / denom;
         const w2 = 1 - w0 - w1;
-        if (w0 < -eps0 || w1 < -eps1 || w2 < -eps2) continue;
-        // 1/depth interpolated in screen space is the real camera depth.
-        // A linear mix let the far panel poke through the near one.
-        const iw0 = w0 / Math.max(d0, 1e-3);
-        const iw1 = w1 / Math.max(d1, 1e-3);
-        const iw2 = w2 / Math.max(d2, 1e-3);
+        // Distance outside the nearest edge, in pixels. A hard fill made the
+        // silhouette crawl in stairs as the buoy grew toward the camera.
+        const dEdge = Math.min(w0 * absDen / e12, w1 * absDen / e20, w2 * absDen / e01);
+        if (dEdge < -0.7) continue;
+        const solid = dEdge >= -0.08;
+        // Clamp so a pixel just outside an edge still takes that edge's
+        // colour, instead of extrapolating into a dark or bright fringe.
+        const cw0 = w0 > 0 ? w0 : 0;
+        const cw1 = w1 > 0 ? w1 : 0;
+        const cw2 = w2 > 0 ? w2 : 0;
+        const iw0 = cw0 / Math.max(d0, 1e-3);
+        const iw1 = cw1 / Math.max(d1, 1e-3);
+        const iw2 = cw2 / Math.max(d2, 1e-3);
         const inv = iw0 + iw1 + iw2;
         const pi = y * w + x;
-        if (inv <= zbuf[pi]) continue;
-        zbuf[pi] = inv;
+        // A soft edge pixel must not replace vinyl that already covers it,
+        // or every shared edge turns into a translucent crack.
+        if (solid) {
+          if (zbuf[pi] > 0 && inv <= zbuf[pi]) continue;
+          zbuf[pi] = inv;
+        } else if (zbuf[pi] > 0 || pixels[pi * 4 + 3] !== 0) {
+          continue;
+        }
         const iw = inv || 1;
         const base = (iw0 * b0 + iw1 * b1 + iw2 * b2) / iw;
         const spec = (iw0 * p0 + iw1 * p1 + iw2 * p2) / iw;
         let r = base * 246 + spec * 170;
         let g = base * 248 + spec * 170;
         let b = base * 255 + spec * 155;
-        if (src && tri.applyLogo && uv0 && logoBox) {
+        if (levels && tri.applyLogo && uv0 && logoBox) {
           const u = (iw0 * uv0.u + iw1 * uv1.u + iw2 * uv2.u) / iw;
           const v = (iw0 * uv0.v + iw1 * uv1.v + iw2 * uv2.v) / iw;
           const iu = (u - logoBox.u0) / (logoBox.u1 - logoBox.u0);
           const iv = (v - logoBox.v0) / (logoBox.v1 - logoBox.v0);
           if (iu >= 0 && iv >= 0 && iu <= 1 && iv <= 1) {
-            const tex = sampleLogo(src, lw, lh, iu, iv);
+            const tex = sampleLogoMips(levels, lod, iu, iv);
             const a = tex[3];
             if (a > 0.02) {
               const lr = (tex[0] / a) * base + spec * 80;
@@ -526,10 +644,11 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
           }
         }
         const o = pi * 4;
+        const cov = solid ? 1 : Math.max(0, (dEdge + 0.7) / 0.62);
         pixels[o] = r;
         pixels[o + 1] = g;
         pixels[o + 2] = b;
-        pixels[o + 3] = 255;
+        pixels[o + 3] = cov * 255;
       }
     }
   }
@@ -613,6 +732,28 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
   }
   const plate = ensureLogoPixels(logo);
   const tris = [];
+  const cards = [];
+
+  const logoCard = (panel) => {
+    if (!logoReady(logo)) return null;
+    const box = m.logo;
+    const corner = (u, v) => {
+      const world = worldPoint(samplePanel(panel, u, v), pose, ppm);
+      if (world.z < 0) return null;
+      const screen = projectHeight(cam, world.x, world.y, world.z);
+      return screen ? { ...screen, world } : null;
+    };
+    // Image y grows downward, so the top of the file is the high-v edge.
+    const topL = corner(box.u0, box.v1);
+    const topR = corner(box.u1, box.v1);
+    const botR = corner(box.u1, box.v0);
+    const botL = corner(box.u0, box.v0);
+    if (!topL || !topR || !botR || !botL) return null;
+    return {
+      topL, topR, botR, botL,
+      depth: (topL.depth + topR.depth + botR.depth + botL.depth) / 4
+    };
+  };
 
   const pushTri = (a, b, c, logoOn, cull, depthBias) => {
     const verts = [a, b, c].map((item) => {
@@ -659,7 +800,9 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
   for (const panel of m.panels) {
     if (!panelFacesCamera(panel, pose, cam, ppm)) continue;
     const rows = panel.rows;
-    const logoOn = panel.kind === 'side';
+    const card = panel.kind === 'side' ? logoCard(panel) : null;
+    if (card) cards.push(card);
+    const logoOn = !card && panel.kind === 'side';
     for (let i = 0; i < SEGMENTS; i++) {
       for (let j = 0; j < SEGMENTS - i; j++) {
         const v00 = rows[i][j];
@@ -671,27 +814,35 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
     }
   }
 
-  if (pxH >= 88) {
-    for (const strip of m.tubes) {
-      for (const tri of strip) {
-        pushTri(
-          { p: tri[0].p, nrm: tri[0].nrm, u: null, v: null },
-          { p: tri[1].p, nrm: tri[1].nrm, u: null, v: null },
-          { p: tri[2].p, nrm: tri[2].nrm, u: null, v: null },
-          false,
-          true,
-          0.97
-        );
-      }
-    }
-  }
-
-  for (const tri of tris) {
-    if (tri.applyLogo !== false || tri.some(v => v.uv)) continue;
-    for (const v of tri) {
-      v.shade = { base: v.shade.base * 0.62, spec: v.shade.spec * 0.22, facing: v.shade.facing };
-    }
-  }
-
+  // The darkened seam tubes only appeared once the buoy was close, and they
+  // read as a gray outline that changed the silhouette on the way in.
   rasterTriangles(ctx, cam, tris, plate, plate ? m.logo : null);
+  // The plate is the real PNG, scaled by the browser. Sampling it inside the
+  // mesh left the letters blocky whenever the face was only a few dozen pixels.
+  cards.sort((a, b) => b.depth - a.depth);
+  for (const card of cards) paintLogoCard(ctx, card, logo);
+}
+
+function paintLogoCard(ctx, card, logo) {
+  const { topL, topR, botR, botL } = card;
+  const w = logo.naturalWidth;
+  const h = logo.naturalHeight;
+  if (!(w > 0) || !(h > 0)) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(topL.x, topL.y);
+  ctx.lineTo(topR.x, topR.y);
+  ctx.lineTo(botR.x, botR.y);
+  ctx.lineTo(botL.x, botL.y);
+  ctx.closePath();
+  ctx.clip();
+  const ex = topR.x - topL.x;
+  const ey = topR.y - topL.y;
+  const fx = botL.x - topL.x;
+  const fy = botL.y - topL.y;
+  ctx.transform(ex / w, ey / w, fx / h, fy / h, topL.x, topL.y);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(logo, 0, 0);
+  ctx.restore();
 }
