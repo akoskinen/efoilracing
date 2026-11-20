@@ -1115,6 +1115,7 @@ function registerCustomTrack(key, track) {
 function resetRideForNewTrack() {
   speed = 0;
   bankAngleDeg = 0;
+  shownBoardLiftM = 0;
   wakeTrail = [];
   lapActive = false;
   validCrossing = false;
@@ -2697,6 +2698,17 @@ function advancePositionBySpeed(speedKmh, dt) {
 
 const BANK_ANGLE_MAX = RIDER_BANK_MAX;
 let bankAngleDeg     = 0;
+// Foil height shown in chase. Eases to 50 cm once HUD speed is above 10 km/h.
+const BOARD_LIFT_M = 0.5;
+const BOARD_LIFT_KMH = 10;
+let shownBoardLiftM = 0;
+
+function stepBoardLift(dt) {
+  const target = (speed * speedConversion) > BOARD_LIFT_KMH ? BOARD_LIFT_M : 0;
+  const a = 1 - Math.exp(-(dt > 0 ? dt : 0) / 0.45);
+  shownBoardLiftM += (target - shownBoardLiftM) * a;
+  if (Math.abs(shownBoardLiftM - target) < 0.002) shownBoardLiftM = target;
+}
 const bankDecay      = 0.9;
 
 function updateBankAngle(dt) {
@@ -3439,7 +3451,8 @@ function drawGhostFrame() {
         ghostY = p.y;
     }
 
-    drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame));
+    const ghostKmh = Number(frame.speedKmh);
+    drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame), ghostKmh > 10 ? BOARD_LIFT_M : 0);
     drawGhostRiderLabel(ghostX, ghostY);
 
     ghostWakeTrail.push({ x: ghostX, y: ghostY });
@@ -3450,7 +3463,7 @@ function drawGhostFrame() {
 }
 
 // Separate function to draw the ghost racer at a given position
-function drawGhost(x, y, heading) {
+function drawGhost(x, y, heading, liftM = 0) {
   const paint = () => {
     ctx.globalAlpha *= 0.25;
     traceBoard();
@@ -3458,7 +3471,8 @@ function drawGhost(x, y, heading) {
     ctx.fill();
   };
   if (!cameraIsFlat()) {
-    drawBoardOnGround(x, y, heading, paint);
+    drawBoardShadow(x, y, heading, liftM);
+    drawBoardOnGround(x, y, heading, paint, liftM, 0);
     return;
   }
   withWorldMarker(x, y, () => {
@@ -4059,7 +4073,8 @@ function update(dt){
     speed -= activeRider.decelRate * dt;
   }
   speed = Math.max(0, Math.min(activeRider.maxSpeed, speed));
-  
+  stepBoardLift(dt);
+
   updateBankAngle(dt);
   
   const speedKmh = speed * speedConversion;
@@ -4465,10 +4480,12 @@ function traceBoard() {
 
 function drawRacer() {
   if (!cameraIsFlat()) {
+    const roll = bankAngleDeg * Math.PI / 180;
+    drawBoardShadow(pos.x, pos.y, heading, shownBoardLiftM);
     drawBoardOnGround(pos.x, pos.y, heading, px => {
       traceBoard();
       fillRiderBoard(px);
-    });
+    }, shownBoardLiftM, roll);
     return;
   }
   withWorldMarker(pos.x, pos.y, () => {
@@ -4488,8 +4505,9 @@ const BOARD_LENGTH_M = 3.2;
 const BOARD_BEAM_M = 1.2;
 
 // Lay the outline on the water. Flat views keep the big marker so the rider
-// stays easy to find.
-function drawBoardOnGround(x, y, worldHeading, paint) {
+// stays easy to find. `liftM` is height above the water, `rollRad` leans the
+// right rail down when positive (same sign as the rider's bank angle).
+function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const len = BOARD_NOSE - BOARD_TAIL;
   const along = (BOARD_LENGTH_M / len) * ppm;
@@ -4498,9 +4516,12 @@ function drawBoardOnGround(x, y, worldHeading, paint) {
   const fy = Math.sin(worldHeading);
   const rx = -fy;
   const ry = fx;
-  const origin = projectWorld(x, y);
-  const nose = projectWorld(x + fx * BOARD_NOSE * along, y + fy * BOARD_NOSE * along);
-  const side = projectWorld(x + rx * across, y + ry * across);
+  const z = (liftM > 0 ? liftM : 0) * ppm;
+  const sideZ = z - Math.sin(rollRad) * across;
+  const cam = viewCamera();
+  const origin = projectHeight(cam, x, y, z);
+  const nose = projectHeight(cam, x + fx * BOARD_NOSE * along, y + fy * BOARD_NOSE * along, z);
+  const side = projectHeight(cam, x + rx * across, y + ry * across, sideZ);
   if (!origin || !nose || !side) return;
   ctx.save();
   ctx.setTransform(
@@ -4509,6 +4530,35 @@ function drawBoardOnGround(x, y, worldHeading, paint) {
     origin.x, origin.y
   );
   paint(Math.hypot(side.x - origin.x, side.y - origin.y) || 1);
+  ctx.restore();
+}
+
+function drawBoardShadow(x, y, worldHeading, liftM) {
+  if (!(liftM > 0.04)) return;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const fx = Math.cos(worldHeading);
+  const fy = Math.sin(worldHeading);
+  const rx = -fy;
+  const ry = fx;
+  const halfL = BOARD_LENGTH_M * 0.62 * ppm;
+  const halfB = BOARD_BEAM_M * 0.85 * ppm;
+  const o = projectWorld(x, y);
+  const n = projectWorld(x + fx * halfL, y + fy * halfL);
+  const s = projectWorld(x + rx * halfB, y + ry * halfB);
+  if (!o || !n || !s) return;
+  const rise = Math.min(1, liftM / BOARD_LIFT_M);
+  ctx.save();
+  ctx.filter = 'blur(3px)';
+  ctx.translate(o.x, o.y);
+  ctx.transform(s.x - o.x, s.y - o.y, n.x - o.x, n.y - o.y, 0, 0);
+  const g = ctx.createRadialGradient(0, 0, 0.05, 0, 0, 1);
+  g.addColorStop(0, `rgba(0,0,0,${(0.32 * rise).toFixed(3)})`);
+  g.addColorStop(0.45, `rgba(0,0,0,${(0.14 * rise).toFixed(3)})`);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(0, 0, 1, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 }
 
@@ -5175,6 +5225,7 @@ async function importSessionTrackText(text, fileName, kind) {
   placePlayerAtStart();
   speed = 0;
   bankAngleDeg = 0;
+  shownBoardLiftM = 0;
   wakeTrail = [];
   lapActive = false;
 
@@ -5767,6 +5818,7 @@ function crossedGateInCorrectDirection(oldPos, newPos, gate) {
 function resetTrack() {
     speed = 0;
     bankAngleDeg = 0;
+    shownBoardLiftM = 0;
     wakeTrail = [];
     
     pos.x = (canvas.width / 2) - 4; // Shift 4px to the left

@@ -58,11 +58,6 @@ function normalize(v) {
   return { x: v.x / l, y: v.y / l, z: v.z / l };
 }
 
-function phaseOf(x, y) {
-  const s = Math.sin(x * 0.017 + y * 0.013) * 43758.5453;
-  return (s - Math.floor(s)) * Math.PI * 2;
-}
-
 function buildMesh() {
   if (mesh) return mesh;
   const geom = buildInflatedTetra({ segments: SEGMENTS });
@@ -186,17 +181,17 @@ function tubeStrip(pts, radius, sides) {
 
 function poseAt(x, y, facing) {
   const m = buildMesh();
-  const t = (typeof performance !== 'undefined' ? performance.now() : 0) / 1000;
-  const phase = phaseOf(x, y);
+  // Planted on the water. Rocking and heave made the plate crawl and the
+  // silhouette pop as the camera swung around the mark.
   return {
     x, y,
     scale: m.scale,
     draft: m.draft,
     pivot: m.geom.height * 0.28,
     yaw: facing - m.faceAz,
-    rx: 0.045 * Math.sin(t * 1.7 + phase),
-    rz: 0.045 * Math.sin(t * 1.3 + phase * 2.3),
-    heave: 0.035 * Math.sin(t * 2.1 + phase) + 0.018 * Math.sin(t * 3.3 + phase * 1.7)
+    rx: 0,
+    rz: 0,
+    heave: 0
   };
 }
 
@@ -238,31 +233,22 @@ function worldNormal(nrm, pose) {
   return normalize(r);
 }
 
-function lightToward(cam) {
-  const dx = cam.eyeX - cam.lx;
-  const dy = cam.eyeY - cam.ly;
-  const h = Math.hypot(dx, dy) || 1;
-  return normalize({ x: dx / h * 0.38, y: dy / h * 0.38, z: LIGHT_UP });
-}
+// Fixed sun. A light that followed the camera made each facet flash as the
+// rider turned around the buoy.
+const SUN = normalize({ x: 0.28, y: -0.18, z: LIGHT_UP });
 
-function shadeOf(nrm, world, cam, light) {
+function shadeOf(nrm, world, cam) {
   const eye = normalize({
     x: cam.eyeX - world.x,
     y: cam.eyeY - world.y,
     z: cam.eyeZ - world.z
   });
-  const nd = Math.max(0, dot(nrm, light));
-  const half = normalize({
-    x: light.x + eye.x,
-    y: light.y + eye.y,
-    z: light.z + eye.z
-  });
-  const hd = Math.max(0, dot(nrm, half));
+  const nd = Math.max(0, dot(nrm, SUN));
   const facing = Math.max(0, dot(nrm, eye));
-  const spec = Math.pow(hd, 36) * 0.95 + Math.pow(hd, 7) * 0.28;
   const sky = Math.max(0, nrm.z);
-  const base = 0.74 + 0.2 * nd + 0.06 * sky + Math.pow(1 - facing, 3) * 0.05;
-  return { base: Math.min(1.05, base), spec, facing };
+  const base = 0.76 + 0.18 * nd + 0.06 * sky;
+  const spec = Math.pow(nd, 6) * 0.07;
+  return { base: Math.min(1.02, base), spec, facing };
 }
 
 function logoReady(logo) {
@@ -314,6 +300,41 @@ function clipAboveWater(verts) {
     }
   }
   return out;
+}
+
+// Bilinear, premultiplied, so the plate edge doesn't sparkle as texels
+// cross a pixel while the camera moves.
+function sampleLogo(src, lw, lh, iu, iv) {
+  const fx = Math.min(lw - 1.001, Math.max(0, iu * (lw - 1)));
+  const fy = Math.min(lh - 1.001, Math.max(0, (1 - iv) * (lh - 1)));
+  const x0 = fx | 0;
+  const y0 = fy | 0;
+  const x1 = x0 + 1 < lw ? x0 + 1 : x0;
+  const y1 = y0 + 1 < lh ? y0 + 1 : y0;
+  const tx = fx - x0;
+  const ty = fy - y0;
+  const at = (x, y) => {
+    const oi = (y * lw + x) * 4;
+    const a = src[oi + 3] * (1 / 255);
+    return [src[oi] * a, src[oi + 1] * a, src[oi + 2] * a, a];
+  };
+  const c00 = at(x0, y0);
+  const c10 = at(x1, y0);
+  const c01 = at(x0, y1);
+  const c11 = at(x1, y1);
+  const mix = (p, q, t) => p + (q - p) * t;
+  const top = [
+    mix(c00[0], c10[0], tx), mix(c00[1], c10[1], tx),
+    mix(c00[2], c10[2], tx), mix(c00[3], c10[3], tx)
+  ];
+  const bot = [
+    mix(c01[0], c11[0], tx), mix(c01[1], c11[1], tx),
+    mix(c01[2], c11[2], tx), mix(c01[3], c11[3], tx)
+  ];
+  return [
+    mix(top[0], bot[0], ty), mix(top[1], bot[1], ty),
+    mix(top[2], bot[2], ty), mix(top[3], bot[3], ty)
+  ];
 }
 
 function rasterTriangles(ctx, cam, tris, logo, logoBox) {
@@ -387,25 +408,29 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
         const pi = y * w + x;
         if (depth >= zbuf[pi]) continue;
         zbuf[pi] = depth;
-        const base = w0 * b0 + w1 * b1 + w2 * b2;
-        const spec = w0 * p0 + w1 * p1 + w2 * p2;
+        // Perspective-correct so the plate stays stuck to the vinyl as the
+        // camera orbits, instead of sliding across the triangle edges.
+        const iw0 = w0 / Math.max(d0, 1e-3);
+        const iw1 = w1 / Math.max(d1, 1e-3);
+        const iw2 = w2 / Math.max(d2, 1e-3);
+        const iw = iw0 + iw1 + iw2 || 1;
+        const base = (iw0 * b0 + iw1 * b1 + iw2 * b2) / iw;
+        const spec = (iw0 * p0 + iw1 * p1 + iw2 * p2) / iw;
         let r = base * 246 + spec * 170;
         let g = base * 248 + spec * 170;
         let b = base * 255 + spec * 155;
         if (src && tri.applyLogo && uv0 && logoBox) {
-          const u = w0 * uv0.u + w1 * uv1.u + w2 * uv2.u;
-          const v = w0 * uv0.v + w1 * uv1.v + w2 * uv2.v;
+          const u = (iw0 * uv0.u + iw1 * uv1.u + iw2 * uv2.u) / iw;
+          const v = (iw0 * uv0.v + iw1 * uv1.v + iw2 * uv2.v) / iw;
           const iu = (u - logoBox.u0) / (logoBox.u1 - logoBox.u0);
           const iv = (v - logoBox.v0) / (logoBox.v1 - logoBox.v0);
           if (iu >= 0 && iv >= 0 && iu <= 1 && iv <= 1) {
-            const sx = Math.min(lw - 1, Math.max(0, (iu * (lw - 1)) | 0));
-            const sy = Math.min(lh - 1, Math.max(0, ((1 - iv) * (lh - 1)) | 0));
-            const oi = (sy * lw + sx) * 4;
-            const a = src[oi + 3] / 255;
+            const tex = sampleLogo(src, lw, lh, iu, iv);
+            const a = tex[3];
             if (a > 0.02) {
-              const lr = src[oi] * base + spec * 210;
-              const lg = src[oi + 1] * base + spec * 210;
-              const lb = src[oi + 2] * base + spec * 200;
+              const lr = (tex[0] / a) * base + spec * 80;
+              const lg = (tex[1] / a) * base + spec * 80;
+              const lb = (tex[2] / a) * base + spec * 70;
               r = r * (1 - a) + lr * a;
               g = g * (1 - a) + lg * a;
               b = b * (1 - a) + lb * a;
@@ -498,7 +523,6 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
     }
     return;
   }
-  const light = lightToward(cam);
   const plate = ensureLogoPixels(logo);
   const tris = [];
 
@@ -508,7 +532,7 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
       const nrm = item.nrm;
       const world = worldPoint(local, pose, ppm);
       const normal = nrm ? worldNormal(nrm, pose) : { x: 0, y: 0, z: 1 };
-      const sh = shadeOf(normal, world, cam, light);
+      const sh = shadeOf(normal, world, cam);
       const screen = world.z >= 0 ? projectHeight(cam, world.x, world.y, world.z) : null;
       return {
         world,
@@ -518,7 +542,9 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
         facing: sh.facing
       };
     });
-    if (verts[0].facing + verts[1].facing + verts[2].facing < 0.12) return;
+    // Drop real backfaces only. A harder cutoff made the plate blink off
+    // along the silhouette as the camera came around.
+    if (verts[0].facing <= 0 && verts[1].facing <= 0 && verts[2].facing <= 0) return;
     let poly = verts;
     if (verts.some(v => v.world.z < 0)) {
       poly = clipAboveWater(verts);
