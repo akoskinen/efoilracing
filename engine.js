@@ -2724,32 +2724,35 @@ function stepBoardLift(dt) {
   shownBoardLiftM += (target - shownBoardLiftM) * a;
   if (Math.abs(shownBoardLiftM - target) < 0.002) shownBoardLiftM = target;
 }
-// Left/right move the lean and it stays where it is let go, so a set angle
-// holds hands-off through a long arc. Leaning in uses the rider's lean rates;
-// heading back toward upright is twice as quick. Pressing through upright
-// pauses there for LEAN_UPRIGHT_PAUSE_S so riding straight is easy to find.
-const LEAN_UPRIGHT_PAUSE_S = 0.2;
-let leanUprightPause = 0;
+const bankDecay      = 0.9;
 
 function updateBankAngle(dt) {
-  const dir = (keys['ArrowRight'] ? 1 : 0) - (keys['ArrowLeft'] ? 1 : 0);
-  if (!dir) {
-    leanUprightPause = 0;
-    return;
+  let targetSign = 0;
+  if (keys['ArrowLeft'])  targetSign = -1;
+  if (keys['ArrowRight']) targetSign =  1;
+  
+  if (targetSign !== 0) {
+    let currentMag = Math.abs(bankAngleDeg);
+    let sign = Math.sign(bankAngleDeg);
+    if (sign === 0) sign = targetSign;
+    if (sign !== targetSign) {
+      currentMag = 0;
+      bankAngleDeg = 0;
+      sign = targetSign;
+    }
+    let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
+    currentMag += rate * dt;
+    if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
+    bankAngleDeg = sign * currentMag;
+  } else {
+    if (Math.abs(bankAngleDeg) < 0.5) {
+      bankAngleDeg = 0;
+    } else {
+      const decayPow = Math.pow(bankDecay, 60 * dt);
+      bankAngleDeg *= decayPow;
+      if (Math.abs(bankAngleDeg) < 0.05) bankAngleDeg = 0;
+    }
   }
-  if (leanUprightPause > 0) {
-    leanUprightPause -= dt;
-    return;
-  }
-  const mag = Math.abs(bankAngleDeg);
-  const towardUpright = mag > 0 && Math.sign(bankAngleDeg) !== dir;
-  const rate = (mag < 30 ? activeRider.lean0 : activeRider.lean30) * (towardUpright ? 2 : 1);
-  let next = bankAngleDeg + dir * rate * dt;
-  if (towardUpright && Math.sign(next) !== Math.sign(bankAngleDeg)) {
-    next = 0;
-    leanUprightPause = LEAN_UPRIGHT_PAUSE_S;
-  }
-  bankAngleDeg = Math.max(-BANK_ANGLE_MAX, Math.min(BANK_ANGLE_MAX, next));
 }
 
 // --- Turn Radius Interpolation ---
@@ -6065,8 +6068,8 @@ function formatLapClock(sec) {
 function updateRideMeter(speedKmh) {
     const bankEl = document.getElementById('bankAngleDisplay');
     if (bankEl) {
-      const bank = Math.round(bankAngleDeg * 10) / 10;
-      bankEl.textContent = `${bank === 0 ? '0' : bank.toFixed(1)}°`;
+      const bank = Math.round(bankAngleDeg);
+      bankEl.textContent = `${bank}°`;
     }
     const speedEl = document.getElementById('speedDisplay');
     if (speedEl) speedEl.textContent = (Number(speedKmh) || 0).toFixed(1);

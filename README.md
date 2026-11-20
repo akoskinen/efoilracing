@@ -24,7 +24,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 
 | Control | Action |
 |---|---|
-| Arrows / IJKL | Throttle (up/down) and lean (left/right). The lean stays where you let go, so a set angle holds through a long arc. Leaning in follows the board's lean rates; heading back to upright is twice as quick and pauses briefly at 0° |
+| Arrows / IJKL | Steer and throttle |
 | **Z** | Cycle the camera: race zoom → **chase view** → **1 km** → **5 km** → race zoom. Pinch follows the same stops |
 | **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** stays put when the course has a line |
 | G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |
