@@ -2993,7 +2993,13 @@ function loadChaseSettings() {
 }
 
 function setChaseSettings(next) {
-  chaseSettings = clampChaseSettings({ ...chaseSettings, ...next });
+  // Dragging one threshold past the other pushes the other along, so
+  // neither slider gets stuck.
+  const merged = { ...chaseSettings, ...next };
+  if ('fastKmh' in next && !('slowKmh' in next) && merged.fastKmh < merged.slowKmh + 1) {
+    merged.slowKmh = Math.max(CHASE_LIMITS.kmh[0], merged.fastKmh - 1);
+  }
+  chaseSettings = clampChaseSettings(merged);
   try { localStorage.setItem(CHASE_CAMERA_KEY, JSON.stringify(chaseSettings)); } catch {}
 }
 
@@ -3082,10 +3088,30 @@ function updateFollowCamera(dt) {
   let ty;
   let tau = isOverviewZoom() ? OVERVIEW_CENTER_TAU : FOLLOW_TAU;
   const pose = currentChasePose();
+  const lifting = mapDepart;
+  const chasing = isChaseZoom() && !lifting;
+  const pitchTau = lifting ? 0.34 : PITCH_TAU;
+  const pitchA = 1 - Math.exp(-dt / pitchTau);
+  const targetPitch = chasing ? pose.pitch : 0;
+  const flatD = focalLength(h) / Math.max(s, 1e-4);
+  const targetDist = chasing ? pose.distance : flatD;
+  if (!(viewDistance > 1)) viewDistance = targetDist;
+  viewPitch += (targetPitch - viewPitch) * pitchA;
+  viewDistance += (targetDist - viewDistance) * pitchA;
+  const bearingTau = lifting ? 0.34 : (chasing ? BEARING_TAU * Math.max(0.25, chaseLag(pose)) : BEARING_TAU);
+  viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, bearingTau);
   if (isChaseZoom()) {
     const dir = focus ? hd : chaseLookDir(pose, hd);
-    const lx = px + Math.cos(dir) * pose.ahead;
-    const ly = py + Math.sin(dir) * pose.ahead;
+    // Aim from the eased tilt and distance, not their targets, so the eye
+    // stays the chosen distance behind the board while a speed change eases
+    // in. Aiming at the target pushed a first-person eye metres ahead of
+    // the board until the tilt caught up.
+    const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+    const ahead = focus
+      ? pose.ahead
+      : Math.max(0, viewDistance * Math.sin(viewPitch) - pose.behindM * ppm);
+    const lx = px + Math.cos(dir) * ahead;
+    const ly = py + Math.sin(dir) * ahead;
     tx = w / 2 - lx * s;
     ty = h / 2 - ly * s;
     tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU * Math.max(0.02, chaseLag(pose));
@@ -3130,18 +3156,6 @@ function updateFollowCamera(dt) {
     if (dx * dx + dy * dy < 36) introCamReturning = false;
   }
 
-  const lifting = mapDepart;
-  const chasing = isChaseZoom() && !lifting;
-  const pitchTau = lifting ? 0.34 : PITCH_TAU;
-  const pitchA = 1 - Math.exp(-dt / pitchTau);
-  const targetPitch = chasing ? pose.pitch : 0;
-  const flatD = focalLength(h) / Math.max(s, 1e-4);
-  const targetDist = chasing ? pose.distance : flatD;
-  if (!(viewDistance > 1)) viewDistance = targetDist;
-  viewPitch += (targetPitch - viewPitch) * pitchA;
-  viewDistance += (targetDist - viewDistance) * pitchA;
-  const bearingTau = lifting ? 0.34 : (chasing ? BEARING_TAU * Math.max(0.25, chaseLag(pose)) : BEARING_TAU);
-  viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, bearingTau);
 }
 
 function worldMarkerScale() {
