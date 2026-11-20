@@ -159,27 +159,79 @@ export function makeCamera({ lx, ly, scale, pitch, bearing, viewW, viewH, distan
   };
 }
 
-export function viewDepth(cam, x, y) {
+function viewRay(cam, x, y, z) {
   const dx = x - cam.eyeX;
   const dy = y - cam.eyeY;
-  const dz = -cam.eyeZ;
-  return (dx * cam.fx + dy * cam.fy) * cam.sp - dz * cam.cp;
+  const dz = z - cam.eyeZ;
+  const along = dx * cam.fx + dy * cam.fy;
+  return {
+    vx: dx * cam.rx + dy * cam.ry,
+    vu: along * cam.cp + dz * cam.sp,
+    vd: along * cam.sp - dz * cam.cp
+  };
+}
+
+export function viewDepth(cam, x, y) {
+  return viewRay(cam, x, y, 0).vd;
+}
+
+/** Distance in front of the camera for a point at height z (world pixels, up). */
+export function depthAt(cam, x, y, z) {
+  return viewRay(cam, x, y, z).vd;
+}
+
+function screenPoint(cam, ray) {
+  if (ray.vd < 1) return null;
+  return {
+    x: cam.cx + cam.f * ray.vx / ray.vd,
+    y: cam.cy - cam.f * ray.vu / ray.vd,
+    depth: ray.vd
+  };
 }
 
 /** Screen point for a ground point, or null when it is behind the camera. */
 export function project(cam, x, y) {
-  const dx = x - cam.eyeX;
-  const dy = y - cam.eyeY;
-  const dz = -cam.eyeZ;
-  const vx = dx * cam.rx + dy * cam.ry;
-  const vu = (dx * cam.fx + dy * cam.fy) * cam.cp + dz * cam.sp;
-  const vd = (dx * cam.fx + dy * cam.fy) * cam.sp - dz * cam.cp;
-  if (vd < 1) return null;
-  return {
-    x: cam.cx + cam.f * vx / vd,
-    y: cam.cy - cam.f * vu / vd,
-    depth: vd
-  };
+  return screenPoint(cam, viewRay(cam, x, y, 0));
+}
+
+/** Screen point for a point at height z (world pixels above the water). */
+export function projectHeight(cam, x, y, z) {
+  return screenPoint(cam, viewRay(cam, x, y, z));
+}
+
+/**
+ * Project a polygon that may cross the near plane. Points are
+ * `{ x, y, z }` in world pixels. Returns screen points, or null.
+ */
+export function projectClipped(cam, points, near = 1.25) {
+  const rays = points.map(p => viewRay(cam, p.x, p.y, p.z || 0));
+  const clipped = [];
+  for (let i = 0; i < rays.length; i++) {
+    const a = rays[i];
+    const b = rays[(i + 1) % rays.length];
+    const aIn = a.vd >= near;
+    const bIn = b.vd >= near;
+    const hit = () => {
+      const t = (near - a.vd) / (b.vd - a.vd);
+      return {
+        vx: a.vx + (b.vx - a.vx) * t,
+        vu: a.vu + (b.vu - a.vu) * t,
+        vd: near
+      };
+    };
+    if (aIn && bIn) clipped.push(b);
+    else if (aIn && !bIn) clipped.push(hit());
+    else if (!aIn && bIn) {
+      clipped.push(hit());
+      clipped.push(b);
+    }
+  }
+  if (clipped.length < 3) return null;
+  return clipped.map(r => ({
+    x: cam.cx + cam.f * r.vx / r.vd,
+    y: cam.cy - cam.f * r.vu / r.vd,
+    depth: r.vd
+  }));
 }
 
 /**
