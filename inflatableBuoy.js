@@ -35,7 +35,8 @@ function rasterBuffer(w, h) {
     scratch.z = new Float32Array(scratch.w * scratch.h);
     scratch.pix = new Uint8ClampedArray(scratch.z.length * 4);
   }
-  scratch.z.fill(1e9, 0, n);
+  // 0 is empty. A larger 1/depth is closer to the camera.
+  scratch.z.fill(0, 0, n);
   scratch.pix.fill(0, 0, n * 4);
   return scratch;
 }
@@ -268,6 +269,12 @@ function ensureLogoPixels(logo) {
   return logoPixels;
 }
 
+// A vertex just in front of the camera projects to a huge screen coordinate
+// and the triangle becomes a spike across the view. One just behind is
+// dropped with the whole triangle, so a chunk of the buoy vanishes. Cut
+// the edge on the near plane instead, same as the flat buoy discs.
+const NEAR_PLANE = 1.25;
+
 function clipAboveWater(verts) {
   const out = [];
   for (let i = 0; i < verts.length; i++) {
@@ -300,6 +307,79 @@ function clipAboveWater(verts) {
     }
   }
   return out;
+}
+
+function clipToNear(cam, verts) {
+  const depthOf = (v) => depthAt(cam, v.world.x, v.world.y, v.world.z);
+  const out = [];
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % verts.length];
+    const da = depthOf(a);
+    const db = depthOf(b);
+    const aIn = da >= NEAR_PLANE;
+    const bIn = db >= NEAR_PLANE;
+    const mid = () => {
+      const t = (NEAR_PLANE - da) / (db - da);
+      const mix = (p, q) => p + (q - p) * t;
+      const world = {
+        x: mix(a.world.x, b.world.x),
+        y: mix(a.world.y, b.world.y),
+        z: mix(a.world.z, b.world.z)
+      };
+      return {
+        world,
+        screen: projectHeight(cam, world.x, world.y, world.z),
+        shade: {
+          base: mix(a.shade.base, b.shade.base),
+          spec: mix(a.shade.spec, b.shade.spec)
+        },
+        uv: a.uv && b.uv ? { u: mix(a.uv.u, b.uv.u), v: mix(a.uv.v, b.uv.v) } : null
+      };
+    };
+    if (aIn && bIn) out.push(b);
+    else if (aIn && !bIn) out.push(mid());
+    else if (!aIn && bIn) {
+      out.push(mid());
+      out.push(b);
+    }
+  }
+  return out;
+}
+
+// Local Y-up maps onto world Z-up with a reflection, so a panel that faces
+// the eye has a negative right-handed cross product. Vertex normals lean
+// around the puff and used to let a sliver of the back plate poke through
+// the seam as the camera came around.
+function frontFacing(tri, cam) {
+  const a = tri[0].world;
+  const b = tri[1].world;
+  const c = tri[2].world;
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abz = b.z - a.z;
+  const acx = c.x - a.x;
+  const acy = c.y - a.y;
+  const acz = c.z - a.z;
+  const nx = aby * acz - abz * acy;
+  const ny = abz * acx - abx * acz;
+  const nz = abx * acy - aby * acx;
+  const ex = cam.eyeX - a.x;
+  const ey = cam.eyeY - a.y;
+  const ez = cam.eyeZ - a.z;
+  const facing = nx * ex + ny * ey + nz * ez;
+  const scale = (Math.hypot(nx, ny, nz) * Math.hypot(ex, ey, ez)) || 1;
+  // Negative means the face points at the eye. A small positive margin keeps
+  // the panel until it has turned a few degrees past edge-on, so the plate
+  // does not open a hole along the seam as the camera swings past.
+  return { facing: facing / scale };
+}
+
+function panelFacesCamera(panel, pose, cam, ppm) {
+  const n = SEGMENTS;
+  const corners = [panel.rows[0][0], panel.rows[n][0], panel.rows[0][n]];
+  const tri = corners.map(v => ({ world: worldPoint(v.p, pose, ppm) }));
+  return frontFacing(tri, cam).facing < 0.04;
 }
 
 // Bilinear, premultiplied, so the plate edge doesn't sparkle as texels
@@ -379,7 +459,14 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
     const cx = s2.x - x0;
     const cy = s2.y - y0;
     const denom = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
-    if (Math.abs(denom) < 0.05) continue;
+    const absDen = Math.abs(denom);
+    if (absDen < 0.05) continue;
+    // Half a pixel past each edge, so shared edges don't leave a crack
+    // that flashes the background or the plate's cutouts as the view moves.
+    const pxBias = 0.65;
+    const eps0 = pxBias * Math.hypot(cx - bx, cy - by) / absDen;
+    const eps1 = pxBias * Math.hypot(ax - cx, ay - cy) / absDen;
+    const eps2 = pxBias * Math.hypot(bx - ax, by - ay) / absDen;
     const minSX = Math.max(0, Math.floor(Math.min(ax, bx, cx)));
     const maxSX = Math.min(w - 1, Math.ceil(Math.max(ax, bx, cx)));
     const minSY = Math.max(0, Math.floor(Math.min(ay, by, cy)));
@@ -390,9 +477,10 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
     const p0 = tri[0].shade.spec;
     const p1 = tri[1].shade.spec;
     const p2 = tri[2].shade.spec;
-    const d0 = s0.depth;
-    const d1 = s1.depth;
-    const d2 = s2.depth;
+    const bias = tri.depthBias || 1;
+    const d0 = s0.depth * bias;
+    const d1 = s1.depth * bias;
+    const d2 = s2.depth * bias;
     const uv0 = tri[0].uv;
     const uv1 = tri[1].uv;
     const uv2 = tri[2].uv;
@@ -403,17 +491,17 @@ function rasterTriangles(ctx, cam, tris, logo, logoBox) {
         const w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / denom;
         const w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / denom;
         const w2 = 1 - w0 - w1;
-        if (w0 < -0.001 || w1 < -0.001 || w2 < -0.001) continue;
-        const depth = w0 * d0 + w1 * d1 + w2 * d2;
-        const pi = y * w + x;
-        if (depth >= zbuf[pi]) continue;
-        zbuf[pi] = depth;
-        // Perspective-correct so the plate stays stuck to the vinyl as the
-        // camera orbits, instead of sliding across the triangle edges.
+        if (w0 < -eps0 || w1 < -eps1 || w2 < -eps2) continue;
+        // 1/depth interpolated in screen space is the real camera depth.
+        // A linear mix let the far panel poke through the near one.
         const iw0 = w0 / Math.max(d0, 1e-3);
         const iw1 = w1 / Math.max(d1, 1e-3);
         const iw2 = w2 / Math.max(d2, 1e-3);
-        const iw = iw0 + iw1 + iw2 || 1;
+        const inv = iw0 + iw1 + iw2;
+        const pi = y * w + x;
+        if (inv <= zbuf[pi]) continue;
+        zbuf[pi] = inv;
+        const iw = inv || 1;
         const base = (iw0 * b0 + iw1 * b1 + iw2 * b2) / iw;
         const spec = (iw0 * p0 + iw1 * p1 + iw2 * p2) / iw;
         let r = base * 246 + spec * 170;
@@ -526,7 +614,7 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
   const plate = ensureLogoPixels(logo);
   const tris = [];
 
-  const pushTri = (a, b, c, logoOn) => {
+  const pushTri = (a, b, c, logoOn, cull, depthBias) => {
     const verts = [a, b, c].map((item) => {
       const local = item.p || item;
       const nrm = item.nrm;
@@ -538,29 +626,38 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
         world,
         screen,
         shade: sh,
-        uv: item.u == null ? null : { u: item.u, v: item.v },
-        facing: sh.facing
+        uv: item.u == null ? null : { u: item.u, v: item.v }
       };
     });
-    // Drop real backfaces only. A harder cutoff made the plate blink off
-    // along the silhouette as the camera came around.
-    if (verts[0].facing <= 0 && verts[1].facing <= 0 && verts[2].facing <= 0) return;
     let poly = verts;
     if (verts.some(v => v.world.z < 0)) {
       poly = clipAboveWater(verts);
-      for (const v of poly) finishScreen(v, cam);
+      if (poly.length < 3) return;
     }
+    // Drop the part that has crossed the camera, and keep the rest.
+    poly = clipToNear(cam, poly);
     if (poly.length < 3) return;
+    for (const v of poly) finishScreen(v, cam);
     const emit = (t) => {
       if (!t.every(v => v.screen)) return;
+      // Per-triangle culling punched holes through the plate: the crown
+      // normals point away while the face is still the one in view, and the
+      // background showed through the letters. A whole panel is kept or
+      // dropped together. Seam tubes still cull their back half.
+      const face = frontFacing(t, cam).facing;
+      // Tubes drop their back half. A panel that still faces the camera keeps
+      // triangles a little past edge-on, so the plate is not punched out, and
+      // drops the ones that have wrapped onto the back of the puff.
+      if (cull ? face > 0 : face > 0.45) return;
       t.applyLogo = logoOn;
+      if (depthBias) t.depthBias = depthBias;
       tris.push(t);
     };
-    emit([poly[0], poly[1], poly[2]]);
-    if (poly.length === 4) emit([poly[0], poly[2], poly[3]]);
+    for (let k = 1; k < poly.length - 1; k++) emit([poly[0], poly[k], poly[k + 1]]);
   };
 
   for (const panel of m.panels) {
+    if (!panelFacesCamera(panel, pose, cam, ppm)) continue;
     const rows = panel.rows;
     const logoOn = panel.kind === 'side';
     for (let i = 0; i < SEGMENTS; i++) {
@@ -568,8 +665,8 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
         const v00 = rows[i][j];
         const v10 = rows[i + 1][j];
         const v01 = rows[i][j + 1];
-        pushTri(v00, v10, v01, logoOn);
-        if (i + j < SEGMENTS - 1) pushTri(v10, rows[i + 1][j + 1], v01, logoOn);
+        pushTri(v00, v10, v01, logoOn, false);
+        if (i + j < SEGMENTS - 1) pushTri(v10, rows[i + 1][j + 1], v01, logoOn, false);
       }
     }
   }
@@ -581,7 +678,9 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
           { p: tri[0].p, nrm: tri[0].nrm, u: null, v: null },
           { p: tri[1].p, nrm: tri[1].nrm, u: null, v: null },
           { p: tri[2].p, nrm: tri[2].nrm, u: null, v: null },
-          false
+          false,
+          true,
+          0.97
         );
       }
     }
