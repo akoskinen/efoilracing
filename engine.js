@@ -15,7 +15,7 @@ import {
   FLAT_BEARING, CHASE_PITCH, chaseFraming, makeCamera, project, projectHeight, unproject, viewDepth, depthAt,
   easeAngle, isFlatView, focalLength, expandTileIndexRange
 } from "./chaseCam.js";
-import { drawInflatableBuoy, sftLogoImage } from "./inflatableBuoy.js";
+import { drawChaseBuoys, chaseBuoysAvailable } from "./chaseBuoys3d.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
 import {
@@ -4306,14 +4306,9 @@ function courseFacing(x, y) {
 }
 
 function drawBuoyMark(x, y, isTurn, passSide) {
-  if (!cameraIsFlat() && isTurn) {
-    drawInflatableBuoy(ctx, viewCamera(), {
-      x,
-      y,
-      ppm: pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M,
-      facing: courseFacing(x, y),
-      logo: sftLogoImage()
-    });
+  // The 3D hull itself is drawn for every turn buoy at once by
+  // drawChaseBuoyLayer, before this.
+  if (!cameraIsFlat() && isTurn && chaseBuoysAvailable()) {
     const ringA = passRingAlpha();
     if (ringA > 0.02) {
       ctx.save();
@@ -4349,6 +4344,28 @@ function drawBuoyNumber(b) {
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
     ctx.fillText(label, 11, -8);
   });
+}
+
+function buoyMarkSpots(b) {
+  const spots = [{ x: b.x, y: b.y }];
+  if (currentTrack.parallelTrack) {
+    const m = pixelToTrackMeters(b.x, b.y);
+    spots.push(trackMetersToPixel(m.x, m.y + currentTrack.trackSeparation));
+  }
+  return spots;
+}
+
+/** `items` are `{ b, alpha }` turn buoys. Chase view only. */
+function drawChaseBuoyLayer(items) {
+  if (cameraIsFlat()) return;
+  const list = [];
+  for (const { b, alpha } of items) {
+    if (b.turnIndex == null) continue;
+    for (const p of buoyMarkSpots(b)) {
+      list.push({ x: p.x, y: p.y, facing: courseFacing(p.x, p.y), alpha });
+    }
+  }
+  drawChaseBuoys(ctx, viewCamera(), list, pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M);
 }
 
 function drawOneBuoy(b) {
@@ -4401,6 +4418,7 @@ function withDrawAlpha(a, fn) {
 function drawTrack(intro) {
   if (intro) {
     withDrawAlpha(intro.gates, drawTimingLines);
+    drawChaseBuoyLayer((intro.turns || []).map((b, i) => ({ b, alpha: intro.turnFade(i) })));
     (intro.turns || []).map((b, i) => ({ b, i })).sort((a, c) => {
       if (cameraIsFlat()) return a.i - c.i;
       const cam = viewCamera();
@@ -4415,6 +4433,7 @@ function drawTrack(intro) {
     return;
   }
 
+  drawChaseBuoyLayer(buoys.map(b => ({ b, alpha: 1 })));
   orderedBuoys(buoys).forEach(b => drawOneBuoy(b));
   drawTimingLines();
 }
