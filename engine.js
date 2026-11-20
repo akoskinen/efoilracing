@@ -4660,14 +4660,25 @@ function foilStance(liftM, rollRad) {
   };
 }
 
-function offsetRight(x, y, worldHeading, meters) {
-  const d = meters * (pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M);
-  return { x: x - Math.sin(worldHeading) * d, y: y + Math.cos(worldHeading) * d };
+// Chase scale (2×): trailing edge 50 cm from the tail, 24 cm chord, 4 cm thick.
+const MAST_CHORD_M = 0.24;
+const MAST_THICK_M = 0.04;
+const MAST_TRAILING_FROM_TAIL_M = 0.5;
+function mastAheadM() {
+  const tailM = BOARD_LENGTH_M * -BOARD_TAIL / (BOARD_NOSE - BOARD_TAIL);
+  return MAST_TRAILING_FROM_TAIL_M + MAST_CHORD_M / 2 - tailM;
+}
+
+function offsetRight(x, y, worldHeading, meters, aheadM = 0) {
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const fx = Math.cos(worldHeading);
+  const fy = Math.sin(worldHeading);
+  return { x: x + (fx * aheadM - fy * meters) * ppm, y: y + (fy * aheadM + fx * meters) * ppm };
 }
 
 function wakeOrigin() {
   const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
-  return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+  return offsetRight(pos.x, pos.y, heading, stance.waterSideM, mastAheadM());
 }
 
 // The part of the mast above the water, from the waterline up to the deck.
@@ -4681,16 +4692,17 @@ function drawMast(x, y, worldHeading, stance, color) {
   const ry = fx;
   const c = Math.cos(stance.rollRad);
   const s = Math.sin(stance.rollRad);
-  const base = { x: x + rx * stance.waterSideM * ppm, y: y + ry * stance.waterSideM * ppm, z: 0 };
-  const top = { x: x + rx * stance.deckSideM * ppm, y: y + ry * stance.deckSideM * ppm, z: stance.deckM * ppm };
+  const ahead = mastAheadM();
+  const base = { ...offsetRight(x, y, worldHeading, stance.waterSideM, ahead), z: 0 };
+  const top = { ...offsetRight(x, y, worldHeading, stance.deckSideM, ahead), z: stance.deckM * ppm };
   const strip = (dx, dy, dz) => [
     { x: base.x - dx, y: base.y - dy, z: base.z - dz },
     { x: base.x + dx, y: base.y + dy, z: base.z + dz },
     { x: top.x + dx, y: top.y + dy, z: top.z + dz },
     { x: top.x - dx, y: top.y - dy, z: top.z - dz }
   ];
-  const chord = 0.07 * ppm;
-  const thick = 0.025 * ppm;
+  const chord = MAST_CHORD_M / 2 * ppm;
+  const thick = MAST_THICK_M / 2 * ppm;
   const cam = viewCamera();
   ctx.save();
   ctx.fillStyle = color;
