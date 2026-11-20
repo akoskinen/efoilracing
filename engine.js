@@ -4482,11 +4482,13 @@ function drawRacer() {
 const BOARD_NOSE = 13;
 const BOARD_TAIL = -12.35;
 const BOARD_HALF_BEAM = 4.55;
-const BOARD_LENGTH_M = 1.6;
-const BOARD_BEAM_M = 0.6;
+// Real board is 1.60 m × 0.60 m. Chase draws it at twice that, 3.20 m × 1.20 m,
+// so the shape stays true and the board is readable from the riding camera.
+const BOARD_LENGTH_M = 3.2;
+const BOARD_BEAM_M = 1.2;
 
-// Lay the same outline on the water at 1.60 m × 0.60 m. Flat views keep the
-// big marker so the rider stays easy to find.
+// Lay the outline on the water. Flat views keep the big marker so the rider
+// stays easy to find.
 function drawBoardOnGround(x, y, worldHeading, paint) {
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const len = BOARD_NOSE - BOARD_TAIL;
