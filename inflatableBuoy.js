@@ -481,8 +481,9 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
   const apex = projectHeight(cam, pose.x, pose.y, tipZ);
   const foot = projectHeight(cam, pose.x, pose.y, 0);
   const pxH = apex && foot ? Math.abs(foot.y - apex.y) : 0;
-  // The mesh is only worth it up close. Far marks stay a white triangle.
-  if (!apex || pxH < 40) {
+  // A buoy you can still pick out on the course is about 10px tall. The plate
+  // stays on the mesh down to a speck, so it does not pop in only up close.
+  if (!apex || pxH < 8) {
     const corners = waterlineCorners(pose, ppm)
       .map(p => projectHeight(cam, p.x, p.y, 0))
       .filter(Boolean);
