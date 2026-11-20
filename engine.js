@@ -3599,6 +3599,7 @@ function drawGhost(x, y, heading, liftM = 0) {
   };
   if (!cameraIsFlat()) {
     drawBoardShadow(x, y, heading, liftM);
+    drawMast(x, y, heading, foilStance(liftM, 0), 'rgba(255,136,255,0.25)');
     drawBoardOnGround(x, y, heading, paint, liftM, 0);
     return;
   }
@@ -4321,6 +4322,12 @@ function drawWake(){
     ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
     strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
   }
+  // The trail is sampled before the move, so join it to where the mast
+  // meets the water now.
+  const last = wakeTrail[wakeTrail.length - 1];
+  const origin = wakeOrigin();
+  ctx.strokeStyle = 'rgba(255,255,255,1)';
+  strokeSlimWake(last.x, last.y, origin.x, origin.y);
 
   // Draw ghost wake during active laps or free preview
   if ((lapActive || ghostPreviewStart) && ghostWakeTrail.length >= 2) {
@@ -4634,11 +4641,78 @@ function traceBoard() {
   ctx.closePath();
 }
 
+// Foiling, the wing at the foot of the 85 cm mast is the pivot and `pos`
+// is where it runs. The wing holds the depth it had at full lift, so a lean
+// swings the deck to the inside of the turn and lowers it, and the mast
+// crosses the water between the wing and the deck. Off the foil the board
+// sits on `pos`. Sideways offsets are metres along the board's right.
+const MAST_M = 0.85;
+function foilStance(liftM, rollRad) {
+  const rise = Math.min(1, Math.max(0, liftM) / BOARD_LIFT_M);
+  const depth = MAST_M - BOARD_LIFT_M;
+  const c = Math.cos(rollRad);
+  const s = Math.sin(rollRad);
+  return {
+    deckM: rise * Math.max(0, MAST_M * c - depth),
+    deckSideM: rise * MAST_M * s,
+    waterSideM: rise * depth * s / Math.max(0.2, c),
+    rollRad
+  };
+}
+
+function offsetRight(x, y, worldHeading, meters) {
+  const d = meters * (pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M);
+  return { x: x - Math.sin(worldHeading) * d, y: y + Math.cos(worldHeading) * d };
+}
+
+function wakeOrigin() {
+  const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
+  return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+}
+
+// The part of the mast above the water, from the waterline up to the deck.
+// Two crossed strips (chord and thickness) give it body from any side.
+function drawMast(x, y, worldHeading, stance, color) {
+  if (!(stance.deckM > 0.01)) return;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const fx = Math.cos(worldHeading);
+  const fy = Math.sin(worldHeading);
+  const rx = -fy;
+  const ry = fx;
+  const c = Math.cos(stance.rollRad);
+  const s = Math.sin(stance.rollRad);
+  const base = { x: x + rx * stance.waterSideM * ppm, y: y + ry * stance.waterSideM * ppm, z: 0 };
+  const top = { x: x + rx * stance.deckSideM * ppm, y: y + ry * stance.deckSideM * ppm, z: stance.deckM * ppm };
+  const strip = (dx, dy, dz) => [
+    { x: base.x - dx, y: base.y - dy, z: base.z - dz },
+    { x: base.x + dx, y: base.y + dy, z: base.z + dz },
+    { x: top.x + dx, y: top.y + dy, z: top.z + dz },
+    { x: top.x - dx, y: top.y - dy, z: top.z - dz }
+  ];
+  const chord = 0.07 * ppm;
+  const thick = 0.025 * ppm;
+  const cam = viewCamera();
+  ctx.save();
+  ctx.fillStyle = color;
+  for (const pts of [strip(fx * chord, fy * chord, 0), strip(rx * c * thick, ry * c * thick, -s * thick)]) {
+    const poly = projectClipped(cam, pts);
+    if (!poly) continue;
+    ctx.beginPath();
+    ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawRacer() {
   if (!cameraIsFlat()) {
-    const roll = bankAngleDeg * Math.PI / 180;
-    drawBoardShadow(pos.x, pos.y, heading, shownBoardLiftM);
-    drawBoardOnGround(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, roll);
+    const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
+    const deck = offsetRight(pos.x, pos.y, heading, stance.deckSideM);
+    drawBoardShadow(deck.x, deck.y, heading, stance.deckM);
+    drawMast(pos.x, pos.y, heading, stance, '#1a1d22');
+    drawBoardOnGround(deck.x, deck.y, heading, fillRiderBoard, stance.deckM, stance.rollRad);
     return;
   }
   withWorldMarker(pos.x, pos.y, () => {
@@ -5066,7 +5140,7 @@ function gameLoop(timestamp) {
   if (rideIntroFrame) setRideHudOpacity(rideIntroFrame.hud);
 
   if (!settleReveal && !rideSimPaused) {
-    wakeTrail.push({ x: pos.x, y: pos.y });
+    wakeTrail.push(wakeOrigin());
     const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
