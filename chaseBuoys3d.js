@@ -17,6 +17,8 @@ const SEGMENTS = 40;
 const VINYL = 0xf6f8ff;
 const PANEL_TEX = 1024;
 const MAX_SUPERSAMPLED_PX = 2.5e6;
+/** All buoy renders of one frame together, before MSAA. */
+const MAX_FRAME_PX = 4e6;
 
 let gl = null;
 let failed = false;
@@ -290,47 +292,49 @@ function drawShadow(ctx, cam, b, ppm) {
   ctx.fill();
 }
 
-function drawOne(ctx, cam, b, ppm) {
-  const box = screenBox(cam, [b], ppm);
-  if (!box) return;
-  const { renderer } = gl;
-  const maxSide = Math.min(4096, renderer.capabilities.maxTextureSize || 4096);
-  // Each buoy gets as many samples per pixel as the budget allows on top of
-  // MSAA, so one a few pixels tall does not snap its outline and plate from
-  // pixel to pixel as the camera drifts. Rendering buoys one at a time keeps
-  // a close buoy from lowering that for the far ones.
-  let ss = 1;
+// Supersampling factor for a buoy box: as many samples per pixel as the
+// budget allows on top of MSAA, so one a few pixels tall does not snap its
+// outline and plate from pixel to pixel as the camera drifts.
+function supersample(box, budget) {
   for (const k of [8, 6, 4, 3, 2]) {
-    if (box.bw * box.bh * k * k <= MAX_SUPERSAMPLED_PX) { ss = k; break; }
+    if (box.bw * box.bh * k * k <= budget) return k;
   }
-  if (box.bw * ss > maxSide || box.bh * ss > maxSide) ss = 1;
-  const vw = Math.min(maxSide, Math.ceil(box.bw * ss));
-  const vh = Math.min(maxSide, Math.ceil(box.bh * ss));
-  if (vw > gl.bufW || vh > gl.bufH) {
-    gl.bufW = Math.min(maxSide, Math.max(gl.bufW, Math.ceil(vw / 256) * 256));
-    gl.bufH = Math.min(maxSide, Math.max(gl.bufH, Math.ceil(vh / 256) * 256));
-    renderer.setSize(gl.bufW, gl.bufH, false);
-  }
+  return 1;
+}
 
+// Shelf-pack the renders into one buffer `width` wide. Returns the height.
+function packShelves(jobs, width) {
+  let x = 0;
+  let y = 0;
+  let row = 0;
+  for (const j of jobs) {
+    if (x > 0 && x + j.vw > width) {
+      x = 0;
+      y += row;
+      row = 0;
+    }
+    j.sx = x;
+    j.sy = y;
+    x += j.vw;
+    row = Math.max(row, j.vh);
+  }
+  return y + row;
+}
+
+function renderJob(cam, job, ppm) {
+  const { renderer } = gl;
+  const { box, b, vw, vh } = job;
   // The tightest near plane that still holds the hull keeps the depth
   // buffer's precision on the buoy, not on empty space in front of the eye.
   const near = box.minD > 2 ? box.minD * 0.9 : Math.max(0.5, 0.05 * ppm);
   const far = Math.max(near * 4, box.maxD * 1.1 + 4);
   setCamera(cam, box.x0, box.y0, box.bw, box.bh, near, far);
   placeMesh(hullMesh(), b, ppm);
-
-  renderer.setViewport(0, 0, vw, vh);
-  renderer.setScissor(0, 0, vw, vh);
+  const glY = gl.bufH - job.sy - vh;
+  renderer.setViewport(job.sx, glY, vw, vh);
+  renderer.setScissor(job.sx, glY, vw, vh);
   renderer.setScissorTest(true);
   renderer.render(gl.scene, gl.camera);
-
-  ctx.save();
-  if (b.alpha != null) ctx.globalAlpha *= b.alpha;
-  drawShadow(ctx, cam, b, ppm);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(gl.canvas, 0, gl.bufH - vh, vw, vh, box.x0, box.y0, box.bw, box.bh);
-  ctx.restore();
 }
 
 /**
@@ -341,10 +345,61 @@ function drawOne(ctx, cam, b, ppm) {
  */
 export function drawChaseBuoys(ctx, cam, list, ppm) {
   if (!setup()) return false;
-  list
+  const { renderer } = gl;
+  const maxSide = Math.min(4096, renderer.capabilities.maxTextureSize || 4096);
+  const jobs = list
     .filter(b => !(b.alpha <= 0.001))
     .map(b => ({ b, d: depthAt(cam, b.x, b.y, 0) }))
     .sort((p, q) => q.d - p.d)
-    .forEach(({ b }) => drawOne(ctx, cam, b, ppm));
+    .map(({ b }) => ({ b, box: screenBox(cam, [b], ppm) }))
+    .filter(j => j.box);
+  if (!jobs.length) return true;
+
+  // Every buoy of the frame renders into its own corner of one buffer, then
+  // all are copied out. Reading the WebGL canvas resolves the whole buffer,
+  // so a copy per render cost a full-buffer resolve for each buoy.
+  let budget = MAX_SUPERSAMPLED_PX;
+  let width = 0;
+  let height = 0;
+  for (let tries = 0; tries < 8; tries++) {
+    for (const j of jobs) {
+      let ss = supersample(j.box, budget);
+      if (j.box.bw * ss > maxSide || j.box.bh * ss > maxSide) ss = 1;
+      j.vw = Math.min(maxSide, Math.ceil(j.box.bw * ss));
+      j.vh = Math.min(maxSide, Math.ceil(j.box.bh * ss));
+    }
+    const area = jobs.reduce((a, j) => a + j.vw * j.vh, 0);
+    width = Math.min(maxSide, Math.max(...jobs.map(j => j.vw), Math.ceil(Math.sqrt(area * 1.3))));
+    height = packShelves(jobs, width);
+    if (area <= MAX_FRAME_PX && height <= maxSide) break;
+    budget /= 4;
+  }
+  height = Math.min(height, maxSide);
+
+  // Grow in 256 px steps; shrink only once the buffer is four times the need,
+  // so it is not reallocated every few frames.
+  const needW = Math.min(maxSide, Math.ceil(width / 256) * 256);
+  const needH = Math.min(maxSide, Math.ceil(height / 256) * 256);
+  const grow = needW > gl.bufW || needH > gl.bufH;
+  const shrink = gl.bufW * gl.bufH > 4 * needW * needH;
+  if (grow || shrink) {
+    gl.bufW = shrink ? needW : Math.max(gl.bufW, needW);
+    gl.bufH = shrink ? needH : Math.max(gl.bufH, needH);
+    renderer.setSize(gl.bufW, gl.bufH, false);
+  }
+
+  for (const j of jobs) renderJob(cam, j, ppm);
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  const baseAlpha = ctx.globalAlpha;
+  for (const j of jobs) {
+    if (j.sy + j.vh > gl.bufH || j.sx + j.vw > gl.bufW) continue;
+    ctx.globalAlpha = baseAlpha * (j.b.alpha != null ? j.b.alpha : 1);
+    drawShadow(ctx, cam, j.b, ppm);
+    ctx.drawImage(gl.canvas, j.sx, j.sy, j.vw, j.vh, j.box.x0, j.box.y0, j.box.bw, j.box.bh);
+  }
+  ctx.restore();
   return true;
 }
