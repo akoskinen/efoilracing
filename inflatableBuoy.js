@@ -1,13 +1,17 @@
 ////////////////////////////////////////////////////////////
-// inflatableBuoy.js — white pyramid race buoy for the chase camera.
-// 1.5 m tall. The SFT mark is a transparent navy plate; the vinyl
-// shows through the letters. Overhead views keep the flat disc.
+// inflatableBuoy.js — white three-sided race buoy for the chase camera.
+// 1.5 m tall. Each panel bows out between the seams, like inflated vinyl.
+// The SFT mark is a transparent navy plate; the vinyl shows through the
+// letters. Overhead views keep the flat disc.
 ////////////////////////////////////////////////////////////
 
 import { depthAt, projectClipped, projectHeight } from './chaseCam.js';
 
 export const INFLATABLE_HEIGHT_M = 1.5;
 export const INFLATABLE_SIDE_M = 2;
+/** How far the middle of a panel leaves the flat triangle, in meters. */
+export const INFLATABLE_BULGE_M = 0.34;
+const PANEL_DIVS = 16;
 
 const LIGHT = normalize({ x: 0.35, y: 0.5, z: 0.79 });
 
@@ -48,14 +52,14 @@ function addScaled(p, dir, s) {
   return { x: p.x + dir.x * s, y: p.y + dir.y * s, z: p.z + dir.z * s };
 }
 
-/** Square pyramid. `facing` is the direction one face looks, in world radians. */
+/** Three-sided buoy. `facing` is the direction one face looks, in world radians. */
 export function inflatableFrame(x, y, facing, ppm) {
   const height = INFLATABLE_HEIGHT_M * ppm;
   const side = INFLATABLE_SIDE_M * ppm;
-  const radius = (side / 2) * Math.SQRT2;
+  const radius = side / Math.sqrt(3);
   const corners = [];
-  for (let k = 0; k < 4; k++) {
-    const a = facing - Math.PI / 4 + k * Math.PI / 2;
+  for (let k = 0; k < 3; k++) {
+    const a = facing - Math.PI / 3 + k * (2 * Math.PI / 3);
     corners.push({
       x: x + Math.cos(a) * radius,
       y: y + Math.sin(a) * radius,
@@ -67,7 +71,8 @@ export function inflatableFrame(x, y, facing, ppm) {
     corners,
     side,
     height,
-    radius
+    radius,
+    bulge: INFLATABLE_BULGE_M * ppm
   };
 }
 
@@ -83,6 +88,20 @@ export function faceNormal(apex, b, c) {
   let n = cross(sub(b, apex), sub(c, apex));
   if (dot(n, outward(apex, b, c)) < 0) n = { x: -n.x, y: -n.y, z: -n.z };
   return normalize(n);
+}
+
+/**
+ * A point on a bowed panel. Barycentric weights aw/bw/cw sum to 1
+ * (apex, base left, base right). The bow is zero on every seam.
+ */
+export function curvedFacePoint(apex, b, c, aw, bw, cw, amp, normal) {
+  const flat = {
+    x: aw * apex.x + bw * b.x + cw * c.x,
+    y: aw * apex.y + bw * b.y + cw * c.y,
+    z: aw * apex.z + bw * b.z + cw * c.z
+  };
+  const pillow = Math.pow(Math.max(0, 27 * aw * bw * cw), 0.42);
+  return addScaled(flat, normal, pillow * amp);
 }
 
 /**
@@ -151,10 +170,10 @@ export function logoQuadOnFace(apex, baseL, baseR, aspect) {
   return [tl, tr, br, bl];
 }
 
-function squareAt(x, y, facing, radius) {
+function triangleAt(x, y, facing, radius) {
   const pts = [];
-  for (let k = 0; k < 4; k++) {
-    const a = facing - Math.PI / 4 + k * Math.PI / 2;
+  for (let k = 0; k < 3; k++) {
+    const a = facing - Math.PI / 3 + k * (2 * Math.PI / 3);
     pts.push({ x: x + Math.cos(a) * radius, y: y + Math.sin(a) * radius, z: 0 });
   }
   return pts;
@@ -237,14 +256,15 @@ function tintedLogo(img, shade) {
   return c;
 }
 
-function drawLogo(ctx, cam, img, shade, quad) {
+function drawLogo(ctx, cam, img, shade, quad, place) {
   if (!img || !img.complete || !img.naturalWidth) return;
   const cols = 6;
   const rows = 3;
   const grid = [];
   for (let j = 0; j <= rows; j++) {
     for (let i = 0; i <= cols; i++) {
-      const p = bilinear(quad, i / cols, j / rows);
+      const flat = bilinear(quad, i / cols, j / rows);
+      const p = place ? place(flat) : flat;
       const s = projectHeight(cam, p.x, p.y, p.z);
       if (!s) return;
       grid.push(s);
@@ -273,6 +293,33 @@ function drawLogo(ctx, cam, img, shade, quad) {
   ctx.restore();
 }
 
+function smoothNormal(apex, b, c, faceN, amp, aw, bw, cw) {
+  const eps = 0.04;
+  const at = (aa, bb, cc) => {
+    const sum = Math.max(1e-6, aa + bb + cc);
+    return curvedFacePoint(
+      apex, b, c,
+      Math.max(0, aa) / sum,
+      Math.max(0, bb) / sum,
+      Math.max(0, cc) / sum,
+      amp, faceN
+    );
+  };
+  const p = at(aw, bw, cw);
+  const du = sub(at(aw, bw + eps, cw), p);
+  const dv = sub(at(aw, bw, cw + eps), p);
+  let n = cross(du, dv);
+  if (dot(n, faceN) < 0) n = { x: -n.x, y: -n.y, z: -n.z };
+  const m = Math.hypot(n.x, n.y, n.z);
+  if (!(m > 1e-5)) return faceN;
+  return { x: n.x / m, y: n.y / m, z: n.z / m };
+}
+
+function shadeAmount(n) {
+  const nd = Math.max(0, dot(n, LIGHT));
+  return Math.min(1, 0.76 + 0.2 * nd + Math.pow(nd, 16) * 0.14);
+}
+
 function circlePoints(x, y, radius) {
   const pts = [];
   const n = 18;
@@ -291,24 +338,22 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, paint, facing, logo })
   const frame = inflatableFrame(x, y, facing || 0, ppm);
   const shadow = projectClipped(cam, circlePoints(x, y, frame.radius * 0.72));
   fillPoly(ctx, shadow, 'rgba(0,0,0,0.28)');
-  fillPoly(ctx, projectClipped(cam, squareAt(x, y, facing || 0, frame.radius + 0.28 * ppm)), paint.stroke);
-  fillPoly(ctx, projectClipped(cam, squareAt(x, y, facing || 0, frame.radius + 0.12 * ppm)), paint.fill);
+  const aim = facing || 0;
+  fillPoly(ctx, projectClipped(cam, triangleAt(x, y, aim, frame.radius + 0.26 * ppm)), paint.stroke);
+  fillPoly(ctx, projectClipped(cam, triangleAt(x, y, aim, frame.radius + 0.1 * ppm)), paint.fill);
 
   const faces = frame.corners.map((corner, k) => {
     const b = corner;
-    const c = frame.corners[(k + 1) % 4];
+    const c = frame.corners[(k + 1) % 3];
     const normal = faceNormal(frame.apex, b, c);
-    const centroid = {
-      x: (frame.apex.x + b.x + c.x) / 3,
-      y: (frame.apex.y + b.y + c.y) / 3,
-      z: (frame.apex.z + b.z + c.z) / 3
-    };
+    const centroid = curvedFacePoint(frame.apex, b, c, 1 / 3, 1 / 3, 1 / 3, frame.bulge, normal);
     return { b, c, normal, centroid, depth: depthAt(cam, centroid.x, centroid.y, centroid.z) };
   });
   faces.sort((a, b) => b.depth - a.depth);
 
   const logoReady = logo && logo.complete && logo.naturalWidth > 0;
   const aspect = logoReady ? logo.naturalWidth / logo.naturalHeight : 0;
+  const panels = [];
 
   for (const face of faces) {
     const toEye = {
@@ -317,56 +362,123 @@ export function drawInflatableBuoy(ctx, cam, { x, y, ppm, paint, facing, logo })
       z: cam.eyeZ - face.centroid.z
     };
     if (dot(face.normal, toEye) <= 0.02) continue;
-    const nd = Math.max(0, dot(face.normal, LIGHT));
-    const shade = 0.8 + 0.2 * nd;
-    const hi = Math.min(1, shade * 1.08);
-    const lo = shade * 0.86;
-    const poly = projectClipped(cam, [frame.apex, face.b, face.c]);
-    if (!poly) continue;
-    const apexS = projectHeight(cam, frame.apex.x, frame.apex.y, frame.apex.z);
-    const midS = projectHeight(
-      cam,
-      (face.b.x + face.c.x) / 2,
-      (face.b.y + face.c.y) / 2,
-      0
-    );
-    ctx.beginPath();
-    ctx.moveTo(poly[0].x, poly[0].y);
-    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-    ctx.closePath();
-    if (apexS && midS) {
-      const g = ctx.createLinearGradient(apexS.x, apexS.y, midS.x, midS.y);
-      g.addColorStop(0, vinyl(hi));
-      g.addColorStop(1, vinyl(lo));
-      ctx.fillStyle = g;
-    } else {
-      ctx.fillStyle = vinyl(shade);
+    const grid = [];
+    for (let r = 0; r <= PANEL_DIVS; r++) {
+      const row = [];
+      for (let c = 0; c <= r; c++) {
+        const t = r / PANEL_DIVS;
+        const s = r === 0 ? 0 : c / r;
+        const aw = 1 - t;
+        const bw = t * (1 - s);
+        const cw = t * s;
+        const p = curvedFacePoint(frame.apex, face.b, face.c, aw, bw, cw, frame.bulge, face.normal);
+        const shade = shadeAmount(smoothNormal(
+          frame.apex, face.b, face.c, face.normal, frame.bulge, aw, bw, cw
+        ));
+        row.push({ p, aw, bw, cw, shade });
+      }
+      grid.push(row);
     }
-    ctx.fill();
-
-    const facingCam = dot(face.normal, normalize(toEye));
-    if (logoReady && facingCam > 0.42) {
-      const quad = logoQuadOnFace(frame.apex, face.b, face.c, aspect);
-      if (quad) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(poly[0].x, poly[0].y);
-        for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-        ctx.closePath();
-        ctx.clip();
-        drawLogo(ctx, cam, logo, shade, quad);
-        ctx.restore();
+    const tris = [];
+    for (let r = 0; r < PANEL_DIVS; r++) {
+      for (let c = 0; c <= r; c++) {
+        const p0 = grid[r][c];
+        const p1 = grid[r + 1][c];
+        const p2 = grid[r + 1][c + 1];
+        tris.push([p0, p1, p2]);
+        if (c < r) tris.push([p0, p2, grid[r][c + 1]]);
       }
     }
+    panels.push({ face, toEye, grid, tris });
+  }
 
-    if (poly.length >= 3) {
+  const pieces = [];
+  for (const panel of panels) {
+    for (const tri of panel.tris) {
+      const cx = (tri[0].p.x + tri[1].p.x + tri[2].p.x) / 3;
+      const cy = (tri[0].p.y + tri[1].p.y + tri[2].p.y) / 3;
+      const cz = (tri[0].p.z + tri[1].p.z + tri[2].p.z) / 3;
+      pieces.push({ tri, depth: depthAt(cam, cx, cy, cz) });
+    }
+  }
+  pieces.sort((a, b) => b.depth - a.depth);
+  for (const piece of pieces) {
+    const screen = [];
+    let hidden = false;
+    for (const v of piece.tri) {
+      const s = projectHeight(cam, v.p.x, v.p.y, v.p.z);
+      if (!s) { hidden = true; break; }
+      screen.push(s);
+    }
+    if (hidden) continue;
+    const shade = (piece.tri[0].shade + piece.tri[1].shade + piece.tri[2].shade) / 3;
+    const color = vinyl(shade);
+    fillPoly(ctx, screen, color);
+    ctx.lineWidth = 1.25;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
+
+  for (const panel of panels) {
+    const facingCam = dot(panel.face.normal, normalize(panel.toEye));
+    if (!(logoReady && facingCam > 0.42)) continue;
+    const quad = logoQuadOnFace(frame.apex, panel.face.b, panel.face.c, aspect);
+    if (!quad) continue;
+    const nd = Math.max(0, dot(panel.face.normal, LIGHT));
+    const shade = Math.min(1, 0.78 + 0.22 * nd);
+    drawLogo(ctx, cam, logo, shade, quad, (flat) => {
+      const v0 = sub(panel.face.b, frame.apex);
+      const v1 = sub(panel.face.c, frame.apex);
+      const v2 = sub(flat, frame.apex);
+      const d00 = dot(v0, v0);
+      const d01 = dot(v0, v1);
+      const d11 = dot(v1, v1);
+      const d02 = dot(v0, v2);
+      const d12 = dot(v1, v2);
+      const inv = 1 / (d00 * d11 - d01 * d01);
+      let bw = (d11 * d02 - d01 * d12) * inv;
+      let cw = (d00 * d12 - d01 * d02) * inv;
+      let aw = 1 - bw - cw;
+      aw = Math.max(0, aw);
+      bw = Math.max(0, bw);
+      cw = Math.max(0, cw);
+      const sum = aw + bw + cw || 1;
+      return curvedFacePoint(
+        frame.apex, panel.face.b, panel.face.c,
+        aw / sum, bw / sum, cw / sum,
+        frame.bulge, panel.face.normal
+      );
+    });
+  }
+
+  ctx.save();
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = 'rgba(40, 52, 64, 0.55)';
+  ctx.lineJoin = 'round';
+  for (const panel of panels) {
+    const edge = (from, to) => {
+      const steps = 1;
+      const poly = [];
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const p = {
+          x: from.x + (to.x - from.x) * t,
+          y: from.y + (to.y - from.y) * t,
+          z: from.z + (to.z - from.z) * t
+        };
+        const s = projectHeight(cam, p.x, p.y, p.z);
+        if (s) poly.push(s);
+      }
+      if (poly.length < 2) return;
       ctx.beginPath();
       ctx.moveTo(poly[0].x, poly[0].y);
       for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-      ctx.closePath();
-      ctx.lineWidth = 1.25;
-      ctx.strokeStyle = 'rgba(30, 40, 50, 0.38)';
       ctx.stroke();
-    }
+    };
+    edge(frame.apex, panel.face.b);
+    edge(frame.apex, panel.face.c);
+    edge(panel.face.b, panel.face.c);
   }
+  ctx.restore();
 }
