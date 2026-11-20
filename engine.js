@@ -12,10 +12,12 @@ import {
   riderById, riderDynamics, loadRiderState, saveRiderState, presetTune, clampTune
 } from "./riders.js";
 import {
-  FLAT_BEARING, CHASE_PITCH, chaseFraming, makeCamera, project, projectHeight, unproject, viewDepth, depthAt,
-  easeAngle, isFlatView, focalLength, expandTileIndexRange
+  FLAT_BEARING, CHASE_PITCH, chaseFraming, makeCamera, project, projectHeight, projectClipped, unproject, viewDepth, depthAt,
+  easeAngle, angleDelta, isFlatView, focalLength, expandTileIndexRange,
+  CHASE_DEFAULTS, CHASE_FIRST_PERSON, CHASE_LIMITS, clampChaseSettings
 } from "./chaseCam.js";
 import { drawChaseBuoys, chaseBuoysAvailable } from "./chaseBuoys3d.js";
+import { mountCameraPanel } from "./cameraPanel.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
 import {
@@ -628,7 +630,7 @@ function expandChaseTileRange(range, forPrefetch) {
   if (!range || !wantsChaseTiles() || !canvas.width || !geoCanvasTransform) return range;
   let cam = viewCamera();
   if (forPrefetch && isChaseZoom()) {
-    const pose = currentChasePose(canvas.height, followCam.scale || 1);
+    const pose = currentChasePose();
     cam = viewCamera({ pitch: pose.pitch, bearing: heading, distance: pose.distance });
   }
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
@@ -2979,19 +2981,66 @@ function nextZoomHint() {
   return next.meters >= 1000 ? `Z · ${next.meters / 1000} km overview` : `Z · ${next.title}`;
 }
 
-function currentChasePose(viewH, scale) {
+const CHASE_CAMERA_KEY = 'efoil_chase_camera';
+let chaseSettings = loadChaseSettings();
+
+function loadChaseSettings() {
+  try {
+    return clampChaseSettings(JSON.parse(localStorage.getItem(CHASE_CAMERA_KEY) || 'null'));
+  } catch {
+    return clampChaseSettings(null);
+  }
+}
+
+function setChaseSettings(next) {
+  chaseSettings = clampChaseSettings({ ...chaseSettings, ...next });
+  try { localStorage.setItem(CHASE_CAMERA_KEY, JSON.stringify(chaseSettings)); } catch {}
+}
+
+function currentChasePose() {
   return chaseFraming(
     speed * speedConversion,
-    viewH || canvas.height || 1,
-    scale || followCam.scale || 1,
-    pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M
+    pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M,
+    chaseSettings,
+    shownBoardLiftM
   );
+}
+
+let cameraPanel = null;
+function syncCameraPanel() {
+  if (!cameraPanel) {
+    const button = document.getElementById('cameraBtn');
+    const row = document.getElementById('cameraChromeRow');
+    const panel = document.getElementById('cameraPanel');
+    if (!button || !row || !panel) return;
+    cameraPanel = mountCameraPanel({
+      button, row, panel,
+      get: () => chaseSettings,
+      set: setChaseSettings,
+      defaults: CHASE_DEFAULTS,
+      firstPerson: CHASE_FIRST_PERSON,
+      limits: CHASE_LIMITS
+    });
+  }
+  cameraPanel.setVisible(isChaseZoom() && !atlas.open && !document.body.classList.contains('pro-open'));
+}
+
+// 0 with the eye on the board, 1 once it is 15 m or more behind. A close
+// camera has to ride with the board: the usual lag would leave the eye
+// metres behind it at speed and swing it sideways in a turn.
+const CHASE_LAG_FULL_M = 15;
+function chaseLag(pose) {
+  return Math.min(1, Math.max(0, pose.behindM / CHASE_LAG_FULL_M));
+}
+
+function chaseLookDir(pose, hd) {
+  return viewBearing + angleDelta(viewBearing, hd) * chaseLag(pose);
 }
 
 function resetFollowCamera() {
   const s = followTargetScale();
   followCam.scale = s;
-  const pose = currentChasePose(canvas.height, s);
+  const pose = currentChasePose();
   if (isOverviewZoom() && canvas.width) {
     followCam.tx = canvas.width / 2 - pos.x * s;
     followCam.ty = canvas.height / 2 - pos.y * s;
@@ -3032,13 +3081,14 @@ function updateFollowCamera(dt) {
   let tx;
   let ty;
   let tau = isOverviewZoom() ? OVERVIEW_CENTER_TAU : FOLLOW_TAU;
-  const pose = currentChasePose(h, s);
+  const pose = currentChasePose();
   if (isChaseZoom()) {
-    const lx = px + Math.cos(hd) * pose.ahead;
-    const ly = py + Math.sin(hd) * pose.ahead;
+    const dir = focus ? hd : chaseLookDir(pose, hd);
+    const lx = px + Math.cos(dir) * pose.ahead;
+    const ly = py + Math.sin(dir) * pose.ahead;
     tx = w / 2 - lx * s;
     ty = h / 2 - ly * s;
-    tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU;
+    tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU * Math.max(0.02, chaseLag(pose));
     if (focus) introCamReturning = true;
   } else if (focus) {
     const look = Math.min(70, 28 / Math.max(0.25, s));
@@ -3090,7 +3140,8 @@ function updateFollowCamera(dt) {
   if (!(viewDistance > 1)) viewDistance = targetDist;
   viewPitch += (targetPitch - viewPitch) * pitchA;
   viewDistance += (targetDist - viewDistance) * pitchA;
-  viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, lifting ? 0.34 : BEARING_TAU);
+  const bearingTau = lifting ? 0.34 : (chasing ? BEARING_TAU * Math.max(0.25, chaseLag(pose)) : BEARING_TAU);
+  viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, bearingTau);
 }
 
 function worldMarkerScale() {
@@ -3177,6 +3228,25 @@ function withWorldMarker(x, y, fn, scaleMul = 1) {
   ctx.restore();
 }
 
+// A water-level segment cut at the near plane, so a gate or wake that runs
+// under the camera keeps the part still in front of it.
+function projectGroundSegment(x1, y1, x2, y2) {
+  const cam = viewCamera();
+  const near = 1.25;
+  const d1 = viewDepth(cam, x1, y1);
+  const d2 = viewDepth(cam, x2, y2);
+  if (d1 < near && d2 < near) return null;
+  if (d1 < near || d2 < near) {
+    const t = (near - d1) / (d2 - d1);
+    const cx = x1 + (x2 - x1) * t;
+    const cy = y1 + (y2 - y1) * t;
+    if (d1 < near) { x1 = cx; y1 = cy; } else { x2 = cx; y2 = cy; }
+  }
+  const a = project(cam, x1, y1);
+  const b = project(cam, x2, y2);
+  return a && b ? [a, b] : null;
+}
+
 function strokeWorldLine(x1, y1, x2, y2) {
   if (cameraIsFlat()) {
     ctx.beginPath();
@@ -3185,9 +3255,9 @@ function strokeWorldLine(x1, y1, x2, y2) {
     ctx.stroke();
     return;
   }
-  const a = projectWorld(x1, y1);
-  const b = projectWorld(x2, y2);
-  if (!a || !b) return;
+  const seg = projectGroundSegment(x1, y1, x2, y2);
+  if (!seg) return;
+  const [a, b] = seg;
   const width = ctx.lineWidth;
   const depth = Math.max(1, (a.depth + b.depth) * 0.5);
   ctx.lineWidth = width * perspectiveFactor(depth);
@@ -3466,7 +3536,6 @@ function drawGhostFrame() {
 function drawGhost(x, y, heading, liftM = 0) {
   const paint = () => {
     ctx.globalAlpha *= 0.25;
-    traceBoard();
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
   };
@@ -3477,6 +3546,7 @@ function drawGhost(x, y, heading, liftM = 0) {
   }
   withWorldMarker(x, y, () => {
     ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
+    traceBoard();
     paint();
   });
 }
@@ -3823,6 +3893,12 @@ document.addEventListener('keydown', function(e) {
     cycleZoomStop();
   }
 
+  if ((e.key === 'v' || e.key === 'V') && !e.repeat && isChaseZoom()) {
+    e.preventDefault();
+    syncCameraPanel();
+    cameraPanel?.toggle();
+  }
+
   if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
     e.preventDefault();
     setProRackOpen(true);
@@ -4166,12 +4242,11 @@ function strokeSlimWake(x1, y1, x2, y2) {
     ctx.stroke();
     return;
   }
-  const a = projectWorld(x1, y1);
-  const b = projectWorld(x2, y2);
-  if (!a || !b) return;
+  const seg = projectGroundSegment(x1, y1, x2, y2);
+  if (!seg) return;
   ctx.beginPath();
-  ctx.moveTo(a.x, a.y);
-  ctx.lineTo(b.x, b.y);
+  ctx.moveTo(seg[0].x, seg[0].y);
+  ctx.lineTo(seg[1].x, seg[1].y);
   ctx.stroke();
 }
 
@@ -4501,10 +4576,7 @@ function drawRacer() {
   if (!cameraIsFlat()) {
     const roll = bankAngleDeg * Math.PI / 180;
     drawBoardShadow(pos.x, pos.y, heading, shownBoardLiftM);
-    drawBoardOnGround(pos.x, pos.y, heading, px => {
-      traceBoard();
-      fillRiderBoard(px);
-    }, shownBoardLiftM, roll);
+    drawBoardOnGround(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, roll);
     return;
   }
   withWorldMarker(pos.x, pos.y, () => {
@@ -4513,6 +4585,37 @@ function drawRacer() {
     fillRiderBoard();
   });
 }
+
+// traceBoard's outline as points, for drawing it in true perspective.
+const BOARD_OUTLINE = (() => {
+  const pts = [[0, 13]];
+  const cubic = (p1, p2, p3, n = 10) => {
+    const p0 = pts[pts.length - 1];
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      const u = 1 - t;
+      pts.push([0, 1].map(k =>
+        u * u * u * p0[k] + 3 * u * u * t * p1[k] + 3 * u * t * t * p2[k] + t * t * t * p3[k]));
+    }
+  };
+  const quad = (p1, p2, n = 5) => {
+    const p0 = pts[pts.length - 1];
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      const u = 1 - t;
+      pts.push([0, 1].map(k => u * u * p0[k] + 2 * u * t * p1[k] + t * t * p2[k]));
+    }
+  };
+  cubic([2.2, 11.4], [3.6, 7.4], [4.15, 3.4]);
+  cubic([4.55, -0.4], [4.15, -5.4], [3.15, -9]);
+  quad([2.55, -11.5], [1.9, -12.35]);
+  pts.push([-1.9, -12.35]);
+  quad([-2.55, -11.5], [-3.15, -9]);
+  cubic([-4.15, -5.4], [-4.55, -0.4], [-4.15, 3.4]);
+  cubic([-3.6, 7.4], [-2.2, 11.4], [0, 13]);
+  pts.pop();
+  return pts;
+})();
 
 // Nose-to-tail and beam of the painted outline, in its local units.
 const BOARD_NOSE = 13;
@@ -4526,6 +4629,10 @@ const BOARD_BEAM_M = 1.2;
 // Lay the outline on the water. Flat views keep the big marker so the rider
 // stays easy to find. `liftM` is height above the water, `rollRad` leans the
 // right rail down when positive (same sign as the rider's bank angle).
+// Every outline point is projected and the outline is cut at the near plane,
+// so the board stays right with the camera on top of it. `paint` fills or
+// strokes the current path in screen space and gets the projected nose,
+// tail and beam.
 function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const len = BOARD_NOSE - BOARD_TAIL;
@@ -4536,19 +4643,30 @@ function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
   const rx = -fy;
   const ry = fx;
   const z = (liftM > 0 ? liftM : 0) * ppm;
-  const sideZ = z - Math.sin(rollRad) * across;
+  const dip = Math.sin(rollRad) * across;
+  const at = (lx, ly) => ({
+    x: x + fx * ly * along + rx * lx * across,
+    y: y + fy * ly * along + ry * lx * across,
+    z: z - dip * lx
+  });
   const cam = viewCamera();
-  const origin = projectHeight(cam, x, y, z);
-  const nose = projectHeight(cam, x + fx * BOARD_NOSE * along, y + fy * BOARD_NOSE * along, z);
-  const side = projectHeight(cam, x + rx * across, y + ry * across, sideZ);
-  if (!origin || !nose || !side) return;
+  const poly = projectClipped(cam, BOARD_OUTLINE.map(([lx, ly]) => at(lx, ly)));
+  if (!poly) return;
+  const pt = (lx, ly) => {
+    const p = at(lx, ly);
+    return projectHeight(cam, p.x, p.y, p.z);
+  };
+  const nose = pt(0, BOARD_NOSE);
+  const tail = pt(0, BOARD_TAIL);
+  const left = pt(-BOARD_HALF_BEAM, 0);
+  const right = pt(BOARD_HALF_BEAM, 0);
+  const beamPx = left && right ? Math.hypot(right.x - left.x, right.y - left.y) : 40;
   ctx.save();
-  ctx.setTransform(
-    side.x - origin.x, side.y - origin.y,
-    (nose.x - origin.x) / BOARD_NOSE, (nose.y - origin.y) / BOARD_NOSE,
-    origin.x, origin.y
-  );
-  paint(Math.hypot(side.x - origin.x, side.y - origin.y) || 1);
+  ctx.beginPath();
+  ctx.moveTo(poly[0].x, poly[0].y);
+  for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+  ctx.closePath();
+  paint({ nose, tail, beamPx });
   ctx.restore();
 }
 
@@ -4581,11 +4699,14 @@ function drawBoardShadow(x, y, worldHeading, liftM) {
   ctx.restore();
 }
 
-function fillRiderBoard(pxPerLocalX) {
+// Flat views paint in the outline's local units. On the water `screen` has
+// the projected nose, tail and beam, and the path is already in pixels.
+function fillRiderBoard(screen) {
   const meta = activeRider.meta;
   const stops = shineStops(BOARD_SHINE[meta.gloss]);
-  if (stops.length) {
-    const g = ctx.createLinearGradient(0, 13, 0, -12.35);
+  const ends = screen ? (screen.nose && screen.tail ? screen : null) : { nose: { x: 0, y: 13 }, tail: { x: 0, y: -12.35 } };
+  if (stops.length && ends) {
+    const g = ctx.createLinearGradient(ends.nose.x, ends.nose.y, ends.tail.x, ends.tail.y);
     stops.forEach(stop => g.addColorStop(stop.at, stop.color));
     ctx.fillStyle = g;
   } else {
@@ -4596,9 +4717,8 @@ function fillRiderBoard(pxPerLocalX) {
   ctx.strokeStyle = lightEdge ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
   // On the water the outline stays a hairline, and never eats a board that
   // is only a few pixels wide. Flat markers keep the old local width.
-  const beamPx = pxPerLocalX ? pxPerLocalX * BOARD_HALF_BEAM * 2 : 0;
-  ctx.lineWidth = pxPerLocalX
-    ? Math.min(1.5, beamPx * 0.16) / pxPerLocalX
+  ctx.lineWidth = screen
+    ? Math.min(1.5, screen.beamPx * 0.16)
     : (meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6));
   ctx.stroke();
 }
@@ -4894,6 +5014,7 @@ function gameLoop(timestamp) {
     updateFollowCamera(dt);
   }
   stepMapDepart();
+  syncCameraPanel();
   if (atlas.open) {
     setGroundVisible(false);
     ctx.setTransform(1, 0, 0, 1, 0, 0);

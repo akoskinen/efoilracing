@@ -9,16 +9,61 @@ export const FLAT_BEARING = -Math.PI / 2;
 /** Tilt at a walking pace, down from straight overhead (~56°). */
 export const CHASE_PITCH = 56 * Math.PI / 180;
 
-/** Tilt once up to speed: lower and more forward, a third-person view. */
-export const CHASE_PITCH_FAST = 73 * Math.PI / 180;
+/**
+ * Chase camera at the two speed thresholds, blended linearly between them.
+ * Height is the eye above the board (which itself lifts at speed), behind
+ * is measured from the middle of the board along its heading, and look-down
+ * is the tilt below the horizon. The defaults are the framing the chase
+ * view always had: a high wide look when slow, 15 m back when fast.
+ */
+export const CHASE_DEFAULTS = Object.freeze({
+  slowKmh: 10,
+  fastKmh: 45,
+  slowHeightM: 80,
+  slowBehindM: 90,
+  slowLookDownDeg: 34,
+  fastHeightM: 8.4,
+  fastBehindM: 15,
+  fastLookDownDeg: 17
+});
 
-/** Where the rider sits down the screen (0 top, 1 bottom). */
-export const CHASE_RIDER_SCREEN = 0.62;
-const CHASE_RIDER_SCREEN_FAST = 0.72;
+/** Eye on the middle of the board, crouched at 1.5 m. */
+export const CHASE_FIRST_PERSON = Object.freeze({
+  fastHeightM: 1.5,
+  fastBehindM: 0,
+  fastLookDownDeg: 14
+});
 
-const CHASE_SLOW_KMH = 10;
-const CHASE_FAST_KMH = 45;
-const CHASE_FAST_BEHIND_M = 15;
+export const CHASE_LIMITS = Object.freeze({
+  kmh: [0, 80],
+  heightM: [0.3, 150],
+  behindM: [0, 150],
+  lookDownDeg: [2, 89]
+});
+
+const clampTo = (v, [lo, hi], fallback) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+};
+
+export function clampChaseSettings(raw) {
+  const d = CHASE_DEFAULTS;
+  const L = CHASE_LIMITS;
+  const s = raw || {};
+  const out = {
+    slowKmh: clampTo(s.slowKmh, L.kmh, d.slowKmh),
+    fastKmh: clampTo(s.fastKmh, L.kmh, d.fastKmh),
+    slowHeightM: clampTo(s.slowHeightM, L.heightM, d.slowHeightM),
+    slowBehindM: clampTo(s.slowBehindM, L.behindM, d.slowBehindM),
+    slowLookDownDeg: clampTo(s.slowLookDownDeg, L.lookDownDeg, d.slowLookDownDeg),
+    fastHeightM: clampTo(s.fastHeightM, L.heightM, d.fastHeightM),
+    fastBehindM: clampTo(s.fastBehindM, L.behindM, d.fastBehindM),
+    fastLookDownDeg: clampTo(s.fastLookDownDeg, L.lookDownDeg, d.fastLookDownDeg)
+  };
+  if (out.fastKmh < out.slowKmh + 1) out.fastKmh = Math.min(L.kmh[1], out.slowKmh + 1);
+  if (out.fastKmh < out.slowKmh + 1) out.slowKmh = out.fastKmh - 1;
+  return out;
+}
 
 export function focalLength(viewH) {
   return 0.9 * Math.max(viewH, 1);
@@ -41,48 +86,15 @@ export function isFlatView(pitch, bearing) {
   return Math.abs(pitch) < 0.004 && Math.abs(angleDelta(bearing, FLAT_BEARING)) < 0.004;
 }
 
-/** 0 at or below 10 km/h, 1 at or above 45 km/h. */
-export function chaseSpeedBlend(kmh) {
-  if (!(kmh > CHASE_SLOW_KMH)) return 0;
-  if (kmh >= CHASE_FAST_KMH) return 1;
-  return (kmh - CHASE_SLOW_KMH) / (CHASE_FAST_KMH - CHASE_SLOW_KMH);
+/** 0 at or below the slow threshold, 1 at or above the fast one. */
+export function chaseSpeedBlend(kmh, settings = CHASE_DEFAULTS) {
+  const lo = settings.slowKmh;
+  const hi = settings.fastKmh;
+  if (!(kmh > lo)) return 0;
+  if (kmh >= hi) return 1;
+  return (kmh - lo) / (hi - lo);
 }
 
-/**
- * World pixels to put the look-at point ahead of the rider so the rider
- * lands near `riderScreen` for this pitch and camera distance.
- */
-export function chaseLookahead(viewH, scale, pitch, distance, riderScreen = CHASE_RIDER_SCREEN) {
-  if (!(pitch > 0.01) || !(viewH > 0)) return 0;
-  const f = focalLength(viewH);
-  const D = distance > 0 ? distance : f / Math.max(scale, 1e-4);
-  const off = (riderScreen - 0.5) * viewH;
-  const s = Math.sin(pitch);
-  const c = Math.cos(pitch);
-  const denom = off * s + f * c;
-  if (Math.abs(denom) < 1e-4) return 0;
-  return off * D / denom;
-}
-
-/**
- * Ray distance that puts the camera `behindPx` world pixels behind the rider
- * at this pitch, with the rider at `riderScreen`.
- */
-export function distanceForBehind(viewH, pitch, behindPx, riderScreen) {
-  const f = focalLength(viewH);
-  const off = (riderScreen - 0.5) * viewH;
-  const s = Math.sin(pitch);
-  const c = Math.cos(pitch);
-  const denom = off * s + f * c;
-  const numer = c * (f * s - off * c);
-  if (!(numer > 1) || !(denom > 1)) return f / Math.max(c, 0.2);
-  return behindPx * denom / numer;
-}
-
-/**
- * Slow (≤10 km/h) keeps the wide 56° chase. By 45 km/h the camera is 15 m
- * behind the board and tilted further forward.
- */
 /**
  * Grow a tile index rectangle so a pitched view can see past the flat
  * viewport. The original indices always stay, and the zoom level is never
@@ -119,22 +131,27 @@ export function expandTileIndexRange(range, extras, { pad = 2, cap = 150 } = {})
   return { z: range.z, tx0, tx1, ty0, ty1 };
 }
 
-export function chaseFraming(kmh, viewH, scale, ppm) {
-  const t = chaseSpeedBlend(kmh);
-  const pitch = CHASE_PITCH + (CHASE_PITCH_FAST - CHASE_PITCH) * t;
-  const f = focalLength(viewH);
-  const slowD = f / Math.max(scale, 1e-4);
-  const fastD = distanceForBehind(
-    viewH, CHASE_PITCH_FAST, CHASE_FAST_BEHIND_M * Math.max(ppm, 0.25), CHASE_RIDER_SCREEN_FAST
-  );
-  const distance = slowD + (fastD - slowD) * t;
-  const riderScreen = CHASE_RIDER_SCREEN + (CHASE_RIDER_SCREEN_FAST - CHASE_RIDER_SCREEN) * t;
+/**
+ * Pitch, ray distance and look-ahead (world pixels) that put the eye
+ * `behind` meters back from the board's middle and `height` meters above
+ * it. `liftM` is how high the board rides above the water.
+ */
+export function chaseFraming(kmh, ppm, settings = CHASE_DEFAULTS, liftM = 0) {
+  const t = chaseSpeedBlend(kmh, settings);
+  const mix = (a, b) => a + (b - a) * t;
+  const heightM = mix(settings.slowHeightM, settings.fastHeightM);
+  const behindM = mix(settings.slowBehindM, settings.fastBehindM);
+  const lookDown = mix(settings.slowLookDownDeg, settings.fastLookDownDeg);
+  const k = Math.max(ppm, 0.25);
+  const pitch = (90 - lookDown) * Math.PI / 180;
+  const eyeZ = (heightM + Math.max(0, liftM)) * k;
+  const distance = eyeZ / Math.cos(pitch);
   return {
     pitch,
     distance,
-    ahead: chaseLookahead(viewH, scale, pitch, distance, riderScreen),
+    ahead: distance * Math.sin(pitch) - behindM * k,
     blend: t,
-    riderScreen
+    behindM
   };
 }
 

@@ -629,7 +629,69 @@
 	  width: auto;
 	  text-align: right;
 	}
-	#pathChromeRow[hidden] { display: none; }
+	#pathChromeRow[hidden],
+	#cameraChromeRow[hidden],
+	#cameraPanel[hidden] { display: none; }
+	#cameraPanel {
+	  width: 248px;
+	  max-height: calc(100vh - 150px);
+	  overflow-y: auto;
+	  padding: 10px 14px 6px;
+	  box-sizing: border-box;
+	  font-family: ui-sans-serif, system-ui, sans-serif;
+	  color: #fff;
+	  text-shadow: none;
+	  background: rgba(12, 18, 24, 0.78);
+	  backdrop-filter: blur(16px);
+	  -webkit-backdrop-filter: blur(16px);
+	  border: 1px solid rgba(255,255,255,0.14);
+	  border-radius: 12px;
+	  box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+	  pointer-events: auto;
+	  touch-action: pan-y;
+	}
+	#cameraPanel .camTitle {
+	  font-size: 14px;
+	  font-weight: 600;
+	  margin-bottom: 4px;
+	}
+	#cameraPanel .camGroup {
+	  margin: 8px 0 0;
+	  font-size: 11px;
+	  letter-spacing: 0.08em;
+	  text-transform: uppercase;
+	  color: rgba(255,255,255,0.6);
+	}
+	#cameraPanel .camSlider { display: block; }
+	#cameraPanel .camSliderHead {
+	  display: flex;
+	  justify-content: space-between;
+	  gap: 12px;
+	  font-size: 13px;
+	}
+	#cameraPanel .camSliderHead b {
+	  font-weight: 500;
+	  font-variant-numeric: tabular-nums;
+	  color: #7fd4ff;
+	}
+	#cameraPanel input[type=range] {
+	  width: 100%;
+	  height: 26px;
+	  margin: 0;
+	  accent-color: #7fd4ff;
+	  touch-action: none;
+	}
+	#cameraPanel .camActions {
+	  display: flex;
+	  justify-content: space-between;
+	  margin-top: 4px;
+	}
+	#viewChrome #cameraPanel button {
+	  padding: 12px 0;
+	  font-family: ui-sans-serif, system-ui, sans-serif;
+	  font-size: 13px;
+	}
+	#viewChrome #cameraPanel button::after { display: none; }
 	#viewChrome a:hover,
 	#viewChrome button:hover { text-decoration: underline; }
 	#viewChrome .viewChromeSep {
@@ -840,6 +902,10 @@
 	<div class="viewChromeRow" id="pathChromeRow" hidden>
 	  <button type="button" id="pathBtn">P Show Path</button>
 	</div>
+	<div class="viewChromeRow" id="cameraChromeRow" hidden>
+	  <button type="button" id="cameraBtn" aria-expanded="false" aria-controls="cameraPanel">V Camera</button>
+	</div>
+	<div id="cameraPanel" hidden></div>
   </div>
   <div id="atlasHud">
 	<div id="atlasCard"></div>
