@@ -3140,30 +3140,9 @@ function displayHeading(worldHeading, x, y) {
 // full perspective factor. Cap it so a buoy stays a readable marker while
 // the ground itself still comes up to the camera.
 const CHASE_MARKER_MAX_SCALE = 4;
-// The rider is drawn as a big marker on purpose. Once the camera is in
-// close, that same marker reads as an oversized board, so tuck it down.
-const CHASE_CLOSE_BOARD = 0.6;
-
 function perspectiveFactor(depth) {
   const cam = viewCamera();
   return Math.min(cam.f / Math.max(depth, 1), CHASE_MARKER_MAX_SCALE);
-}
-
-// 0 at the wide walking chase, 1 when the camera has come in behind the board.
-function chaseCloseAmount() {
-  if (cameraIsFlat()) return 0;
-  const h = canvas.height || 1;
-  const s = followCam.scale || 1;
-  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
-  const wide = chaseFraming(0, h, s, ppm).distance;
-  const tucked = chaseFraming(99, h, s, ppm).distance;
-  if (!(wide > tucked + 1)) return 0;
-  const d = viewDistance > 1 ? viewDistance : wide;
-  return Math.max(0, Math.min(1, (wide - d) / (wide - tucked)));
-}
-
-function riderMarkerMul() {
-  return 1 - chaseCloseAmount() * (1 - CHASE_CLOSE_BOARD);
 }
 
 function withWorldMarker(x, y, fn, scaleMul = 1) {
@@ -3472,13 +3451,20 @@ function drawGhostFrame() {
 
 // Separate function to draw the ghost racer at a given position
 function drawGhost(x, y, heading) {
-  withWorldMarker(x, y, () => {
-    ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
+  const paint = () => {
     ctx.globalAlpha *= 0.25;
     traceBoard();
     ctx.fillStyle = '#ff88ff';
     ctx.fill();
-  }, riderMarkerMul());
+  };
+  if (!cameraIsFlat()) {
+    drawBoardOnGround(x, y, heading, paint);
+    return;
+  }
+  withWorldMarker(x, y, () => {
+    ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
+    paint();
+  });
 }
 
 function ghostNameText(ghost) {
@@ -4478,14 +4464,53 @@ function traceBoard() {
 }
 
 function drawRacer() {
+  if (!cameraIsFlat()) {
+    drawBoardOnGround(pos.x, pos.y, heading, px => {
+      traceBoard();
+      fillRiderBoard(px);
+    });
+    return;
+  }
   withWorldMarker(pos.x, pos.y, () => {
     ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
     traceBoard();
     fillRiderBoard();
-  }, riderMarkerMul());
+  });
 }
 
-function fillRiderBoard() {
+// Nose-to-tail and beam of the painted outline, in its local units.
+const BOARD_NOSE = 13;
+const BOARD_TAIL = -12.35;
+const BOARD_HALF_BEAM = 4.55;
+const BOARD_LENGTH_M = 1.6;
+const BOARD_BEAM_M = 0.6;
+
+// Lay the same outline on the water at 1.60 m × 0.60 m. Flat views keep the
+// big marker so the rider stays easy to find.
+function drawBoardOnGround(x, y, worldHeading, paint) {
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const len = BOARD_NOSE - BOARD_TAIL;
+  const along = (BOARD_LENGTH_M / len) * ppm;
+  const across = (BOARD_BEAM_M / (BOARD_HALF_BEAM * 2)) * ppm;
+  const fx = Math.cos(worldHeading);
+  const fy = Math.sin(worldHeading);
+  const rx = -fy;
+  const ry = fx;
+  const origin = projectWorld(x, y);
+  const nose = projectWorld(x + fx * BOARD_NOSE * along, y + fy * BOARD_NOSE * along);
+  const side = projectWorld(x + rx * across, y + ry * across);
+  if (!origin || !nose || !side) return;
+  ctx.save();
+  ctx.setTransform(
+    side.x - origin.x, side.y - origin.y,
+    (nose.x - origin.x) / BOARD_NOSE, (nose.y - origin.y) / BOARD_NOSE,
+    origin.x, origin.y
+  );
+  paint(Math.hypot(side.x - origin.x, side.y - origin.y) || 1);
+  ctx.restore();
+}
+
+function fillRiderBoard(pxPerLocalX) {
   const meta = activeRider.meta;
   const stops = shineStops(BOARD_SHINE[meta.gloss]);
   if (stops.length) {
@@ -4498,7 +4523,12 @@ function fillRiderBoard() {
   ctx.fill();
   const lightEdge = meta.id === 'antti' || meta.gloss === 'silver' || meta.gloss === 'red';
   ctx.strokeStyle = lightEdge ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6);
+  // On the water the outline stays a hairline, and never eats a board that
+  // is only a few pixels wide. Flat markers keep the old local width.
+  const beamPx = pxPerLocalX ? pxPerLocalX * BOARD_HALF_BEAM * 2 : 0;
+  ctx.lineWidth = pxPerLocalX
+    ? Math.min(1.5, beamPx * 0.16) / pxPerLocalX
+    : (meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6));
   ctx.stroke();
 }
 
