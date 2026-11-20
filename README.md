@@ -25,7 +25,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | Control | Action |
 |---|---|
 | Arrows / IJKL | Steer and throttle |
-| **Z** | Cycle the camera: race zoom → **chase view** → **1 km** → **5 km** → race zoom. Pinch follows the same stops |
+| **Z** | Cycle the camera: **chase view** (where rides start) → race zoom → **1 km** → **5 km** → chase view. **Shift+Z** cycles the other way. Pinch follows the same stops |
 | **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** stays put when the course has a line |
 | G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map**. **C** and **N** still work while the map is open |

@@ -2938,11 +2938,12 @@ const FOLLOW_MARGIN_MIN = 140;
 const FOLLOW_TAU = 0.45;
 const CAM_SCALE_TAU = 0.42;
 const OVERVIEW_CENTER_TAU = 0.65;
-// Z cycles: race zoom → chase view → 1 km → 5 km → race zoom.
-// Pitch and bearing ease, so every step is a camera move rather than a cut.
+// Rides start in chase. Z cycles chase → race zoom → 1 km → 5 km → chase,
+// Shift+Z the other way. Pitch and bearing ease, so every step is a camera
+// move rather than a cut.
 const ZOOM_STOPS = [
-  { id: 'race', meters: 0, title: 'Race zoom' },
   { id: 'chase', meters: 0, title: 'Chase view' },
+  { id: 'race', meters: 0, title: 'Race zoom' },
   { id: 'km1', meters: 1000, title: 'Overview — 1 km' },
   { id: 'km5', meters: 5000, title: 'Overview — 5 km' }
 ];
@@ -3333,7 +3334,7 @@ function cycleZoomStop(dir = 1) {
   prefetchGeoTiles();
 }
 
-/** Discrete zoom for pinch: +1 zooms out (race→chase→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
+/** Discrete zoom for pinch: +1 zooms out (chase→race→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
 function nudgeZoomStop(dir) {
   if (mapDepart) mapDepart = false;
   const n = ZOOM_STOPS.length;
@@ -3954,9 +3955,8 @@ document.addEventListener('keydown', function(e) {
     requestAtlas();
   }
 
-  // Cycle Z: race zoom → chase view → 1 km → 5 km
   if (e.key === 'z' || e.key === 'Z') {
-    cycleZoomStop();
+    cycleZoomStop(e.shiftKey ? -1 : 1);
   }
 
   if ((e.key === 'v' || e.key === 'V') && !e.repeat && isChaseZoom()) {
