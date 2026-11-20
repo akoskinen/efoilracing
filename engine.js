@@ -12,9 +12,10 @@ import {
   riderById, riderDynamics, loadRiderState, saveRiderState, presetTune, clampTune
 } from "./riders.js";
 import {
-  FLAT_BEARING, chaseFraming, makeCamera, project, unproject, viewDepth,
+  FLAT_BEARING, chaseFraming, makeCamera, project, projectHeight, unproject, viewDepth, depthAt,
   easeAngle, isFlatView, focalLength, expandTileIndexRange
 } from "./chaseCam.js";
+import { drawInflatableBuoy, sftLogoImage } from "./inflatableBuoy.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
 import {
@@ -4278,23 +4279,81 @@ function drawBuoyDot(x, y, isTurn, passSide) {
   });
 }
 
+function buoyLabel(b) {
+  return (b.aliases && b.aliases.length > 1) ? b.aliases.join('/') : String(b.turnIndex);
+}
+
+function courseFacing(x, y) {
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (const b of buoys) {
+    if (b.turnIndex == null) continue;
+    sx += b.x;
+    sy += b.y;
+    n++;
+  }
+  if (!n) return 0;
+  return Math.atan2(sy / n - y, sx / n - x);
+}
+
+function drawBuoyMark(x, y, isTurn, passSide) {
+  if (!cameraIsFlat() && isTurn) {
+    drawInflatableBuoy(ctx, viewCamera(), {
+      x,
+      y,
+      ppm: pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M,
+      paint: turnBuoyPaint(currentTrack.buoyColorScheme, passSide),
+      facing: courseFacing(x, y),
+      logo: sftLogoImage()
+    });
+    return;
+  }
+  drawBuoyDot(x, y, isTurn, passSide);
+}
+
+function drawBuoyNumber(b) {
+  const label = buoyLabel(b);
+  if (!cameraIsFlat()) {
+    const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+    const p = projectHeight(viewCamera(), b.x, b.y, (1.5 + 0.35) * ppm);
+    if (!p) return;
+    ctx.save();
+    ctx.font = '600 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.strokeText(label, p.x, p.y);
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.fillText(label, p.x, p.y);
+    ctx.restore();
+    return;
+  }
+  withWorldMarker(b.x, b.y, () => {
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText(label, 11, -8);
+  });
+}
+
 function drawOneBuoy(b) {
   const isTurn = b.turnIndex != null;
-  drawBuoyDot(b.x, b.y, isTurn, b.passSide);
-  if (isTurn) {
-    withWorldMarker(b.x, b.y, () => {
-      ctx.font = '12px sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillText((b.aliases && b.aliases.length > 1) ? b.aliases.join('/') : String(b.turnIndex), 11, -8);
-    });
-  }
+  drawBuoyMark(b.x, b.y, isTurn, b.passSide);
+  if (isTurn) drawBuoyNumber(b);
   if (currentTrack.parallelTrack) {
     const parallel = trackMetersToPixel(
       pixelToTrackMeters(b.x, b.y).x,
       pixelToTrackMeters(b.x, b.y).y + currentTrack.trackSeparation
     );
-    drawBuoyDot(parallel.x, parallel.y, isTurn, b.passSide);
+    drawBuoyMark(parallel.x, parallel.y, isTurn, b.passSide);
   }
+}
+
+function orderedBuoys(list) {
+  if (cameraIsFlat()) return list;
+  const cam = viewCamera();
+  return [...list].sort((a, b) => depthAt(cam, b.x, b.y, 0) - depthAt(cam, a.x, a.y, 0));
 }
 
 function drawTimingLines() {
@@ -4328,17 +4387,21 @@ function withDrawAlpha(a, fn) {
 function drawTrack(intro) {
   if (intro) {
     withDrawAlpha(intro.gates, drawTimingLines);
-    (intro.turns || []).forEach((b, i) => {
+    (intro.turns || []).map((b, i) => ({ b, i })).sort((a, c) => {
+      if (cameraIsFlat()) return a.i - c.i;
+      const cam = viewCamera();
+      return depthAt(cam, c.b.x, c.b.y, 0) - depthAt(cam, a.b.x, a.b.y, 0);
+    }).forEach(({ b, i }) => {
       withDrawAlpha(intro.turnFade(i), () => drawOneBuoy(b));
     });
-    buoys.forEach(b => {
+    orderedBuoys(buoys).forEach(b => {
       if (b.turnIndex != null) return;
       withDrawAlpha(intro.markers, () => drawOneBuoy(b));
     });
     return;
   }
 
-  buoys.forEach(b => drawOneBuoy(b));
+  orderedBuoys(buoys).forEach(b => drawOneBuoy(b));
   drawTimingLines();
 }
 
