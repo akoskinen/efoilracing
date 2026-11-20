@@ -3546,6 +3546,10 @@ function seekGhostTo(sec, { play } = {}) {
   }
 }
 
+function ghostStartsBeforeGate(ghost) {
+  return /^session/.test(ghost?.source || '');
+}
+
 function startGhostPreview() {
   ghostRaceOffsetSec = 0;
   ghostClockOrigin = 0;
@@ -3674,13 +3678,13 @@ function drawGhostRiderLabel(worldX, worldY) {
 }
 
 function startLap(){
-  const ghostAtGate = (ghostPreviewStart || ghostUserSeeked)
+  const playhead = (ghostPreviewStart || ghostUserSeeked)
     ? ghostPlaybackTimeSec()
     : 0;
   lapStartTime = performance.now();
   currentLapTime = 0;
   lapActive = true;
-  ghostRaceOffsetSec = ghostAtGate;
+  ghostRaceOffsetSec = 0;
   ghostPlaying = true;
   
   // Clear ghost wake trail
@@ -3703,6 +3707,9 @@ function startLap(){
       updateGhostStats();
     }
   }
+  // Only a GPS session can begin before the gate; laps and racing lines
+  // always start their ghost from the gate.
+  if (ghostStartsBeforeGate(currentGhost)) ghostRaceOffsetSec = playhead;
   
   // Reset collision tracking
   collidedThisLap = false;
@@ -3789,17 +3796,17 @@ function completeLap() {
       historyDiv.insertBefore(lapEntry, historyDiv.firstChild);
     }
     
-    // Freeze the ghost playhead so a second lap can scrub back, instead of
-    // jumping to a preview clock that kept running during the race.
-    if (ghostPreviewStart || ghostUserSeeked) {
-      ghostClockOrigin = ghostPlaybackTimeSec();
+    // A session ghost waits where this lap picked it up, so the next lap
+    // races the same stretch. Everything else rewinds to the gate.
+    if (ghostStartsBeforeGate(currentGhost) && (ghostPreviewStart || ghostUserSeeked)) {
+      ghostClockOrigin = Math.max(0, ghostRaceOffsetSec);
       ghostSeekSec = ghostClockOrigin;
       ghostPlaying = false;
       ghostPreviewStart = performance.now();
     } else {
-      ghostRaceOffsetSec = 0;
-      ghostClockOrigin = 0;
+      resetGhostTimeline();
     }
+    ghostWakeTrail = [];
 
     // Set lap to inactive before any potential game pause
     lapActive = false;
@@ -3850,6 +3857,7 @@ function completeLap() {
         if (!keepCurrentGhost) {
             currentGhost = lastValidGhost;
             ghostDataMap.set(currentTrackKey, lastValidGhost);
+            resetGhostTimeline();
         }
         
         // Update ghost stats display
