@@ -2938,11 +2938,12 @@ const FOLLOW_MARGIN_MIN = 140;
 const FOLLOW_TAU = 0.45;
 const CAM_SCALE_TAU = 0.42;
 const OVERVIEW_CENTER_TAU = 0.65;
-// Z cycles: race zoom → chase view → 1 km → 5 km → race zoom.
-// Pitch and bearing ease, so every step is a camera move rather than a cut.
+// Rides start in chase. Z cycles chase → race zoom → 1 km → 5 km → chase,
+// Shift+Z the other way. Pitch and bearing ease, so every step is a camera
+// move rather than a cut.
 const ZOOM_STOPS = [
-  { id: 'race', meters: 0, title: 'Race zoom' },
   { id: 'chase', meters: 0, title: 'Chase view' },
+  { id: 'race', meters: 0, title: 'Race zoom' },
   { id: 'km1', meters: 1000, title: 'Overview — 1 km' },
   { id: 'km5', meters: 5000, title: 'Overview — 5 km' }
 ];
@@ -3088,8 +3089,9 @@ function resetFollowCamera() {
     followCam.tx = canvas.width / 2 - pos.x * s;
     followCam.ty = canvas.height / 2 - pos.y * s;
   } else if (isChaseZoom() && canvas.width) {
-    const lx = pos.x + Math.cos(heading) * pose.ahead;
-    const ly = pos.y + Math.sin(heading) * pose.ahead;
+    const mid = boardMiddle(pos.x, pos.y, heading);
+    const lx = mid.x + Math.cos(heading) * pose.ahead;
+    const ly = mid.y + Math.sin(heading) * pose.ahead;
     followCam.tx = canvas.width / 2 - lx * s;
     followCam.ty = canvas.height / 2 - ly * s;
   } else {
@@ -3149,8 +3151,9 @@ function updateFollowCamera(dt) {
     const ahead = focus
       ? pose.ahead
       : Math.max(0, viewDistance * Math.sin(viewPitch) - pose.behindM * ppm);
-    const lx = px + Math.cos(dir) * ahead;
-    const ly = py + Math.sin(dir) * ahead;
+    const mid = focus ? { x: px, y: py } : boardMiddle(px, py, hd);
+    const lx = mid.x + Math.cos(dir) * ahead;
+    const ly = mid.y + Math.sin(dir) * ahead;
     tx = w / 2 - lx * s;
     ty = h / 2 - ly * s;
     tau = focus ? INTRO_LINE_CAM_TAU : CHASE_CENTER_TAU * Math.max(0.02, chaseLag(pose));
@@ -3331,7 +3334,7 @@ function cycleZoomStop(dir = 1) {
   prefetchGeoTiles();
 }
 
-/** Discrete zoom for pinch: +1 zooms out (race→chase→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
+/** Discrete zoom for pinch: +1 zooms out (chase→race→1km→5km), -1 zooms in. Clamps at ends (no Z-style wrap). */
 function nudgeZoomStop(dir) {
   if (mapDepart) mapDepart = false;
   const n = ZOOM_STOPS.length;
@@ -3598,8 +3601,7 @@ function drawGhost(x, y, heading, liftM = 0) {
     ctx.fill();
   };
   if (!cameraIsFlat()) {
-    drawBoardShadow(x, y, heading, liftM);
-    drawBoardOnGround(x, y, heading, paint, liftM, 0);
+    drawBoardOnWater(x, y, heading, paint, liftM, 0, 'rgba(255,136,255,0.25)');
     return;
   }
   withWorldMarker(x, y, () => {
@@ -3950,9 +3952,8 @@ document.addEventListener('keydown', function(e) {
     requestAtlas();
   }
 
-  // Cycle Z: race zoom → chase view → 1 km → 5 km
   if (e.key === 'z' || e.key === 'Z') {
-    cycleZoomStop();
+    cycleZoomStop(e.shiftKey ? -1 : 1);
   }
 
   if ((e.key === 'v' || e.key === 'V') && !e.repeat && isChaseZoom()) {
@@ -4321,6 +4322,12 @@ function drawWake(){
     ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
     strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
   }
+  // The trail is sampled before the move, so join it to where the mast
+  // meets the water now.
+  const last = wakeTrail[wakeTrail.length - 1];
+  const origin = wakeOrigin();
+  ctx.strokeStyle = 'rgba(255,255,255,1)';
+  strokeSlimWake(last.x, last.y, origin.x, origin.y);
 
   // Draw ghost wake during active laps or free preview
   if ((lapActive || ghostPreviewStart) && ghostWakeTrail.length >= 2) {
@@ -4634,11 +4641,120 @@ function traceBoard() {
   ctx.closePath();
 }
 
+// The wing at the foot of the 85 cm mast is the pivot and `pos` is where it
+// runs. Foiling, the wing holds the depth it had at full lift, so a lean
+// swings the deck to the inside of the turn and lowers it, and the mast
+// crosses the water between the wing and the deck. Off the foil the board
+// rolls flat on the water. Sideways offsets are metres along the board's right.
+const MAST_M = 0.85;
+function foilStance(liftM, rollRad) {
+  const rise = Math.min(1, Math.max(0, liftM) / BOARD_LIFT_M);
+  const depth = MAST_M - BOARD_LIFT_M;
+  const c = Math.cos(rollRad);
+  const s = Math.sin(rollRad);
+  return {
+    deckM: rise * Math.max(0, MAST_M * c - depth),
+    deckSideM: rise * MAST_M * s,
+    waterSideM: rise * depth * s / Math.max(0.2, c),
+    rollRad
+  };
+}
+
+// Chase scale (2×): trailing edge 50 cm from the tail, 24 cm chord, 4 cm thick.
+const MAST_CHORD_M = 0.24;
+const MAST_THICK_M = 0.04;
+const MAST_TRAILING_FROM_TAIL_M = 0.5;
+// `pos` is the mast, so the board turns about it. This is how far the
+// board's middle sits ahead of the mast.
+function boardAheadOfMastM() {
+  const tailM = BOARD_LENGTH_M * -BOARD_TAIL / (BOARD_NOSE - BOARD_TAIL);
+  return tailM - MAST_TRAILING_FROM_TAIL_M - MAST_CHORD_M / 2;
+}
+
+function boardMiddle(x, y, worldHeading) {
+  return offsetRight(x, y, worldHeading, 0, boardAheadOfMastM());
+}
+
+function offsetRight(x, y, worldHeading, meters, aheadM = 0) {
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const fx = Math.cos(worldHeading);
+  const fy = Math.sin(worldHeading);
+  return { x: x + (fx * aheadM - fy * meters) * ppm, y: y + (fy * aheadM + fx * meters) * ppm };
+}
+
+function wakeOrigin() {
+  const chase = boardViewBlend().chase;
+  const stance = foilStance(shownBoardLiftM * chase, bankAngleDeg * Math.PI / 180 * chase);
+  return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+}
+
+// The part of the mast above the water, from the waterline up to the deck.
+// Two crossed strips (chord and thickness) give it body from any side.
+function drawMast(x, y, worldHeading, stance, color) {
+  if (!(stance.deckM > 0.01)) return;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const fx = Math.cos(worldHeading);
+  const fy = Math.sin(worldHeading);
+  const rx = -fy;
+  const ry = fx;
+  const c = Math.cos(stance.rollRad);
+  const s = Math.sin(stance.rollRad);
+  const base = { ...offsetRight(x, y, worldHeading, stance.waterSideM), z: 0 };
+  const top = { ...offsetRight(x, y, worldHeading, stance.deckSideM), z: stance.deckM * ppm };
+  const strip = (dx, dy, dz) => [
+    { x: base.x - dx, y: base.y - dy, z: base.z - dz },
+    { x: base.x + dx, y: base.y + dy, z: base.z + dz },
+    { x: top.x + dx, y: top.y + dy, z: top.z + dz },
+    { x: top.x - dx, y: top.y - dy, z: top.z - dz }
+  ];
+  const chord = MAST_CHORD_M / 2 * ppm;
+  const thick = MAST_THICK_M / 2 * ppm;
+  const cam = viewCamera();
+  ctx.save();
+  ctx.fillStyle = color;
+  for (const pts of [strip(fx * chord, fy * chord, 0), strip(rx * c * thick, ry * c * thick, -s * thick)]) {
+    const poly = projectClipped(cam, pts);
+    if (!poly) continue;
+    ctx.beginPath();
+    ctx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Chase draws the board at its 2× size on the mast; top-down views draw a
+// marker that keeps a readable size on screen. While the camera tilts
+// between them the size, lift, lean and mast offset ease across with it, so
+// the board grows or shrinks instead of snapping when the view turns flat.
+// `chase` is 1 once the tilt is most of the way to the chase pose.
+function boardViewBlend() {
+  const ref = Math.max(0.05, Math.abs(currentChasePose().pitch));
+  const raw = Math.min(1, Math.abs(viewPitch) / (ref * 0.6));
+  const chase = raw * raw * (3 - 2 * raw);
+  const markerPerM = worldMarkerScale() / (pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M);
+  const mix = (markerM, trueM) => (markerM + (trueM - markerM) * chase) / trueM;
+  return {
+    chase,
+    lengthMul: mix((BOARD_NOSE - BOARD_TAIL) * markerPerM, BOARD_LENGTH_M),
+    beamMul: mix(BOARD_HALF_BEAM * 2 * markerPerM, BOARD_BEAM_M)
+  };
+}
+
+function drawBoardOnWater(x, y, worldHeading, paint, liftM, rollRad, mastColor) {
+  const blend = boardViewBlend();
+  const stance = foilStance(liftM * blend.chase, rollRad * blend.chase);
+  const deck = offsetRight(x, y, worldHeading, stance.deckSideM, boardAheadOfMastM() * blend.chase);
+  drawBoardShadow(deck.x, deck.y, worldHeading, stance.deckM, blend.lengthMul, blend.beamMul);
+  drawMast(x, y, worldHeading, stance, mastColor);
+  const painter = screen => paint({ ...screen, chase: blend.chase });
+  drawBoardOnGround(deck.x, deck.y, worldHeading, painter, stance.deckM, stance.rollRad, blend.lengthMul, blend.beamMul);
+}
+
 function drawRacer() {
   if (!cameraIsFlat()) {
-    const roll = bankAngleDeg * Math.PI / 180;
-    drawBoardShadow(pos.x, pos.y, heading, shownBoardLiftM);
-    drawBoardOnGround(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, roll);
+    drawBoardOnWater(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, bankAngleDeg * Math.PI / 180, '#1a1d22');
     return;
   }
   withWorldMarker(pos.x, pos.y, () => {
@@ -4695,11 +4811,11 @@ const BOARD_BEAM_M = 1.2;
 // so the board stays right with the camera on top of it. `paint` fills or
 // strokes the current path in screen space and gets the projected nose,
 // tail and beam.
-function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
+function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0, lengthMul = 1, beamMul = lengthMul) {
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const len = BOARD_NOSE - BOARD_TAIL;
-  const along = (BOARD_LENGTH_M / len) * ppm;
-  const across = (BOARD_BEAM_M / (BOARD_HALF_BEAM * 2)) * ppm;
+  const along = (BOARD_LENGTH_M / len) * ppm * lengthMul;
+  const across = (BOARD_BEAM_M / (BOARD_HALF_BEAM * 2)) * ppm * beamMul;
   const fx = Math.cos(worldHeading);
   const fy = Math.sin(worldHeading);
   const rx = -fy;
@@ -4732,15 +4848,15 @@ function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
   ctx.restore();
 }
 
-function drawBoardShadow(x, y, worldHeading, liftM) {
+function drawBoardShadow(x, y, worldHeading, liftM, lengthMul = 1, beamMul = lengthMul) {
   if (!(liftM > 0.04)) return;
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const fx = Math.cos(worldHeading);
   const fy = Math.sin(worldHeading);
   const rx = -fy;
   const ry = fx;
-  const halfL = BOARD_LENGTH_M * 0.62 * ppm;
-  const halfB = BOARD_BEAM_M * 0.85 * ppm;
+  const halfL = BOARD_LENGTH_M * 0.62 * ppm * lengthMul;
+  const halfB = BOARD_BEAM_M * 0.85 * ppm * beamMul;
   const o = projectWorld(x, y);
   const n = projectWorld(x + fx * halfL, y + fy * halfL);
   const s = projectWorld(x + rx * halfB, y + ry * halfB);
@@ -4778,10 +4894,17 @@ function fillRiderBoard(screen) {
   const lightEdge = meta.id === 'antti' || meta.gloss === 'silver' || meta.gloss === 'red';
   ctx.strokeStyle = lightEdge ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
   // On the water the outline stays a hairline, and never eats a board that
-  // is only a few pixels wide. Flat markers keep the old local width.
-  ctx.lineWidth = screen
-    ? Math.min(1.5, screen.beamPx * 0.16)
-    : (meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6));
+  // is only a few pixels wide. Flat markers keep the old local width, and a
+  // tilting camera eases between the two.
+  const markerWidth = meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6);
+  if (screen) {
+    const s = followCam.scale || 1;
+    const flatPx = markerWidth * (s >= 0.995 ? s : 1);
+    const chase = screen.chase ?? 1;
+    ctx.lineWidth = flatPx + (Math.min(1.5, screen.beamPx * 0.16) - flatPx) * chase;
+  } else {
+    ctx.lineWidth = markerWidth;
+  }
   ctx.stroke();
 }
 
@@ -5066,7 +5189,7 @@ function gameLoop(timestamp) {
   if (rideIntroFrame) setRideHudOpacity(rideIntroFrame.hud);
 
   if (!settleReveal && !rideSimPaused) {
-    wakeTrail.push({ x: pos.x, y: pos.y });
+    wakeTrail.push(wakeOrigin());
     const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
