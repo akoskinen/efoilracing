@@ -3601,10 +3601,7 @@ function drawGhost(x, y, heading, liftM = 0) {
     ctx.fill();
   };
   if (!cameraIsFlat()) {
-    const deck = boardMiddle(x, y, heading);
-    drawBoardShadow(deck.x, deck.y, heading, liftM);
-    drawMast(x, y, heading, foilStance(liftM, 0), 'rgba(255,136,255,0.25)');
-    drawBoardOnGround(deck.x, deck.y, heading, paint, liftM, 0);
+    drawBoardOnWater(x, y, heading, paint, liftM, 0, 'rgba(255,136,255,0.25)');
     return;
   }
   withWorldMarker(x, y, () => {
@@ -4686,7 +4683,8 @@ function offsetRight(x, y, worldHeading, meters, aheadM = 0) {
 }
 
 function wakeOrigin() {
-  const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
+  const chase = boardViewBlend().chase;
+  const stance = foilStance(shownBoardLiftM * chase, bankAngleDeg * Math.PI / 180 * chase);
   return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
 }
 
@@ -4726,13 +4724,37 @@ function drawMast(x, y, worldHeading, stance, color) {
   ctx.restore();
 }
 
+// Chase draws the board at its 2× size on the mast; top-down views draw a
+// marker that keeps a readable size on screen. While the camera tilts
+// between them the size, lift, lean and mast offset ease across with it, so
+// the board grows or shrinks instead of snapping when the view turns flat.
+// `chase` is 1 once the tilt is most of the way to the chase pose.
+function boardViewBlend() {
+  const ref = Math.max(0.05, Math.abs(currentChasePose().pitch));
+  const raw = Math.min(1, Math.abs(viewPitch) / (ref * 0.6));
+  const chase = raw * raw * (3 - 2 * raw);
+  const markerPerM = worldMarkerScale() / (pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M);
+  const mix = (markerM, trueM) => (markerM + (trueM - markerM) * chase) / trueM;
+  return {
+    chase,
+    lengthMul: mix((BOARD_NOSE - BOARD_TAIL) * markerPerM, BOARD_LENGTH_M),
+    beamMul: mix(BOARD_HALF_BEAM * 2 * markerPerM, BOARD_BEAM_M)
+  };
+}
+
+function drawBoardOnWater(x, y, worldHeading, paint, liftM, rollRad, mastColor) {
+  const blend = boardViewBlend();
+  const stance = foilStance(liftM * blend.chase, rollRad * blend.chase);
+  const deck = offsetRight(x, y, worldHeading, stance.deckSideM, boardAheadOfMastM() * blend.chase);
+  drawBoardShadow(deck.x, deck.y, worldHeading, stance.deckM, blend.lengthMul, blend.beamMul);
+  drawMast(x, y, worldHeading, stance, mastColor);
+  const painter = screen => paint({ ...screen, chase: blend.chase });
+  drawBoardOnGround(deck.x, deck.y, worldHeading, painter, stance.deckM, stance.rollRad, blend.lengthMul, blend.beamMul);
+}
+
 function drawRacer() {
   if (!cameraIsFlat()) {
-    const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
-    const deck = offsetRight(pos.x, pos.y, heading, stance.deckSideM, boardAheadOfMastM());
-    drawBoardShadow(deck.x, deck.y, heading, stance.deckM);
-    drawMast(pos.x, pos.y, heading, stance, '#1a1d22');
-    drawBoardOnGround(deck.x, deck.y, heading, fillRiderBoard, stance.deckM, stance.rollRad);
+    drawBoardOnWater(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, bankAngleDeg * Math.PI / 180, '#1a1d22');
     return;
   }
   withWorldMarker(pos.x, pos.y, () => {
@@ -4789,11 +4811,11 @@ const BOARD_BEAM_M = 1.2;
 // so the board stays right with the camera on top of it. `paint` fills or
 // strokes the current path in screen space and gets the projected nose,
 // tail and beam.
-function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
+function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0, lengthMul = 1, beamMul = lengthMul) {
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const len = BOARD_NOSE - BOARD_TAIL;
-  const along = (BOARD_LENGTH_M / len) * ppm;
-  const across = (BOARD_BEAM_M / (BOARD_HALF_BEAM * 2)) * ppm;
+  const along = (BOARD_LENGTH_M / len) * ppm * lengthMul;
+  const across = (BOARD_BEAM_M / (BOARD_HALF_BEAM * 2)) * ppm * beamMul;
   const fx = Math.cos(worldHeading);
   const fy = Math.sin(worldHeading);
   const rx = -fy;
@@ -4826,15 +4848,15 @@ function drawBoardOnGround(x, y, worldHeading, paint, liftM = 0, rollRad = 0) {
   ctx.restore();
 }
 
-function drawBoardShadow(x, y, worldHeading, liftM) {
+function drawBoardShadow(x, y, worldHeading, liftM, lengthMul = 1, beamMul = lengthMul) {
   if (!(liftM > 0.04)) return;
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
   const fx = Math.cos(worldHeading);
   const fy = Math.sin(worldHeading);
   const rx = -fy;
   const ry = fx;
-  const halfL = BOARD_LENGTH_M * 0.62 * ppm;
-  const halfB = BOARD_BEAM_M * 0.85 * ppm;
+  const halfL = BOARD_LENGTH_M * 0.62 * ppm * lengthMul;
+  const halfB = BOARD_BEAM_M * 0.85 * ppm * beamMul;
   const o = projectWorld(x, y);
   const n = projectWorld(x + fx * halfL, y + fy * halfL);
   const s = projectWorld(x + rx * halfB, y + ry * halfB);
@@ -4872,10 +4894,17 @@ function fillRiderBoard(screen) {
   const lightEdge = meta.id === 'antti' || meta.gloss === 'silver' || meta.gloss === 'red';
   ctx.strokeStyle = lightEdge ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.4)';
   // On the water the outline stays a hairline, and never eats a board that
-  // is only a few pixels wide. Flat markers keep the old local width.
-  ctx.lineWidth = screen
-    ? Math.min(1.5, screen.beamPx * 0.16)
-    : (meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6));
+  // is only a few pixels wide. Flat markers keep the old local width, and a
+  // tilting camera eases between the two.
+  const markerWidth = meta.id === 'antti' ? 1.25 : (lightEdge ? 0.7 : 0.6);
+  if (screen) {
+    const s = followCam.scale || 1;
+    const flatPx = markerWidth * (s >= 0.995 ? s : 1);
+    const chase = screen.chase ?? 1;
+    ctx.lineWidth = flatPx + (Math.min(1.5, screen.beamPx * 0.16) - flatPx) * chase;
+  } else {
+    ctx.lineWidth = markerWidth;
+  }
   ctx.stroke();
 }
 
