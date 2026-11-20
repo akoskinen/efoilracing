@@ -12,7 +12,7 @@ import {
   riderById, riderDynamics, loadRiderState, saveRiderState, presetTune, clampTune
 } from "./riders.js";
 import {
-  FLAT_BEARING, chaseFraming, makeCamera, project, projectHeight, unproject, viewDepth, depthAt,
+  FLAT_BEARING, CHASE_PITCH, chaseFraming, makeCamera, project, projectHeight, unproject, viewDepth, depthAt,
   easeAngle, isFlatView, focalLength, expandTileIndexRange
 } from "./chaseCam.js";
 import { drawInflatableBuoy, sftLogoImage } from "./inflatableBuoy.js";
@@ -3113,6 +3113,13 @@ function cameraIsFlat() {
   return isFlatView(viewPitch, viewBearing);
 }
 
+/** 1 on a top-down view, 0 once the chase tilt has arrived. */
+function passRingAlpha() {
+  const p = Math.abs(viewPitch);
+  if (p <= 0.004) return 1;
+  return 1 - Math.min(1, p / CHASE_PITCH);
+}
+
 function projectWorld(x, y) {
   return project(viewCamera(), x, y);
 }
@@ -4303,10 +4310,16 @@ function drawBuoyMark(x, y, isTurn, passSide) {
       x,
       y,
       ppm: pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M,
-      paint: turnBuoyPaint(currentTrack.buoyColorScheme, passSide),
       facing: courseFacing(x, y),
       logo: sftLogoImage()
     });
+    const ringA = passRingAlpha();
+    if (ringA > 0.02) {
+      ctx.save();
+      ctx.globalAlpha *= ringA;
+      drawBuoyDot(x, y, true, passSide);
+      ctx.restore();
+    }
     return;
   }
   drawBuoyDot(x, y, isTurn, passSide);

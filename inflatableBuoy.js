@@ -112,10 +112,15 @@ function buildMesh() {
 
 function logoRect(geom) {
   const slantOverEdge = geom.slant / geom.edge;
-  const logoWidth = 0.68;
-  const logoCenterV = 0.38;
+  const logoCenterV = 0.34;
   const aspect = 396 / 166;
-  const vHalf = ((logoWidth / aspect) / slantOverEdge) / 2;
+  // 0.40 is about 40% narrower than the previous 0.68 plate, which ran
+  // past the slanted seams. The clamp keeps the rectangle inside the
+  // triangle even if the aspect changes.
+  const k = 1 / (2 * aspect * slantOverEdge);
+  const margin = 0.05;
+  const logoWidth = Math.min(0.40, (1 - logoCenterV - margin * 2) / (1 + k));
+  const vHalf = logoWidth * k;
   return {
     u0: 0.5 - logoWidth / 2,
     u1: 0.5 + logoWidth / 2,
@@ -446,15 +451,8 @@ function waterlineCorners(pose, ppm) {
   });
 }
 
-function drawWaterline(ctx, cam, pose, ppm, paint) {
+function drawWaterline(ctx, cam, pose, ppm) {
   const m = buildMesh();
-  const pts = waterlineCorners(pose, ppm);
-  const grow = (pad) => pts.map(p => {
-    const dx = p.x - pose.x;
-    const dy = p.y - pose.y;
-    const len = Math.hypot(dx, dy) || 1;
-    return { x: p.x + dx / len * pad, y: p.y + dy / len * pad, z: 0 };
-  });
   const shadow = [];
   for (let i = 0; i < 14; i++) {
     const a = (i / 14) * Math.PI * 2;
@@ -462,8 +460,6 @@ function drawWaterline(ctx, cam, pose, ppm, paint) {
     shadow.push({ x: pose.x + Math.cos(a) * rad, y: pose.y + Math.sin(a) * rad, z: 0 });
   }
   fillPoly(ctx, projectClipped(cam, shadow), 'rgba(0,0,0,0.22)');
-  fillPoly(ctx, projectClipped(cam, grow(0.22 * ppm)), paint.stroke);
-  fillPoly(ctx, projectClipped(cam, grow(0.07 * ppm)), paint.fill);
 }
 
 function finishScreen(vert, cam) {
@@ -474,13 +470,13 @@ function finishScreen(vert, cam) {
 }
 
 /**
- * Draw one chase-view buoy. `paint` is the pass-side waterline color.
- * `facing` aims one panel toward the course.
+ * Draw one chase-view buoy. `facing` aims one panel toward the course.
+ * Pass-side rings are drawn by the engine, and only while the camera is flat.
  */
-export function drawInflatableBuoy(ctx, cam, { x, y, ppm, paint, facing, logo }) {
+export function drawInflatableBuoy(ctx, cam, { x, y, ppm, facing, logo }) {
   const m = buildMesh();
   const pose = poseAt(x, y, facing || 0);
-  drawWaterline(ctx, cam, pose, ppm, paint);
+  drawWaterline(ctx, cam, pose, ppm);
   const tipZ = (m.geom.height * m.scale - pose.draft + pose.heave) * ppm;
   const apex = projectHeight(cam, pose.x, pose.y, tipZ);
   const foot = projectHeight(cam, pose.x, pose.y, 0);
