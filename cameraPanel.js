@@ -29,6 +29,7 @@ function toSlider(spec, v) {
 
 function format(spec, v) {
   if (spec.digits === 0) return `${Math.round(v)} ${spec.unit}`.replace(' °', '°');
+  if (v === 0) return `0 ${spec.unit}`;
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${spec.unit}`;
 }
 
