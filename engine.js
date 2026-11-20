@@ -780,15 +780,28 @@ function drawChaseHorizonFade() {
   // Only the sky above the horizon. At the wide walking tilt the horizon is
   // still off the top of the screen, so the water is left alone.
   const horizon = h / 2 - focalLength(h) * Math.cos(pitch) / Math.sin(pitch);
-  if (horizon < 12) return;
+  const roll = headTilt.deg * Math.PI / 180;
+  // Rolled, the band is laid out level and turned about the screen centre,
+  // padded so its ends still reach the corners.
+  const pad = roll ? Math.hypot(canvas.width, h) / 2 : 0;
+  if (horizon < 12 - pad) return;
   const band = Math.min(horizon + h * 0.08, h * 0.5);
-  const g = ctx.createLinearGradient(0, 0, 0, band);
+  const top = -pad;
+  if (band - top < 2) return;
+  const g = ctx.createLinearGradient(0, top, 0, band);
   g.addColorStop(0, 'rgba(12,26,34,0.92)');
-  const edge = Math.min(0.92, Math.max(0.2, horizon / band));
+  const edge = Math.min(0.92, Math.max(0.2, (horizon - top) / (band - top)));
   g.addColorStop(edge, 'rgba(12,26,34,0.45)');
   g.addColorStop(1, 'rgba(12,26,34,0)');
+  ctx.save();
+  if (roll) {
+    ctx.translate(canvas.width / 2, h / 2);
+    ctx.rotate(-roll);
+    ctx.translate(-canvas.width / 2, -h / 2);
+  }
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, canvas.width, band);
+  ctx.fillRect(-pad, top, canvas.width + pad * 2, band - top);
+  ctx.restore();
 }
 
 function drawChaseGround() {
@@ -2711,35 +2724,32 @@ function stepBoardLift(dt) {
   shownBoardLiftM += (target - shownBoardLiftM) * a;
   if (Math.abs(shownBoardLiftM - target) < 0.002) shownBoardLiftM = target;
 }
-const bankDecay      = 0.9;
+// Left/right move the lean and it stays where it is let go, so a set angle
+// holds hands-off through a long arc. Leaning in uses the rider's lean rates;
+// heading back toward upright is twice as quick. Pressing through upright
+// pauses there for LEAN_UPRIGHT_PAUSE_S so riding straight is easy to find.
+const LEAN_UPRIGHT_PAUSE_S = 0.2;
+let leanUprightPause = 0;
 
 function updateBankAngle(dt) {
-  let targetSign = 0;
-  if (keys['ArrowLeft'])  targetSign = -1;
-  if (keys['ArrowRight']) targetSign =  1;
-  
-  if (targetSign !== 0) {
-    let currentMag = Math.abs(bankAngleDeg);
-    let sign = Math.sign(bankAngleDeg);
-    if (sign === 0) sign = targetSign;
-    if (sign !== targetSign) {
-      currentMag = 0;
-      bankAngleDeg = 0;
-      sign = targetSign;
-    }
-    let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
-    currentMag += rate * dt;
-    if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
-    bankAngleDeg = sign * currentMag;
-  } else {
-    if (Math.abs(bankAngleDeg) < 0.5) {
-      bankAngleDeg = 0;
-    } else {
-      const decayPow = Math.pow(bankDecay, 60 * dt);
-      bankAngleDeg *= decayPow;
-      if (Math.abs(bankAngleDeg) < 0.05) bankAngleDeg = 0;
-    }
+  const dir = (keys['ArrowRight'] ? 1 : 0) - (keys['ArrowLeft'] ? 1 : 0);
+  if (!dir) {
+    leanUprightPause = 0;
+    return;
   }
+  if (leanUprightPause > 0) {
+    leanUprightPause -= dt;
+    return;
+  }
+  const mag = Math.abs(bankAngleDeg);
+  const towardUpright = mag > 0 && Math.sign(bankAngleDeg) !== dir;
+  const rate = (mag < 30 ? activeRider.lean0 : activeRider.lean30) * (towardUpright ? 2 : 1);
+  let next = bankAngleDeg + dir * rate * dt;
+  if (towardUpright && Math.sign(next) !== Math.sign(bankAngleDeg)) {
+    next = 0;
+    leanUprightPause = LEAN_UPRIGHT_PAUSE_S;
+  }
+  bankAngleDeg = Math.max(-BANK_ANGLE_MAX, Math.min(BANK_ANGLE_MAX, next));
 }
 
 // --- Turn Radius Interpolation ---
@@ -3043,6 +3053,52 @@ function chaseLookDir(pose, hd) {
   return viewBearing + angleDelta(viewBearing, hd) * chaseLag(pose);
 }
 
+// Head tilt at the closest camera. Quick left-right steering is ignored:
+// only a lean held unchanged for HEAD_TILT_HOLD_S becomes the new tilt, and
+// every change eases in and out over HEAD_TILT_EASE_S. A change that
+// arrives mid-move carries the current tilt speed, so it never jerks.
+const HEAD_TILT_HOLD_S = 0.6;
+const HEAD_TILT_EASE_S = 1.2;
+const headTilt = { deg: 0, vel: 0, from: 0, fromVel: 0, to: 0, t: HEAD_TILT_EASE_S, lean: 0, heldFor: 0 };
+
+function resetHeadTilt() {
+  Object.assign(headTilt, { deg: 0, vel: 0, from: 0, fromVel: 0, to: 0, t: HEAD_TILT_EASE_S, lean: bankAngleDeg, heldFor: 0 });
+}
+
+function stepHeadTilt(dt, closest) {
+  if (bankAngleDeg !== headTilt.lean) {
+    headTilt.lean = bankAngleDeg;
+    headTilt.heldFor = 0;
+  } else {
+    headTilt.heldFor += dt;
+  }
+  let target = headTilt.to;
+  if (!closest) target = 0;
+  else if (headTilt.heldFor >= HEAD_TILT_HOLD_S) target = bankAngleDeg;
+  if (target !== headTilt.to) {
+    headTilt.from = headTilt.deg;
+    headTilt.fromVel = headTilt.vel;
+    headTilt.to = target;
+    headTilt.t = 0;
+  }
+  if (headTilt.t >= HEAD_TILT_EASE_S) {
+    headTilt.deg = headTilt.to;
+    headTilt.vel = 0;
+    return;
+  }
+  headTilt.t = Math.min(HEAD_TILT_EASE_S, headTilt.t + dt);
+  // Cubic Hermite from (from, fromVel) to (to, 0).
+  const T = HEAD_TILT_EASE_S;
+  const s = headTilt.t / T;
+  const s2 = s * s;
+  const s3 = s2 * s;
+  const p0 = headTilt.from;
+  const m0 = headTilt.fromVel * T;
+  const p1 = headTilt.to;
+  headTilt.deg = (2 * s3 - 3 * s2 + 1) * p0 + (s3 - 2 * s2 + s) * m0 + (3 * s2 - 2 * s3) * p1;
+  headTilt.vel = ((6 * s2 - 6 * s) * p0 + (3 * s2 - 4 * s + 1) * m0 + (6 * s - 6 * s2) * p1) / T;
+}
+
 function resetFollowCamera() {
   const s = followTargetScale();
   followCam.scale = s;
@@ -3062,6 +3118,7 @@ function resetFollowCamera() {
   viewPitch = isChaseZoom() ? pose.pitch : 0;
   viewDistance = isChaseZoom() ? pose.distance : focalLength(canvas.height || 1) / Math.max(s, 1e-4);
   viewBearing = isChaseZoom() ? heading : FLAT_BEARING;
+  resetHeadTilt();
 }
 
 function updateFollowCamera(dt) {
@@ -3100,6 +3157,7 @@ function updateFollowCamera(dt) {
   viewDistance += (targetDist - viewDistance) * pitchA;
   const bearingTau = lifting ? 0.34 : (chasing ? BEARING_TAU * Math.max(0.25, chaseLag(pose)) : BEARING_TAU);
   viewBearing = easeAngle(viewBearing, chasing ? hd : FLAT_BEARING, dt, bearingTau);
+  stepHeadTilt(dt, chasing && !focus && pose.blend >= 1);
   if (isChaseZoom()) {
     const dir = focus ? hd : chaseLookDir(pose, hd);
     // Aim from the eased tilt and distance, not their targets, so the eye
@@ -3182,7 +3240,8 @@ function viewCamera(overrides) {
     bearing,
     viewW: w,
     viewH: h,
-    distance
+    distance,
+    roll: overrides?.roll ?? (pitched ? headTilt.deg * Math.PI / 180 : 0)
   });
 }
 
@@ -5998,8 +6057,8 @@ function formatLapClock(sec) {
 function updateRideMeter(speedKmh) {
     const bankEl = document.getElementById('bankAngleDisplay');
     if (bankEl) {
-      const bank = Math.round(bankAngleDeg);
-      bankEl.textContent = `${bank}°`;
+      const bank = Math.round(bankAngleDeg * 10) / 10;
+      bankEl.textContent = `${bank === 0 ? '0' : bank.toFixed(1)}°`;
     }
     const speedEl = document.getElementById('speedDisplay');
     if (speedEl) speedEl.textContent = (Number(speedKmh) || 0).toFixed(1);
