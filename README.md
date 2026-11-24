@@ -25,7 +25,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | Control | Action |
 |---|---|
 | Arrows / IJKL | Steer and throttle |
-| DualShock | Either stick sets the lean angle. Either trigger, L2 or R2, is the throttle and has to be held: full pull accelerates at the board's rate, a partial pull holds that fraction of top speed, and letting go slows you at the shared rate. Triangle cycles the camera like Z. Square opens board customization: d-pad up and down move between the settings, d-pad left and right change the value, Cross saves, Circle cancels. While racing, d-pad up toggles the ghost name and d-pad down keeps or releases the current ghost. Press a button once so the browser starts reading the pad |
+| DualShock | Either stick sets the lean angle. Either trigger, L2 or R2, is the throttle and has to be held: full pull accelerates at the board's rate, a partial pull holds that fraction of top speed, and letting go slows you at the shared rate. Triangle cycles the camera like Z. Square opens board customization: d-pad up and down move between the settings, d-pad left and right change the value, L1 and R1 switch the board, Cross saves, Circle cancels. While racing, d-pad up toggles the ghost name and d-pad down keeps or releases the current ghost. Press a button once so the browser starts reading the pad |
 | **Z** | Cycle the camera: **chase view** (where rides start) → race zoom → **1 km** → **5 km** → chase view. **Shift+Z** cycles the other way. Pinch follows the same stops |
 | **P** | Toggle racing line. Top-right **P Show Path** / **P Hide Path** stays put when the course has a line |
 | G | Keep the current ghost, or restore the previous lap. Top-left **Customize ghost** |

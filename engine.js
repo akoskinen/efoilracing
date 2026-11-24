@@ -2773,7 +2773,7 @@ let padThrottle = 0;
 
 // Face buttons and the d-pad, on the standard layout. DualShock names:
 // Cross is the bottom button, Circle the right, Square the left, Triangle the top.
-const padDown = { cross: false, circle: false, square: false, triangle: false, up: false, down: false, left: false, right: false };
+const padDown = { cross: false, circle: false, square: false, triangle: false, l1: false, r1: false, up: false, down: false, left: false, right: false };
 let padNudgeAt = 0;
 
 function pollPadButtons(dt) {
@@ -2782,7 +2782,7 @@ function pollPadButtons(dt) {
     padNudgeAt = 0;
     return;
   }
-  const now = { cross: false, circle: false, square: false, triangle: false, up: false, down: false, left: false, right: false };
+  const now = { cross: false, circle: false, square: false, triangle: false, l1: false, r1: false, up: false, down: false, left: false, right: false };
   const list = navigator.getGamepads ? navigator.getGamepads() : [];
   for (const pad of list) {
     if (!pad || !pad.connected) continue;
@@ -2794,6 +2794,8 @@ function pollPadButtons(dt) {
     now.circle = now.circle || on(1);
     now.square = now.square || on(2);
     now.triangle = now.triangle || on(3);
+    now.l1 = now.l1 || on(4);
+    now.r1 = now.r1 || on(5);
     now.up = now.up || on(12);
     now.down = now.down || on(13);
     now.left = now.left || on(14);
@@ -2819,6 +2821,8 @@ function pollPadButtons(dt) {
     } else {
       padNudgeAt = 0;
     }
+    if (rose('l1')) stepPro(-1);
+    if (rose('r1')) stepPro(1);
     if (rose('cross')) saveProTune();
     if (rose('circle')) revertProAndClose();
   } else if (!pro) {
