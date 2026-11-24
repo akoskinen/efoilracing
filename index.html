@@ -45,6 +45,19 @@
 	  user-select: none;
 	  -webkit-user-select: none;
 	}
+	#modelCredit {
+	  position: absolute;
+	  left: 14px;
+	  bottom: 10px;
+	  z-index: 6;
+	  max-width: 42vw;
+	  margin: 0;
+	  font-size: 11px;
+	  line-height: 1.3;
+	  color: rgba(255,255,255,0.72);
+	  text-shadow: 0 1px 2px #000;
+	}
+	#modelCredit a { color: #9fd8ff; }
 	/* Bottom-center speedometer + laptime */
 	#rideMeter {
 	  position: absolute;
@@ -722,7 +735,8 @@
 	body.atlas-open #customizeGhostBtn,
 	body.atlas-open #ghostCustomize,
 	body.atlas-open #ghostHud,
-	body.atlas-open #brandMark {
+	body.atlas-open #brandMark,
+	body.atlas-open #modelCredit {
 	  display: none;
 	}
 
@@ -820,6 +834,7 @@
   <canvas id="groundCanvas"></canvas>
   <canvas id="gameCanvas"></canvas>
   <img id="brandMark" src="img/efoil-racing-mark.gif" alt="eFoil Racing" width="650" height="488">
+  <p id="modelCredit">Board model: <a href="https://sketchfab.com/3d-models/hydrofoil-efoil-a45cea5293054be2a494a66ac5c4cfb2">hydrofoil eFoil</a> by <a href="https://sketchfab.com/Sergo_CRAFTSMAN">Sergo_CRAFTSMAN</a>, <a href="https://creativecommons.org/licenses/by/4.0/">CC BY</a></p>
 
   <!-- Bottom-center speedometer + laptime -->
   <div id="rideMeter">

@@ -17,6 +17,7 @@ import {
   CHASE_DEFAULTS, CHASE_FIRST_PERSON, CHASE_LIMITS, clampChaseSettings
 } from "./chaseCam.js";
 import { drawChaseBuoys, chaseBuoysAvailable, chaseBuoyOccupies } from "./chaseBuoys3d.js";
+import { drawChaseBoards } from "./chaseBoard3d.js";
 import { mountCameraPanel } from "./cameraPanel.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
@@ -3726,20 +3727,7 @@ function drawGhostFrame() {
 
 // Separate function to draw the ghost racer at a given position
 function drawGhost(x, y, heading, liftM = 0) {
-  const paint = () => {
-    ctx.globalAlpha *= 0.25;
-    ctx.fillStyle = '#ff88ff';
-    ctx.fill();
-  };
-  if (!cameraIsFlat()) {
-    drawBoardOnWater(x, y, heading, paint, liftM, 0, 'rgba(255,136,255,0.25)');
-    return;
-  }
-  withWorldMarker(x, y, () => {
-    ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
-    traceBoard();
-    paint();
-  });
+  drawCraft(x, y, heading, liftM, 0, true);
 }
 
 function ghostNameText(ghost) {
@@ -4220,7 +4208,7 @@ function checkGateCrossing(oldPos, newPos) {
 
 // --- Collision Detection with Buoys ---
 // Turn buoys use the inflatable's real hull against the board and the mast,
-// in every camera view. The deck is the 3.2 m × 1.2 m chase board, sampled
+// in every camera view. The deck is the 3.30 m × 1.42 m chase board, sampled
 // on its outline and through the middle, at the height a lean gives it.
 const BOARD_HIT_ALONG = 7;
 const BOARD_HIT_ACROSS = 3;
@@ -4823,12 +4811,14 @@ function traceBoard() {
   ctx.closePath();
 }
 
-// The wing at the foot of the 85 cm mast is the pivot and `pos` is where it
-// runs. Foiling, the wing holds the depth it had at full lift, so a lean
-// swings the deck to the inside of the turn and lowers it, and the mast
-// crosses the water between the wing and the deck. Off the foil the board
-// rolls flat on the water. Sideways offsets are metres along the board's right.
-const MAST_M = 0.85;
+// The wing at the foot of the mast is the pivot and `pos` is where it runs.
+// Chase draws the scanned efoil at 2×, so this mast is the scan's own mast
+// at that scale: deck underside to the wing. Foiling, the wing holds the
+// depth it had at full lift, so a lean swings the deck to the inside of the
+// turn and lowers it, and the mast crosses the water between the wing and
+// the deck. Off the foil the board rolls flat on the water. Sideways offsets
+// are metres along the board's right.
+const MAST_M = 1.468;
 function foilStance(liftM, rollRad) {
   const rise = Math.min(1, Math.max(0, liftM) / BOARD_LIFT_M);
   const depth = MAST_M - BOARD_LIFT_M;
@@ -4842,15 +4832,15 @@ function foilStance(liftM, rollRad) {
   };
 }
 
-// Chase scale (2×): trailing edge 50 cm from the tail, 24 cm chord, 4 cm thick.
+// Fallback mast, used until the scanned model is ready and while the camera
+// is still tilting. Chord and thickness are the 2× sizes.
 const MAST_CHORD_M = 0.24;
 const MAST_THICK_M = 0.04;
-const MAST_TRAILING_FROM_TAIL_M = 0.5;
-// `pos` is the mast, so the board turns about it. This is how far the
-// board's middle sits ahead of the mast.
+// `pos` is the wing, so the board turns about it. The scanned deck's middle
+// sits this far ahead of that pivot at the 2× chase scale.
+const DECK_AHEAD_OF_MAST_M = 1.052;
 function boardAheadOfMastM() {
-  const tailM = BOARD_LENGTH_M * -BOARD_TAIL / (BOARD_NOSE - BOARD_TAIL);
-  return tailM - MAST_TRAILING_FROM_TAIL_M - MAST_CHORD_M / 2;
+  return DECK_AHEAD_OF_MAST_M;
 }
 
 function boardMiddle(x, y, worldHeading) {
@@ -4934,16 +4924,62 @@ function drawBoardOnWater(x, y, worldHeading, paint, liftM, rollRad, mastColor) 
   drawBoardOnGround(deck.x, deck.y, worldHeading, painter, stance.deckM, stance.rollRad, blend.lengthMul, blend.beamMul);
 }
 
-function drawRacer() {
-  if (!cameraIsFlat()) {
-    drawBoardOnWater(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, bankAngleDeg * Math.PI / 180, '#1a1d22');
+function paintGhostBoard() {
+  ctx.globalAlpha *= 0.25;
+  ctx.fillStyle = '#ff88ff';
+  ctx.fill();
+}
+
+// Chase view draws the scanned efoil. The flat marker, and a fading copy of
+// it while the camera is still tilting, stay so the rider does not pop.
+function drawCraft(x, y, heading, liftM, rollRad, ghost) {
+  if (cameraIsFlat()) {
+    withWorldMarker(x, y, () => {
+      ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
+      traceBoard();
+      if (ghost) paintGhostBoard();
+      else fillRiderBoard();
+    });
     return;
   }
-  withWorldMarker(pos.x, pos.y, () => {
-    ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
-    traceBoard();
-    fillRiderBoard();
-  });
+  const blend = boardViewBlend();
+  const stance = foilStance(liftM * blend.chase, rollRad * blend.chase);
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  let mesh = false;
+  if (blend.chase > 0.04) {
+    const cos = Math.cos(stance.rollRad);
+    const sin = Math.sin(stance.rollRad);
+    mesh = drawChaseBoards(ctx, viewCamera(), [{
+      x,
+      y,
+      heading,
+      roll: stance.rollRad,
+      wingSideM: stance.deckSideM - MAST_M * sin,
+      wingZM: stance.deckM - MAST_M * cos,
+      alpha: (ghost ? 0.72 : 1) * blend.chase,
+      ghost: !!ghost
+    }], ppm);
+  }
+  if (mesh && blend.chase > 0.97) {
+    if (!ghost) {
+      const deck = offsetRight(x, y, heading, stance.deckSideM, boardAheadOfMastM());
+      drawBoardShadow(deck.x, deck.y, heading, stance.deckM, blend.lengthMul, blend.beamMul);
+    }
+    return;
+  }
+  ctx.save();
+  if (mesh) ctx.globalAlpha *= 1 - blend.chase;
+  drawBoardOnWater(
+    x, y, heading,
+    ghost ? paintGhostBoard : fillRiderBoard,
+    liftM, rollRad,
+    ghost ? 'rgba(255,136,255,0.25)' : '#1a1d22'
+  );
+  ctx.restore();
+}
+
+function drawRacer() {
+  drawCraft(pos.x, pos.y, heading, shownBoardLiftM, bankAngleDeg * Math.PI / 180, false);
 }
 
 // traceBoard's outline as points, for drawing it in true perspective.
@@ -4981,10 +5017,10 @@ const BOARD_OUTLINE = (() => {
 const BOARD_NOSE = 13;
 const BOARD_TAIL = -12.35;
 const BOARD_HALF_BEAM = 4.55;
-// Real board is 1.60 m × 0.60 m. Chase draws it at twice that, 3.20 m × 1.20 m,
-// so the shape stays true and the board is readable from the riding camera.
-const BOARD_LENGTH_M = 3.2;
-const BOARD_BEAM_M = 1.2;
+// The scanned deck is about 1.65 m × 0.71 m. Chase draws it at twice that,
+// 3.30 m × 1.42 m, so the shape stays true and the board is readable.
+const BOARD_LENGTH_M = 3.302;
+const BOARD_BEAM_M = 1.422;
 
 // Lay the outline on the water. Flat views keep the big marker so the rider
 // stays easy to find. `liftM` is height above the water, `rollRad` leans the
