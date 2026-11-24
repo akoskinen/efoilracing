@@ -16,7 +16,7 @@ import {
   easeAngle, angleDelta, isFlatView, focalLength, expandTileIndexRange,
   CHASE_DEFAULTS, CHASE_FIRST_PERSON, CHASE_LIMITS, clampChaseSettings
 } from "./chaseCam.js";
-import { drawChaseBuoys, chaseBuoysAvailable } from "./chaseBuoys3d.js";
+import { drawChaseBuoys, chaseBuoysAvailable, chaseBuoyOccupies } from "./chaseBuoys3d.js";
 import { mountCameraPanel } from "./cameraPanel.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
@@ -2675,7 +2675,10 @@ const speedConversion = 0.6; // HUD km/h = internal speed × this
 // Legacy pixel-speed tuning (built-ins at ~4 px/m). Kept only as the reference
 // for meter-based collision thresholds that were authored in canvas pixels.
 const SPEED_CALIBRATION_PX_PER_M = 4;
-const COLLISION_RADIUS_M = 12 / SPEED_CALIBRATION_PX_PER_M; // 3 m
+// Flat marker buoys have no hull. The drawn mark is about a metre across;
+// this disc is tested against the board, in place of the old 3 m circle
+// around the mast.
+const MARKER_BUOY_RADIUS_M = 1.25;
 
 // Current meters→pixels ratio for the active track layout (collisions, etc.).
 function pixelsPerMeter() {
@@ -4088,21 +4091,64 @@ function checkGateCrossing(oldPos, newPos) {
 }
 
 // --- Collision Detection with Buoys ---
+// Turn buoys use the inflatable's real hull against the board and the mast,
+// in every camera view. The deck is the 3.2 m × 1.2 m chase board, sampled
+// on its outline and through the middle, at the height a lean gives it.
+const BOARD_HIT_ALONG = 7;
+const BOARD_HIT_ACROSS = 3;
+
+function boardHitsBuoy(b) {
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const reachM = b.turnIndex != null ? 4.5 : MARKER_BUOY_RADIUS_M + 3;
+  if (Math.hypot(b.x - pos.x, b.y - pos.y) > reachM * ppm) return false;
+  const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
+  const len = BOARD_NOSE - BOARD_TAIL;
+  const along = BOARD_LENGTH_M / len;
+  const across = BOARD_BEAM_M / (BOARD_HALF_BEAM * 2);
+  const fx = Math.cos(heading);
+  const fy = Math.sin(heading);
+  const turn = b.turnIndex != null;
+  const facing = turn ? courseFacing(b.x, b.y) : 0;
+  const hits = (ahead, side, z) => {
+    const dx = ((pos.x - b.x) / ppm) + fx * ahead - fy * side;
+    const dy = ((pos.y - b.y) / ppm) + fy * ahead + fx * side;
+    if (turn) return chaseBuoyOccupies(dx, dy, z, facing);
+    return Math.hypot(dx, dy) <= MARKER_BUOY_RADIUS_M;
+  };
+  const sample = (lx, ly) => hits(
+    ly * along + boardAheadOfMastM(),
+    lx * across + stance.deckSideM,
+    stance.deckM - Math.sin(stance.rollRad) * lx * across
+  );
+  for (const [lx, ly] of BOARD_OUTLINE) {
+    if (sample(lx, ly)) return true;
+  }
+  for (let iy = 0; iy < BOARD_HIT_ALONG; iy++) {
+    const ly = BOARD_TAIL + len * iy / (BOARD_HIT_ALONG - 1);
+    for (let ix = 0; ix < BOARD_HIT_ACROSS; ix++) {
+      const lx = -BOARD_HALF_BEAM + (BOARD_HALF_BEAM * 2) * ix / (BOARD_HIT_ACROSS - 1);
+      if (sample(lx, ly)) return true;
+    }
+  }
+  for (let i = 0; i < 4; i++) {
+    const t = i / 3;
+    if (hits(0, stance.waterSideM + (stance.deckSideM - stance.waterSideM) * t, stance.deckM * t)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function checkBuoyCollisions(){
   if (!lapActive || collidedThisLap) return;
 
-  const hitRadiusPx = COLLISION_RADIUS_M * pixelsPerMeter();
   for (const b of buoys) {
-    const dx   = b.x - pos.x;
-    const dy   = b.y - pos.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < hitRadiusPx) {
-      penaltySeconds += 10;
-      collidedThisLap = true;
-      AudioManager.playSound('collision')
-          .catch(err => console.warn('Failed to play collision sound:', err));
-      break;
-    }
+    if (!boardHitsBuoy(b)) continue;
+    penaltySeconds += 10;
+    collidedThisLap = true;
+    AudioManager.playSound('collision')
+        .catch(err => console.warn('Failed to play collision sound:', err));
+    break;
   }
 }
 
