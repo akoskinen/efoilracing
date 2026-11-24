@@ -2771,6 +2771,64 @@ function racingPad() {
 
 let padThrottle = 0;
 
+// Face buttons and the d-pad, on the standard layout. DualShock names:
+// Cross is the bottom button, Circle the right, Square the left, Triangle the top.
+const padDown = { cross: false, circle: false, square: false, triangle: false, up: false, down: false, left: false, right: false };
+let padNudgeAt = 0;
+
+function pollPadButtons(dt) {
+  if (atlas.open) {
+    for (const key of Object.keys(padDown)) padDown[key] = false;
+    padNudgeAt = 0;
+    return;
+  }
+  const now = { cross: false, circle: false, square: false, triangle: false, up: false, down: false, left: false, right: false };
+  const list = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const pad of list) {
+    if (!pad || !pad.connected) continue;
+    const on = (index) => {
+      const button = pad.buttons[index];
+      return !!(button && (button.pressed || button.value > 0.5));
+    };
+    now.cross = now.cross || on(0);
+    now.circle = now.circle || on(1);
+    now.square = now.square || on(2);
+    now.triangle = now.triangle || on(3);
+    now.up = now.up || on(12);
+    now.down = now.down || on(13);
+    now.left = now.left || on(14);
+    now.right = now.right || on(15);
+  }
+  const rose = (name) => now[name] && !padDown[name];
+  const pro = document.body.classList.contains('pro-open');
+  if (rose('triangle')) cycleZoomStop(1);
+  if (rose('square') && !pro) setProRackOpen(true);
+  if (pro && !proReverting) {
+    if (rose('up')) cycleProSlider(-1);
+    if (rose('down')) cycleProSlider(1);
+    if (rose('left') || rose('right')) {
+      if (rose('left')) nudgeProSlider(-1);
+      if (rose('right')) nudgeProSlider(1);
+      padNudgeAt = 0.32;
+    } else if (now.left !== now.right) {
+      padNudgeAt -= dt;
+      if (padNudgeAt <= 0) {
+        nudgeProSlider(now.right ? 1 : -1);
+        padNudgeAt = 0.12;
+      }
+    } else {
+      padNudgeAt = 0;
+    }
+    if (rose('cross')) saveProTune();
+    if (rose('circle')) revertProAndClose();
+  } else if (!pro) {
+    padNudgeAt = 0;
+    if (rose('up')) toggleGhostLabel();
+    if (rose('down')) toggleKeepCurrentGhost();
+  }
+  for (const key of Object.keys(padDown)) padDown[key] = now[key];
+}
+
 // Move the lean toward `target` degrees. Pushing further uses the rider's
 // lean rate; easing off decays toward the target the way a released key does.
 function approachBank(dt, target) {
@@ -5285,6 +5343,7 @@ function gameLoop(timestamp) {
   let dt = (timestamp - lastTimestamp) / 1000;
   lastTimestamp = timestamp;
   if (dt > 0.1) dt = 0.1;
+  pollPadButtons(dt);
 
   const settleReveal = (rideOverlayPending && rideOverlayTo > rideOverlayFrom) || rideIntroPending;
   stepRideOverlay(timestamp);
