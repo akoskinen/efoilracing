@@ -8,7 +8,7 @@
 
 import * as THREE from './lib/three/three.module.min.js';
 import { depthAt, projectClipped, projectHeight } from './chaseCam.js';
-import { buildInflatedTetra } from './inflatedTetraBuoy.js';
+import { buildInflatedTetra, makeBuoySolid } from './inflatedTetraBuoy.js';
 
 /** Tip height above the water, in meters. */
 export const INFLATABLE_HEIGHT_M = 1.5;
@@ -54,9 +54,17 @@ function buildShape() {
     reach: geom.edge * scale * 0.72,
     faceAz: Math.atan2(nz, nx),
     edge: geom.edge * scale,
-    logo: logoRect(geom)
+    logo: logoRect(geom),
+    solid: null
   };
+  shape.solid = makeBuoySolid(geom, scale, shape.faceAz);
   return shape;
+}
+
+/** True when a point in metres, at `heightM` above the water, is inside the
+ *  inflatable drawn for turn buoys. `facing` matches courseFacing. */
+export function chaseBuoyOccupies(dxM, dyM, heightM, facing) {
+  return buildShape().solid.occupies(dxM, dyM, heightM, facing);
 }
 
 function logoRect(geom) {

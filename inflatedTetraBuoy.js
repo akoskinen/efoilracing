@@ -204,3 +204,152 @@ export function buildInflatedTetra(options = {}) {
     suggestedDraft: 0.06 * E + (o.includeBase ? o.baseBulge * E * 0.5 : 0),
   };
 }
+
+// Outer radius of the hull at a geometry height and an angle around +Y.
+// A point is inside the buoy when its horizontal distance from the axis is
+// within this radius. Built from the same triangles that are drawn.
+function buildRadiusField(geom) {
+  const P = geom.positions;
+  const I = geom.indices;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (let i = 1; i < P.length; i += 3) {
+    yMin = Math.min(yMin, P[i]);
+    yMax = Math.max(yMax, P[i]);
+  }
+  const heights = 64;
+  const azimuths = 120;
+  const span = yMax - yMin || 1;
+  const table = Array.from({ length: heights }, () => new Float32Array(azimuths));
+  const yAt = (row) => yMin + span * (row + 0.5) / heights;
+  const edgePoint = (y, a, b) => {
+    const d = b[1] - a[1];
+    if (d === 0) return null;
+    const t = (y - a[1]) / d;
+    if (t < 0 || t > 1) return null;
+    return [a[0] + (b[0] - a[0]) * t, a[2] + (b[2] - a[2]) * t];
+  };
+  const vert = (k) => [P[k * 3], P[k * 3 + 1], P[k * 3 + 2]];
+  // Distance from the axis to where a ray at `az` crosses the segment.
+  const rayRadius = (p, q, az) => {
+    const dx = q[0] - p[0];
+    const dz = q[1] - p[1];
+    const rx = Math.cos(az);
+    const rz = Math.sin(az);
+    const det = rx * dz - rz * dx;
+    if (Math.abs(det) < 1e-10) return 0;
+    const t = (rz * p[0] - rx * p[1]) / det;
+    if (t < -1e-4 || t > 1 + 1e-4) return 0;
+    const s = (dz * p[0] - dx * p[1]) / det;
+    return s > 0 ? s : 0;
+  };
+  for (let i = 0; i < P.length; i += 3) {
+    const row = Math.max(0, Math.min(heights - 1, Math.round(((P[i + 1] - yMin) / span) * heights - 0.5)));
+    const az = Math.atan2(P[i + 2], P[i]);
+    const col = Math.round(((az + Math.PI) / (Math.PI * 2)) * azimuths) % azimuths;
+    const r = Math.hypot(P[i], P[i + 2]);
+    if (r > table[row][col]) table[row][col] = r;
+  }
+  for (let t = 0; t < I.length; t += 3) {
+    const A = vert(I[t]);
+    const B = vert(I[t + 1]);
+    const C = vert(I[t + 2]);
+    const lo = Math.min(A[1], B[1], C[1]);
+    const hi = Math.max(A[1], B[1], C[1]);
+    const row0 = Math.max(0, Math.floor((lo - yMin) / span * heights) - 1);
+    const row1 = Math.min(heights - 1, Math.ceil((hi - yMin) / span * heights));
+    for (let row = row0; row <= row1; row++) {
+      const y = yAt(row);
+      const pts = [edgePoint(y, A, B), edgePoint(y, B, C), edgePoint(y, C, A)].filter(Boolean);
+      if (pts.length < 2) continue;
+      let p = pts[0];
+      let q = pts[1];
+      if (pts.length === 3) {
+        const d01 = Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1]);
+        const d02 = Math.hypot(pts[2][0] - pts[0][0], pts[2][1] - pts[0][1]);
+        const d12 = Math.hypot(pts[2][0] - pts[1][0], pts[2][1] - pts[1][1]);
+        if (d02 >= d01 && d02 >= d12) q = pts[2];
+        else if (d12 >= d01) { p = pts[1]; q = pts[2]; }
+      }
+      const a0 = Math.atan2(p[1], p[0]);
+      let sweep = Math.atan2(q[1], q[0]) - a0;
+      while (sweep > Math.PI) sweep -= Math.PI * 2;
+      while (sweep < -Math.PI) sweep += Math.PI * 2;
+      const steps = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI * 2) * azimuths));
+      for (let s = 0; s <= steps; s++) {
+        const az = a0 + sweep * (s / steps);
+        const r = rayRadius(p, q, az);
+        if (!(r > 0)) continue;
+        const col = Math.round(((az + Math.PI) / (Math.PI * 2)) * azimuths) % azimuths;
+        if (r > table[row][col]) table[row][col] = r;
+      }
+    }
+  }
+  for (const row of table) {
+    for (let c = 0; c < azimuths; c++) {
+      if (row[c] > 0) continue;
+      let left = 0;
+      let right = 0;
+      let dl = 0;
+      let dr = 0;
+      for (let k = 1; k < azimuths; k++) {
+        const lv = row[(c - k + azimuths) % azimuths];
+        const rv = row[(c + k) % azimuths];
+        if (!dl && lv > 0) { left = lv; dl = k; }
+        if (!dr && rv > 0) { right = rv; dr = k; }
+        if (dl && dr) break;
+      }
+      if (dl && dr) row[c] = (left * dr + right * dl) / (dl + dr);
+    }
+  }
+  return {
+    yMin,
+    yMax,
+    radius(y, az) {
+      if (y < yMin || y > yMax) return 0;
+      const fy = (y - yMin) / span * heights - 0.5;
+      const row0 = Math.max(0, Math.min(heights - 1, Math.floor(fy)));
+      const row1 = Math.max(0, Math.min(heights - 1, row0 + 1));
+      const ty = Math.max(0, Math.min(1, fy - row0));
+      let wrapped = az;
+      while (wrapped < -Math.PI) wrapped += Math.PI * 2;
+      while (wrapped >= Math.PI) wrapped -= Math.PI * 2;
+      const fx = (wrapped + Math.PI) / (Math.PI * 2) * azimuths - 0.5;
+      const base = Math.floor(fx);
+      const tx = fx - base;
+      const at = (row, col) => row[(col + azimuths) % azimuths];
+      const a = at(table[row0], base) * (1 - tx) + at(table[row0], base + 1) * tx;
+      const b = at(table[row1], base) * (1 - tx) + at(table[row1], base + 1) * tx;
+      return a * (1 - ty) + b * ty;
+    }
+  };
+}
+
+// `scale` is the chase buoy's meters-per-geometry-unit. `faceAz` is the
+// geometry angle the renderer yaws so a face points along the course.
+export function makeBuoySolid(geom, scale, faceAz) {
+  const field = buildRadiusField(geom);
+  return {
+    /** Horizontal radius of the widest part, in meters. */
+    reachM: field.radius((field.yMin + field.yMax) / 2, 0) * scale,
+    /**
+     * True when the point (metres from the buoy centre, height above the
+     * water) is inside the hull. `facing` is the course direction the buoy
+     * is turned toward, the same angle the chase view renders with.
+     */
+    occupies(dxM, dyM, heightM, facing) {
+      const draftM = geom.suggestedDraft * scale;
+      // The base puff is a poor horizontal slice. Below the waterline the
+      // hull is no wider than the waterline, and it ends at the draft.
+      if (heightM < -draftM) return false;
+      const yaw = (facing || 0) - faceAz;
+      const c = Math.cos(yaw);
+      const sn = Math.sin(yaw);
+      const lx = c * dxM + sn * dyM;
+      const lz = -sn * dxM + c * dyM;
+      const gy = Math.max(heightM, 0) / scale + geom.suggestedDraft;
+      const limit = field.radius(gy, Math.atan2(lz, lx)) * scale;
+      return limit > 0 && Math.hypot(lx, lz) <= limit;
+    }
+  };
+}
