@@ -2753,8 +2753,10 @@ function racingPad() {
   let steer = 0;
   let steerOn = false;
   let throttle = 0;
+  let connected = false;
   for (const pad of list) {
     if (!pad || !pad.connected) continue;
+    connected = true;
     for (const raw of [pad.axes[0], pad.axes[2]]) {
       const x = padStick(raw);
       if (Math.abs(x) > Math.abs(steer)) {
@@ -2764,8 +2766,10 @@ function racingPad() {
     }
     throttle = Math.max(throttle, padTrigger(pad.buttons[6]), padTrigger(pad.buttons[7]));
   }
-  return { steer, steerOn, throttle };
+  return { steer, steerOn, throttle, connected };
 }
+
+let padThrottle = 0;
 
 // Move the lean toward `target` degrees. Pushing further uses the rider's
 // lean rate; easing off decays toward the target the way a released key does.
@@ -4217,7 +4221,7 @@ function checkBuoyCollisions(){
 // --- THROTTLE USAGE ---
 function updateThrottleQueue(st, dt) {
   // st => turnStates entry
-  const throttlePressed = !!keys['ArrowUp'];
+  const throttlePressed = !!keys['ArrowUp'] || (padThrottle > 0);
   st.throttleQueue.push({ pressed: throttlePressed, dt: dt });
   st.queueTime += dt;
 
@@ -4314,12 +4318,18 @@ function update(dt){
   prevPos.y = pos.y;
   
   const pad = racingPad();
-  const accel = Math.max(keys['ArrowUp'] ? 1 : 0, pad.throttle);
-  if (accel > 0) {
-    speed += activeRider.accelRate * accel * dt;
-  }
-  if (keys['ArrowDown']) {
-    speed -= activeRider.decelRate * dt;
+  padThrottle = pad.connected ? pad.throttle : 0;
+  // A connected pad's trigger is the power setting. Full pull accelerates
+  // toward top speed at the board's rate, a partial pull holds that fraction
+  // of top speed, and no pull decelerates at the shared rate. The keyboard
+  // still coasts, and its keys take over while they are held.
+  if (pad.connected && !keys['ArrowUp'] && !keys['ArrowDown']) {
+    const target = pad.throttle * activeRider.maxSpeed;
+    if (speed < target) speed = Math.min(target, speed + activeRider.accelRate * dt);
+    else if (speed > target) speed = Math.max(target, speed - activeRider.decelRate * dt);
+  } else {
+    if (keys['ArrowUp']) speed += activeRider.accelRate * dt;
+    if (keys['ArrowDown']) speed -= activeRider.decelRate * dt;
   }
   speed = Math.max(0, Math.min(activeRider.maxSpeed, speed));
   stepBoardLift(dt);
