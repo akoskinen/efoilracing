@@ -2729,7 +2729,69 @@ function stepBoardLift(dt) {
 }
 const bankDecay      = 0.9;
 
-function updateBankAngle(dt) {
+// DualShock and other standard gamepads. Either stick's sideways axis sets
+// the lean, and either trigger is the throttle, so the pad works in either hand.
+const PAD_STICK_DEAD = 0.15;
+const PAD_TRIGGER_DEAD = 0.04;
+
+function padStick(raw) {
+  if (typeof raw !== 'number') return 0;
+  const a = Math.abs(raw);
+  if (a < PAD_STICK_DEAD) return 0;
+  return Math.sign(raw) * Math.min(1, (a - PAD_STICK_DEAD) / (1 - PAD_STICK_DEAD));
+}
+
+function padTrigger(button) {
+  if (!button) return 0;
+  const raw = typeof button.value === 'number' && button.value > 0 ? button.value : (button.pressed ? 1 : 0);
+  if (raw < PAD_TRIGGER_DEAD) return 0;
+  return Math.min(1, (raw - PAD_TRIGGER_DEAD) / (1 - PAD_TRIGGER_DEAD));
+}
+
+function racingPad() {
+  const list = navigator.getGamepads ? navigator.getGamepads() : [];
+  let steer = 0;
+  let steerOn = false;
+  let throttle = 0;
+  for (const pad of list) {
+    if (!pad || !pad.connected) continue;
+    for (const raw of [pad.axes[0], pad.axes[2]]) {
+      const x = padStick(raw);
+      if (Math.abs(x) > Math.abs(steer)) {
+        steer = x;
+        steerOn = true;
+      }
+    }
+    throttle = Math.max(throttle, padTrigger(pad.buttons[6]), padTrigger(pad.buttons[7]));
+  }
+  return { steer, steerOn, throttle };
+}
+
+// Move the lean toward `target` degrees. Pushing further uses the rider's
+// lean rate; easing off decays toward the target the way a released key does.
+function approachBank(dt, target) {
+  const capped = Math.max(-BANK_ANGLE_MAX, Math.min(BANK_ANGLE_MAX, target));
+  if (capped !== 0 && bankAngleDeg !== 0 && Math.sign(capped) !== Math.sign(bankAngleDeg)) {
+    bankAngleDeg = 0;
+  }
+  const gap = capped - bankAngleDeg;
+  const increasing = Math.abs(capped) > Math.abs(bankAngleDeg) + 0.05;
+  if (increasing && gap !== 0) {
+    const rate = Math.abs(bankAngleDeg) < 30 ? activeRider.lean0 : activeRider.lean30;
+    bankAngleDeg += Math.sign(gap) * Math.min(Math.abs(gap), rate * dt);
+  } else {
+    const decayPow = Math.pow(bankDecay, 60 * dt);
+    bankAngleDeg = capped + (bankAngleDeg - capped) * decayPow;
+    if (Math.abs(bankAngleDeg - capped) < 0.05) bankAngleDeg = capped;
+  }
+  if (Math.abs(bankAngleDeg) < 0.05 && Math.abs(capped) < 0.05) bankAngleDeg = 0;
+}
+
+function updateBankAngle(dt, stick) {
+  if (typeof stick === 'number') {
+    approachBank(dt, stick * BANK_ANGLE_MAX);
+    return;
+  }
   let targetSign = 0;
   if (keys['ArrowLeft'])  targetSign = -1;
   if (keys['ArrowRight']) targetSign =  1;
@@ -4251,8 +4313,10 @@ function update(dt){
   prevPos.x = pos.x;
   prevPos.y = pos.y;
   
-  if (keys['ArrowUp']) {
-    speed += activeRider.accelRate * dt;
+  const pad = racingPad();
+  const accel = Math.max(keys['ArrowUp'] ? 1 : 0, pad.throttle);
+  if (accel > 0) {
+    speed += activeRider.accelRate * accel * dt;
   }
   if (keys['ArrowDown']) {
     speed -= activeRider.decelRate * dt;
@@ -4260,7 +4324,7 @@ function update(dt){
   speed = Math.max(0, Math.min(activeRider.maxSpeed, speed));
   stepBoardLift(dt);
 
-  updateBankAngle(dt);
+  updateBankAngle(dt, pad.steerOn ? pad.steer : null);
   
   const speedKmh = speed * speedConversion;
   const radius   = getTurnRadius(speedKmh, Math.abs(bankAngleDeg));
