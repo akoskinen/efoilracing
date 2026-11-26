@@ -4935,10 +4935,22 @@ function stepWakes(dt) {
   stepTipWake(stance, ppm);
   stepHullWake(foil, speedMs, ppm);
   const cut = offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+  // The tip is only about 2.5 cm out (at the draw scale) at 55°, so spray
+  // starts at a third and is full from 2 cm out.
+  let tip = null;
+  if (stance.tipBreachM > 0) {
+    const at = offsetRight(pos.x, pos.y, heading, stance.tipSideM);
+    tip = {
+      x: at.x, y: at.y,
+      side: Math.sign(stance.tipSideM),
+      strength: Math.min(1, 0.35 + stance.tipBreachM / 0.02)
+    };
+  }
   stepSpray(dt, {
     x: cut.x, y: cut.y, heading, speedMs, foil, rollRad, ppm,
     scale: CRAFT_DRAW_SCALE,
-    chordM: MAST_CHORD_M / 2
+    chordM: MAST_CHORD_M / 2,
+    tip
   });
 }
 
