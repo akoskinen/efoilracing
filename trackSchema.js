@@ -1540,6 +1540,16 @@ function lerpNum(a, b, t) {
   return a + (b - a) * t;
 }
 
+// Lean and ride height exist only on laps recorded in the simulator.
+function lerpRecordedField(a, b, t) {
+  const x = Number(a);
+  const y = Number(b);
+  if (!Number.isFinite(x) && !Number.isFinite(y)) return undefined;
+  if (!Number.isFinite(x)) return y;
+  if (!Number.isFinite(y)) return x;
+  return x + (y - x) * t;
+}
+
 function lerpPt(a, b, t) {
   return { x: lerpNum(a.x, b.x, t), y: lerpNum(a.y, b.y, t) };
 }
@@ -1728,7 +1738,9 @@ export function smoothSparseGhostFrames(frames, options = {}) {
           y: xy.y,
           heading: a.heading ?? a.h,
           headingSpace: a.headingSpace || b.headingSpace,
-          speedKmh: lerpNum(a.speedKmh || 0, b.speedKmh || 0, t)
+          speedKmh: lerpNum(a.speedKmh || 0, b.speedKmh || 0, t),
+          leanDeg: lerpRecordedField(a.leanDeg, b.leanDeg, t),
+          liftM: lerpRecordedField(a.liftM, b.liftM, t)
         }, out[out.length - 1]);
       }
     }

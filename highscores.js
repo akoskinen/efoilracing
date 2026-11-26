@@ -1,5 +1,19 @@
 import { pauseGame, resumeGame } from './engine.js';
 
+// Keep the maneuver with a stored frame. Imported logs have none of these.
+function storedGhostFrame(frame) {
+  const out = {
+    time: Number(frame.time.toFixed(2)),
+    x: Number(frame.x.toFixed(2)),
+    y: Number(frame.y.toFixed(2)),
+    heading: Number(frame.heading.toFixed(2))
+  };
+  if (Number.isFinite(frame.speedKmh)) out.speedKmh = Number(frame.speedKmh.toFixed(1));
+  if (Number.isFinite(frame.leanDeg)) out.leanDeg = Number(frame.leanDeg.toFixed(1));
+  if (Number.isFinite(frame.liftM)) out.liftM = Number(frame.liftM.toFixed(3));
+  return out;
+}
+
 export class HighScoreManager {
   constructor() {
     this.injectStyles();
@@ -210,24 +224,12 @@ export class HighScoreManager {
         for (let i = 0; i < entry.ghostData.length; i += interval) {
           if (sampledFrames.length >= 200) break; // Hard limit
           
-          const frame = entry.ghostData[i];
-          sampledFrames.push({
-            time: Number(frame.time.toFixed(2)),
-            x: Number(frame.x.toFixed(2)),
-            y: Number(frame.y.toFixed(2)),
-            heading: Number(frame.heading.toFixed(2))
-          });
+          sampledFrames.push(storedGhostFrame(entry.ghostData[i]));
         }
         
         // Ensure we always include the last frame
         if (entry.ghostData.length > 0 && sampledFrames.length > 0) {
-          const lastFrame = entry.ghostData[entry.ghostData.length - 1];
-          sampledFrames.push({
-            time: Number(lastFrame.time.toFixed(2)),
-            x: Number(lastFrame.x.toFixed(2)),
-            y: Number(lastFrame.y.toFixed(2)),
-            heading: Number(lastFrame.heading.toFixed(2))
-          });
+          sampledFrames.push(storedGhostFrame(entry.ghostData[entry.ghostData.length - 1]));
         }
         
         optimizedEntry.ghostData = sampledFrames;
@@ -479,6 +481,9 @@ export class HighScoreManager {
             x: frame.x || 0,
             y: frame.y || 0,
             heading: frame.heading || 0,
+            speedKmh: frame.speedKmh,
+            leanDeg: frame.leanDeg,
+            liftM: frame.liftM,
             finalLapTime: score.time
           })) : [];
           
