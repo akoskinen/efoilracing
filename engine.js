@@ -1141,7 +1141,7 @@ function resetRideForNewTrack() {
   idealLineData = null;
   showIdealLine = false;
   resetGhostTimeline();
-  ghostWakeTrail = [];
+  clearGhostTrails();
   zoomStopIndex = 0;
   const music = AudioManager.sounds.music;
   if (music && !music.paused) {
@@ -2226,7 +2226,7 @@ function setGhostPreviewPlaying(on) {
   const nowT = ghostPlaybackTimeSec();
   ghostScrubbing = false;
   ghostUserSeeked = true;
-  ghostWakeTrail = [];
+  clearGhostTrails();
   if (on) {
     let start = nowT;
     if (dur > 0 && start >= dur - 0.25) start = 0;
@@ -3039,7 +3039,16 @@ let ghostStats = {
 };
 
 // Add ghost wake trail array
-let ghostWakeTrail = [];
+let ghostWakeTrail = new Array();
+let ghostTipWake = [];
+let ghostTipRun = 0;
+let ghostTipOn = false;
+function clearGhostTrails() {
+  ghostWakeTrail.length = 0;
+  ghostTipWake.length = 0;
+  ghostTipRun = 0;
+  ghostTipOn = false;
+}
 let ghostDeltaSearchIdx = 0;
 let ghostDeltaGhost = null;
 
@@ -3574,7 +3583,10 @@ function recordGhostData(timeSec) {
     y: trackM.y,
     heading,
     speedKmh: speed * speedConversion, // Current speed
-    avgSpeedKmh: currentAvgSpeed       // Running average speed
+    avgSpeedKmh: currentAvgSpeed,      // Running average speed
+    // The maneuver itself, so a replay rolls and rides at the height it did.
+    leanDeg: Math.round(bankAngleDeg * 10) / 10,
+    liftM: Math.round(shownBoardLiftM * 1000) / 1000
   });
 }
 
@@ -3618,7 +3630,9 @@ function getGhostPosition(t, ghostData) {
         heading: prev.heading + ratio * (next.heading - prev.heading),
         headingSpace: prev.headingSpace || next.headingSpace,
         time: t,
-        speedKmh: prev.speedKmh
+        speedKmh: lerpRecorded(prev.speedKmh, next.speedKmh, ratio),
+        leanDeg: lerpRecorded(prev.leanDeg, next.leanDeg, ratio),
+        liftM: lerpRecorded(prev.liftM, next.liftM, ratio)
       };
     }
     
@@ -3631,6 +3645,17 @@ function getGhostPosition(t, ghostData) {
   
   // Fallback: use first frame (should not reach here if data is valid)
   return { ...frames[0] };
+}
+
+// A field a recorded lap stores and an imported log does not. Hold whichever
+// side has it, and leave it off when neither does.
+function lerpRecorded(a, b, t) {
+  const x = Number(a);
+  const y = Number(b);
+  if (!Number.isFinite(x) && !Number.isFinite(y)) return undefined;
+  if (!Number.isFinite(x)) return y;
+  if (!Number.isFinite(y)) return x;
+  return x + (y - x) * t;
 }
 
 // GPS / session ghosts store heading in track-meter radians; legacy sim ghosts
@@ -3707,7 +3732,7 @@ function seekGhostTo(sec, { play } = {}) {
   ghostSeekSec = t;
   ghostClockOrigin = t;
   ghostUserSeeked = true;
-  ghostWakeTrail = [];
+  clearGhostTrails();
   const now = ghostNowMs();
   if (lapActive && lapStartTime) {
     ghostRaceOffsetSec = t - (now - lapStartTime) / 1000;
@@ -3730,7 +3755,7 @@ function startGhostPreview() {
   ghostScrubPointerId = null;
   ghostPlaying = true;
   ghostPreviewStart = performance.now();
-  ghostWakeTrail = [];
+  clearGhostTrails();
   syncGhostTimelineUi();
 }
 
@@ -3770,19 +3795,40 @@ function drawGhostFrame() {
     }
 
     const ghostKmh = Number(frame.speedKmh);
-    drawGhost(ghostX, ghostY, ghostFrameHeadingToScreen(frame), ghostKmh > 10 ? BOARD_LIFT_M : 0);
+    const recordedLift = Number(frame.liftM);
+    const ghostLift = Number.isFinite(recordedLift) ? recordedLift : (ghostKmh > 10 ? BOARD_LIFT_M : 0);
+    const recordedLean = Number(frame.leanDeg);
+    const ghostRoll = Number.isFinite(recordedLean) ? recordedLean * Math.PI / 180 : 0;
+    const ghostHeading = ghostFrameHeadingToScreen(frame);
+    drawGhost(ghostX, ghostY, ghostHeading, ghostLift, ghostRoll);
     drawGhostRiderLabel(ghostX, ghostY);
 
-    ghostWakeTrail.push({ x: ghostX, y: ghostY });
+    // The wake leaves where the ghost's mast meets the water, so a leaned
+    // replay trails off to the inside of its turn like the rider did.
+    const ghostStance = foilStance(ghostLift, ghostRoll);
+    const ghostCut = offsetRight(ghostX, ghostY, ghostHeading, ghostStance.waterSideM);
+    ghostWakeTrail.push(ghostCut);
+    if (ghostStance.tipBreachM > 0) {
+      if (!ghostTipOn) ghostTipRun++;
+      ghostTipOn = true;
+      const tip = offsetRight(ghostX, ghostY, ghostHeading, ghostStance.tipSideM);
+      ghostTipWake.push({ x: tip.x, y: tip.y, run: ghostTipRun });
+    } else {
+      ghostTipOn = false;
+    }
     const targetWakeLength = 200;
     while (ghostWakeTrail.length > 1 && totalTrailDistance(ghostWakeTrail) > targetWakeLength) {
         ghostWakeTrail.shift();
     }
+    const tipLen = TIP_WAKE_FADE_M * (pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M);
+    while (ghostTipWake.length > 1 && totalTrailDistance(ghostTipWake) > tipLen) {
+        ghostTipWake.shift();
+    }
 }
 
 // Separate function to draw the ghost racer at a given position
-function drawGhost(x, y, heading, liftM = 0) {
-  drawCraft(x, y, heading, liftM, 0, true);
+function drawGhost(x, y, heading, liftM = 0, rollRad = 0) {
+  drawCraft(x, y, heading, liftM, rollRad, true);
 }
 
 function ghostNameText(ghost) {
@@ -3845,7 +3891,7 @@ function startLap(){
   ghostPlaying = true;
   
   // Clear ghost wake trail
-  ghostWakeTrail = [];
+  clearGhostTrails();
   ghostDeltaSearchIdx = 0;
   
   // Initialize ghost if available
@@ -3963,7 +4009,7 @@ function completeLap() {
     } else {
       resetGhostTimeline();
     }
-    ghostWakeTrail = [];
+    clearGhostTrails();
 
     // Set lap to inactive before any potential game pause
     lapActive = false;
@@ -4569,6 +4615,16 @@ function drawWake(){
       const alpha = t;
       ctx.strokeStyle = `rgba(255,136,255,${alpha.toFixed(2)})`;
       strokeSlimWake(ghostWakeTrail[i - 1].x, ghostWakeTrail[i - 1].y, ghostWakeTrail[i].x, ghostWakeTrail[i].y);
+    }
+  }
+  if (lapActive || ghostPreviewStart) {
+    for (let i = 1; i < ghostTipWake.length; i++) {
+      const a = ghostTipWake[i - 1];
+      const b = ghostTipWake[i];
+      if (a.run !== b.run) continue;
+      const fade = i / ghostTipWake.length;
+      ctx.strokeStyle = `rgba(255,136,255,${(0.9 * fade).toFixed(2)})`;
+      strokeSlimWake(a.x, a.y, b.x, b.y);
     }
   }
 }
@@ -6060,7 +6116,7 @@ if (chooseFileBtn && importGhostFile) {
 function restorePreviousLapGhost() {
   setKeepCurrentGhost(false);
   resetGhostTimeline();
-  ghostWakeTrail = [];
+  clearGhostTrails();
   if (lastValidGhost) {
     currentGhost = lastValidGhost;
     ghostDataMap.set(currentTrackKey, lastValidGhost);
@@ -6600,7 +6656,7 @@ function resetTrack() {
     
     idealLineData = null;
     showIdealLine = false;
-    ghostWakeTrail = [];
+    clearGhostTrails();
 }
 
 function formatLapClock(sec) {
