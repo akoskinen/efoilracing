@@ -9,8 +9,12 @@
 
 import * as THREE from './lib/three/three.module.min.js';
 import { depthAt, projectHeight } from './chaseCam.js';
+import { spray, SPRAY_MAX } from './chaseSpray.js';
 
 const MODEL_URL = new URL('./assets/board/efoil.glb', import.meta.url);
+// Streaks show how far a droplet moves against the board in this long, so
+// the camera riding along sees them smear back from the mast.
+const STREAK_S = 0.028;
 
 let gl = null;
 let failed = false;
@@ -231,6 +235,130 @@ function loadModel() {
 
 loadModel();
 
+const DROP_VERTEX = `
+attribute float aSize;
+attribute float aAlpha;
+uniform float uPx;
+varying float vAlpha;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  float px = aSize * uPx / max(1.0, -mv.z);
+  gl_PointSize = clamp(px, 1.0, 48.0);
+  // Below a pixel, fade instead of shrinking so it does not sparkle.
+  vAlpha = aAlpha * clamp(px, 0.0, 1.0);
+}`;
+const DROP_FRAGMENT = `
+varying float vAlpha;
+void main() {
+  vec2 c = gl_PointCoord * 2.0 - 1.0;
+  float r = dot(c, c);
+  if (r > 1.0) discard;
+  float a = vAlpha * pow(1.0 - r, 1.4);
+  vec3 col = mix(vec3(0.72, 0.84, 0.92), vec3(1.0), 1.0 - r);
+  gl_FragColor = vec4(col * a, a);
+}`;
+const STREAK_VERTEX = `
+attribute float aAlpha;
+varying float vAlpha;
+void main() {
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vAlpha = aAlpha;
+}`;
+const STREAK_FRAGMENT = `
+varying float vAlpha;
+void main() {
+  gl_FragColor = vec4(vec3(0.9, 0.96, 1.0) * vAlpha, vAlpha);
+}`;
+
+let sprayFx = null;
+function setupSpray() {
+  if (sprayFx || !gl) return sprayFx;
+  const common = {
+    transparent: true,
+    depthWrite: false,
+    premultipliedAlpha: true
+  };
+  const uniforms = { uPx: { value: 1 } };
+  const dropGeo = new THREE.BufferGeometry();
+  const dropPos = new THREE.BufferAttribute(new Float32Array(SPRAY_MAX * 3), 3);
+  const dropSize = new THREE.BufferAttribute(new Float32Array(SPRAY_MAX), 1);
+  const dropAlpha = new THREE.BufferAttribute(new Float32Array(SPRAY_MAX), 1);
+  for (const a of [dropPos, dropSize, dropAlpha]) a.setUsage(THREE.DynamicDrawUsage);
+  dropGeo.setAttribute('position', dropPos);
+  dropGeo.setAttribute('aSize', dropSize);
+  dropGeo.setAttribute('aAlpha', dropAlpha);
+  const drops = new THREE.Points(dropGeo, new THREE.ShaderMaterial({
+    ...common, uniforms, vertexShader: DROP_VERTEX, fragmentShader: DROP_FRAGMENT
+  }));
+
+  const streakGeo = new THREE.BufferGeometry();
+  const streakPos = new THREE.BufferAttribute(new Float32Array(SPRAY_MAX * 6), 3);
+  const streakAlpha = new THREE.BufferAttribute(new Float32Array(SPRAY_MAX * 2), 1);
+  for (const a of [streakPos, streakAlpha]) a.setUsage(THREE.DynamicDrawUsage);
+  streakGeo.setAttribute('position', streakPos);
+  streakGeo.setAttribute('aAlpha', streakAlpha);
+  const streaks = new THREE.LineSegments(streakGeo, new THREE.ShaderMaterial({
+    ...common, vertexShader: STREAK_VERTEX, fragmentShader: STREAK_FRAGMENT
+  }));
+
+  for (const obj of [drops, streaks]) {
+    obj.frustumCulled = false;
+    obj.matrixAutoUpdate = false;
+    obj.renderOrder = 2;
+    obj.visible = false;
+    gl.scene.add(obj);
+  }
+  sprayFx = { drops, streaks, uniforms, dropPos, dropSize, dropAlpha, streakPos, streakAlpha };
+  return sprayFx;
+}
+
+// Copy the simulated droplets into the buffers, in scene units.
+function syncSpray() {
+  const fx = setupSpray();
+  if (!fx) return 0;
+  const n = spray.count;
+  const ppm = spray.ppm;
+  const p = fx.dropPos.array;
+  const s = fx.dropSize.array;
+  const a = fx.dropAlpha.array;
+  const lp = fx.streakPos.array;
+  const la = fx.streakAlpha.array;
+  for (let i = 0; i < n; i++) {
+    const x = spray.x[i];
+    const y = -spray.y[i];
+    const z = spray.z[i] * ppm;
+    const t = spray.age[i] / spray.life[i];
+    const fade = Math.min(1, spray.age[i] / 0.05) * Math.pow(Math.max(0, 1 - t), 1.2);
+    const mist = spray.mist[i] === 1;
+    p[i * 3] = x;
+    p[i * 3 + 1] = y;
+    p[i * 3 + 2] = z;
+    s[i] = spray.size[i] * ppm;
+    a[i] = (mist ? 0.2 : 0.9) * fade;
+    lp[i * 6] = x;
+    lp[i * 6 + 1] = y;
+    lp[i * 6 + 2] = z;
+    lp[i * 6 + 3] = x - (spray.vx[i] - spray.boardVx) * STREAK_S;
+    lp[i * 6 + 4] = y + (spray.vy[i] - spray.boardVy) * STREAK_S;
+    lp[i * 6 + 5] = Math.max(0, z - spray.vz[i] * ppm * STREAK_S);
+    la[i * 2] = mist ? 0 : 0.42 * fade;
+    la[i * 2 + 1] = 0;
+  }
+  for (const attr of [fx.dropPos, fx.dropSize, fx.dropAlpha, fx.streakPos, fx.streakAlpha]) {
+    attr.needsUpdate = true;
+  }
+  fx.drops.geometry.setDrawRange(0, n);
+  fx.streaks.geometry.setDrawRange(0, n * 2);
+  return n;
+}
+
+function setSprayVisible(on) {
+  if (!sprayFx) return;
+  sprayFx.drops.visible = on;
+  sprayFx.streaks.visible = on;
+}
+
 function setCamera(cam, x0, y0, bw, bh, near, far) {
   const { camera } = gl;
   const ex = cam.eyeX;
@@ -318,21 +446,29 @@ function screenBox(cam, pose, ppm) {
   let minD = Infinity;
   let maxD = -Infinity;
   let behind = false;
+  const add = (p) => {
+    minD = Math.min(minD, depthAt(cam, p.x, p.y, p.z));
+    maxD = Math.max(maxD, depthAt(cam, p.x, p.y, p.z));
+    const s = projectHeight(cam, p.x, p.y, p.z);
+    if (!s) {
+      behind = true;
+      return;
+    }
+    minX = Math.min(minX, s.x);
+    maxX = Math.max(maxX, s.x);
+    minY = Math.min(minY, s.y);
+    maxY = Math.max(maxY, s.y);
+  };
   for (const x of [min[0], max[0]]) {
     for (const y of [min[1], max[1]]) {
-      for (const z of [min[2], max[2]]) {
-        const p = scenePoint(pose, ppm, x, y, z);
-        minD = Math.min(minD, depthAt(cam, p.x, p.y, p.z));
-        maxD = Math.max(maxD, depthAt(cam, p.x, p.y, p.z));
-        const s = projectHeight(cam, p.x, p.y, p.z);
-        if (!s) {
-          behind = true;
-          continue;
-        }
-        minX = Math.min(minX, s.x);
-        maxX = Math.max(maxX, s.x);
-        minY = Math.min(minY, s.y);
-        maxY = Math.max(maxY, s.y);
+      for (const z of [min[2], max[2]]) add(scenePoint(pose, ppm, x, y, z));
+    }
+  }
+  const b = pose.spray && spray.count ? spray.bounds : null;
+  if (b) {
+    for (const x of [b.minX, b.maxX]) {
+      for (const y of [b.minY, b.maxY]) {
+        for (const z of [b.minZ, b.maxZ]) add({ x, y, z });
       }
     }
   }
@@ -361,6 +497,8 @@ function renderJob(cam, job, ppm) {
   craft.root.visible = group === craft.root;
   craft.ghost.visible = group === craft.ghost;
   place(group, pose, ppm);
+  setSprayVisible(!!(pose.spray && spray.count));
+  if (sprayFx) sprayFx.uniforms.uPx.value = cam.f * vh / box.bh;
   const glY = gl.bufH - job.sy - vh;
   renderer.setViewport(job.sx, glY, vw, vh);
   renderer.setScissor(job.sx, glY, vw, vh);
@@ -370,8 +508,9 @@ function renderJob(cam, job, ppm) {
 
 /**
  * Draw scanned boards into `ctx` (screen space). Each pose is
- * `{ x, y, heading, roll, wingSideM, wingZM, alpha, ghost }` with x/y in
- * world pixels and the wing offsets in metres. Returns false until the
+ * `{ x, y, heading, roll, wingSideM, wingZM, alpha, ghost, spray }` with
+ * x/y in world pixels and the wing offsets in metres; `spray` draws the
+ * mast spray from chaseSpray.js with that board. Returns false until the
  * model is ready, so the caller can keep the flat board.
  */
 export function drawChaseBoards(ctx, cam, list, ppm) {
@@ -422,9 +561,11 @@ export function drawChaseBoards(ctx, cam, list, ppm) {
     renderer.setSize(gl.bufW, gl.bufH, false);
   }
 
+  if (jobs.some(job => job.pose.spray)) syncSpray();
   for (const job of jobs) renderJob(cam, job, ppm);
   craft.root.visible = false;
   craft.ghost.visible = false;
+  setSprayVisible(false);
 
   ctx.save();
   ctx.imageSmoothingEnabled = true;
