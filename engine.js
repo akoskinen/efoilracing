@@ -17,6 +17,8 @@ import {
   CHASE_DEFAULTS, CHASE_FIRST_PERSON, CHASE_LIMITS, clampChaseSettings
 } from "./chaseCam.js";
 import { drawChaseBuoys, chaseBuoysAvailable, chaseBuoyOccupies } from "./chaseBuoys3d.js";
+import { drawChaseBoards } from "./chaseBoard3d.js";
+import { stepSpray, clearSpray } from "./chaseSpray.js";
 import { mountCameraPanel } from "./cameraPanel.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
@@ -1131,7 +1133,9 @@ function resetRideForNewTrack() {
   speed = 0;
   bankAngleDeg = 0;
   shownBoardLiftM = 0;
+  boardLiftT = 0;
   wakeTrail = [];
+  clearTipWake();
   lapActive = false;
   validCrossing = false;
   idealLineData = null;
@@ -2716,18 +2720,52 @@ function advancePositionBySpeed(speedKmh, dt) {
 
 const BANK_ANGLE_MAX = RIDER_BANK_MAX;
 let bankAngleDeg     = 0;
-// Foil height shown in chase. Eases to 50 cm once HUD speed is above 10 km/h.
+// Foil height shown in chase. Above 10 km/h HUD speed the board lifts to
+// 50 cm, easing in and out over BOARD_TAKEOFF_S; below it settles back onto
+// the water over BOARD_TOUCHDOWN_S.
 const BOARD_LIFT_M = 0.5;
 const BOARD_LIFT_KMH = 10;
+const BOARD_TAKEOFF_S = 1.8;
+const BOARD_TOUCHDOWN_S = 1.2;
 let shownBoardLiftM = 0;
+let boardLiftT = 0;
 
 function stepBoardLift(dt) {
-  const target = (speed * speedConversion) > BOARD_LIFT_KMH ? BOARD_LIFT_M : 0;
-  const a = 1 - Math.exp(-(dt > 0 ? dt : 0) / 0.45);
-  shownBoardLiftM += (target - shownBoardLiftM) * a;
-  if (Math.abs(shownBoardLiftM - target) < 0.002) shownBoardLiftM = target;
+  const up = (speed * speedConversion) > BOARD_LIFT_KMH;
+  const step = (dt > 0 ? dt : 0) / (up ? BOARD_TAKEOFF_S : BOARD_TOUCHDOWN_S);
+  boardLiftT = Math.max(0, Math.min(1, boardLiftT + (up ? step : -step)));
+  const t = boardLiftT;
+  shownBoardLiftM = BOARD_LIFT_M * t * t * t * (t * (t * 6 - 15) + 10);
 }
 const bankDecay      = 0.9;
+// Even a quick rail-to-rail switch takes about half a second to come back
+// up to flat from a full lean.
+const UNLEAN_MAX_DPS = BANK_ANGLE_MAX / 0.5;
+
+// Ease the lean back toward `target` (flat, or a smaller lean on the same
+// side) the way a released key does, no faster than UNLEAN_MAX_DPS.
+function unleanToward(dt, target) {
+  const decayPow = Math.pow(bankDecay, 60 * dt);
+  let next = target + (bankAngleDeg - target) * decayPow;
+  const maxStep = UNLEAN_MAX_DPS * dt;
+  if (Math.abs(next - bankAngleDeg) > maxStep) {
+    next = bankAngleDeg + Math.sign(next - bankAngleDeg) * maxStep;
+  }
+  bankAngleDeg = next;
+}
+
+// Leaning across to the other side: come up through flat at the unlean
+// rate, and only start the new lean once past it. Returns the time left
+// over after reaching flat, or -1 while still coming up.
+function swingThroughFlat(dt) {
+  const need = Math.abs(bankAngleDeg) / UNLEAN_MAX_DPS;
+  if (need > dt) {
+    bankAngleDeg -= Math.sign(bankAngleDeg) * UNLEAN_MAX_DPS * dt;
+    return -1;
+  }
+  bankAngleDeg = 0;
+  return dt - need;
+}
 
 // DualShock and other standard gamepads. Either stick's sideways axis sets
 // the lean, and either trigger is the throttle, so the pad works in either hand.
@@ -2838,7 +2876,8 @@ function pollPadButtons(dt) {
 function approachBank(dt, target) {
   const capped = Math.max(-BANK_ANGLE_MAX, Math.min(BANK_ANGLE_MAX, target));
   if (capped !== 0 && bankAngleDeg !== 0 && Math.sign(capped) !== Math.sign(bankAngleDeg)) {
-    bankAngleDeg = 0;
+    dt = swingThroughFlat(dt);
+    if (dt <= 0) return;
   }
   const gap = capped - bankAngleDeg;
   const increasing = Math.abs(capped) > Math.abs(bankAngleDeg) + 0.05;
@@ -2846,8 +2885,7 @@ function approachBank(dt, target) {
     const rate = Math.abs(bankAngleDeg) < 30 ? activeRider.lean0 : activeRider.lean30;
     bankAngleDeg += Math.sign(gap) * Math.min(Math.abs(gap), rate * dt);
   } else {
-    const decayPow = Math.pow(bankDecay, 60 * dt);
-    bankAngleDeg = capped + (bankAngleDeg - capped) * decayPow;
+    unleanToward(dt, capped);
     if (Math.abs(bankAngleDeg - capped) < 0.05) bankAngleDeg = capped;
   }
   if (Math.abs(bankAngleDeg) < 0.05 && Math.abs(capped) < 0.05) bankAngleDeg = 0;
@@ -2863,24 +2901,20 @@ function updateBankAngle(dt, stick) {
   if (keys['ArrowRight']) targetSign =  1;
   
   if (targetSign !== 0) {
-    let currentMag = Math.abs(bankAngleDeg);
-    let sign = Math.sign(bankAngleDeg);
-    if (sign === 0) sign = targetSign;
-    if (sign !== targetSign) {
-      currentMag = 0;
-      bankAngleDeg = 0;
-      sign = targetSign;
+    if (bankAngleDeg !== 0 && Math.sign(bankAngleDeg) !== targetSign) {
+      dt = swingThroughFlat(dt);
+      if (dt <= 0) return;
     }
+    let currentMag = Math.abs(bankAngleDeg);
     let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
     currentMag += rate * dt;
     if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
-    bankAngleDeg = sign * currentMag;
+    bankAngleDeg = targetSign * currentMag;
   } else {
     if (Math.abs(bankAngleDeg) < 0.5) {
       bankAngleDeg = 0;
     } else {
-      const decayPow = Math.pow(bankDecay, 60 * dt);
-      bankAngleDeg *= decayPow;
+      unleanToward(dt, 0);
       if (Math.abs(bankAngleDeg) < 0.05) bankAngleDeg = 0;
     }
   }
@@ -2957,6 +2991,28 @@ let rideSimPaused = false;
 let rideSimPauseAt = 0;
 let prevPos = { x: 0, y: 0 };
 let wakeTrail = [];
+// Distance ridden and time since load, so wakes can fade by either.
+let rideOdoM = 0;
+let rideClockS = 0;
+let rideOdoLast = null;
+// Spray from a wing tip breaking the surface: { x, y, atM, run }, where atM
+// is the odometer when it was laid and run groups one breach.
+const TIP_WAKE_FADE_M = 25;
+let tipWake = [];
+let tipWakeRun = 0;
+let tipWakeOn = false;
+// The displacement wake off the water: { x, y, h, atM, t, v, power }, one
+// sample per stretch ridden, with the heading and speed it was laid at.
+const HULL_WAKE_FADE_M = 20;
+const HULL_WAKE_STEP_M = 0.35;
+let hullWake = [];
+function clearTipWake() {
+  tipWake = [];
+  tipWakeOn = false;
+  hullWake = [];
+  rideOdoLast = null;
+  clearSpray();
+}
 let showIdealLine = false;
 let idealLineData = null;
 
@@ -3153,7 +3209,7 @@ function currentChasePose() {
     speed * speedConversion,
     pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M,
     chaseSettings,
-    shownBoardLiftM
+    shownBoardLiftM * CRAFT_DRAW_SCALE
   );
 }
 
@@ -3726,20 +3782,7 @@ function drawGhostFrame() {
 
 // Separate function to draw the ghost racer at a given position
 function drawGhost(x, y, heading, liftM = 0) {
-  const paint = () => {
-    ctx.globalAlpha *= 0.25;
-    ctx.fillStyle = '#ff88ff';
-    ctx.fill();
-  };
-  if (!cameraIsFlat()) {
-    drawBoardOnWater(x, y, heading, paint, liftM, 0, 'rgba(255,136,255,0.25)');
-    return;
-  }
-  withWorldMarker(x, y, () => {
-    ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
-    traceBoard();
-    paint();
-  });
+  drawCraft(x, y, heading, liftM, 0, true);
 }
 
 function ghostNameText(ghost) {
@@ -4220,7 +4263,7 @@ function checkGateCrossing(oldPos, newPos) {
 
 // --- Collision Detection with Buoys ---
 // Turn buoys use the inflatable's real hull against the board and the mast,
-// in every camera view. The deck is the 3.2 m × 1.2 m chase board, sampled
+// in every camera view. The deck is the 3.20 m × 1.20 m chase board, sampled
 // on its outline and through the middle, at the height a lean gives it.
 const BOARD_HIT_ALONG = 7;
 const BOARD_HIT_ACROSS = 3;
@@ -4473,10 +4516,10 @@ function totalTrailDistance(trail){
   return d;
 }
 
-function strokeSlimWake(x1, y1, x2, y2) {
+function strokeSlimWake(x1, y1, x2, y2, px = 2) {
   // Screen pixels. The pitched view used to thicken this with the same
   // factor as the board, which turned the wake into a ribbon up close.
-  const width = 2 * (cameraIsFlat() ? worldMarkerScale() : 1);
+  const width = px * (cameraIsFlat() ? worldMarkerScale() : 1);
   ctx.lineWidth = width;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -4497,19 +4540,27 @@ function strokeSlimWake(x1, y1, x2, y2) {
 
 function drawWake(){
   // Draw player wake
+  drawHullWake();
   if (wakeTrail.length < 2) return;
+  // Flying, the mast leaves a slim line; down on the water the hull leaves
+  // a broader, softer wash.
+  const wash = (p, alpha) => {
+    const water = 1 - (p.foil ?? 1);
+    ctx.strokeStyle = `rgba(255,255,255,${(alpha * (1 - water * 0.6)).toFixed(2)})`;
+    return 2 + water * 5;
+  };
   for (let i = 1; i < wakeTrail.length; i++){
     const t = i / wakeTrail.length;
-    const alpha = t;
-    ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
-    strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
+    const width = wash(wakeTrail[i], t);
+    strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y, width);
   }
   // The trail is sampled before the move, so join it to where the mast
   // meets the water now.
   const last = wakeTrail[wakeTrail.length - 1];
   const origin = wakeOrigin();
-  ctx.strokeStyle = 'rgba(255,255,255,1)';
-  strokeSlimWake(last.x, last.y, origin.x, origin.y);
+  const width = wash(last, 1);
+  strokeSlimWake(last.x, last.y, origin.x, origin.y, width);
+  drawTipWake();
 
   // Draw ghost wake during active laps or free preview
   if ((lapActive || ghostPreviewStart) && ghostWakeTrail.length >= 2) {
@@ -4823,34 +4874,65 @@ function traceBoard() {
   ctx.closePath();
 }
 
-// The wing at the foot of the 85 cm mast is the pivot and `pos` is where it
-// runs. Foiling, the wing holds the depth it had at full lift, so a lean
-// swings the deck to the inside of the turn and lowers it, and the mast
-// crosses the water between the wing and the deck. Off the foil the board
-// rolls flat on the water. Sideways offsets are metres along the board's right.
-const MAST_M = 0.85;
+// The foil in real metres. Chase draws the whole craft at CRAFT_DRAW_SCALE,
+// so every stance length below comes out at that scale.
+const CRAFT_DRAW_SCALE = 2;
+const MAST_REAL_M = 0.85;               // deck underside to the wing
+const WING_HALF_SPAN_REAL_M = 0.225;
+const BOARD_HALF_BEAM_REAL_M = 0.30;
+const RAIL_CLEARANCE_REAL_M = 0.07;
+const MAST_M = MAST_REAL_M * CRAFT_DRAW_SCALE;
+
+function smoothMin(a, b, k) {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.min(a, b) - h * h * k / 4;
+}
+
+// How deep the wing rides, in real metres, at a lean. Flying level the deck
+// is BOARD_LIFT_M above the water. Leaning tips the low rail towards the
+// water, so past about 43° the rider brings the board higher on the mast,
+// keeping the rail RAIL_CLEARANCE_REAL_M clear. The wing and the motor pod,
+// 10 cm above it, stay under; only at the full 55° does the high wing tip
+// just break the surface.
+function wingDepthRealM(rollRad) {
+  const a = Math.abs(rollRad);
+  const level = MAST_REAL_M - BOARD_LIFT_M;
+  const rail = MAST_REAL_M * Math.cos(a) - BOARD_HALF_BEAM_REAL_M * Math.sin(a) - RAIL_CLEARANCE_REAL_M;
+  return smoothMin(level, rail, 0.04);
+}
+
+// The wing is the pivot and `pos` is where it runs. A lean swings the deck to
+// the inside of the turn, and the mast crosses the water between the wing and
+// the deck. Off the foil the board rolls flat on the water. Lengths are at
+// the draw scale; sideways offsets are along the board's right, from the wing.
 function foilStance(liftM, rollRad) {
   const rise = Math.min(1, Math.max(0, liftM) / BOARD_LIFT_M);
-  const depth = MAST_M - BOARD_LIFT_M;
+  const k = CRAFT_DRAW_SCALE;
   const c = Math.cos(rollRad);
   const s = Math.sin(rollRad);
+  const deckReal = rise * Math.max(0, MAST_REAL_M * c - wingDepthRealM(rollRad));
+  const wingZ = (deckReal - MAST_REAL_M * c) * k;
+  // The high tip is on the outside of the turn.
+  const tipZ = wingZ + WING_HALF_SPAN_REAL_M * Math.abs(s) * k;
   return {
-    deckM: rise * Math.max(0, MAST_M * c - depth),
-    deckSideM: rise * MAST_M * s,
-    waterSideM: rise * depth * s / Math.max(0.2, c),
+    deckM: deckReal * k,
+    deckSideM: rise * MAST_REAL_M * s * k,
+    waterSideM: -wingZ * s / Math.max(0.2, c),
+    tipSideM: -Math.sign(s) * WING_HALF_SPAN_REAL_M * c * k,
+    tipBreachM: rise > 0.98 ? Math.max(0, tipZ) : 0,
     rollRad
   };
 }
 
-// Chase scale (2×): trailing edge 50 cm from the tail, 24 cm chord, 4 cm thick.
+// Fallback mast, used until the scanned model is ready and while the camera
+// is still tilting. Chord and thickness are the 2× sizes.
 const MAST_CHORD_M = 0.24;
 const MAST_THICK_M = 0.04;
-const MAST_TRAILING_FROM_TAIL_M = 0.5;
-// `pos` is the mast, so the board turns about it. This is how far the
-// board's middle sits ahead of the mast.
+// `pos` is the wing, so the board turns about it. The deck's middle sits
+// this far ahead of that pivot at the draw scale.
+const DECK_AHEAD_OF_MAST_M = 0.888;
 function boardAheadOfMastM() {
-  const tailM = BOARD_LENGTH_M * -BOARD_TAIL / (BOARD_NOSE - BOARD_TAIL);
-  return tailM - MAST_TRAILING_FROM_TAIL_M - MAST_CHORD_M / 2;
+  return DECK_AHEAD_OF_MAST_M;
 }
 
 function boardMiddle(x, y, worldHeading) {
@@ -4868,6 +4950,133 @@ function wakeOrigin() {
   const chase = boardViewBlend().chase;
   const stance = foilStance(shownBoardLiftM * chase, bankAngleDeg * Math.PI / 180 * chase);
   return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+}
+
+// Lay spray where the high wing tip is out of the water, and drop it once
+// the rider has gone TIP_WAKE_FADE_M past it.
+function stepWakes(dt) {
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  if (rideOdoLast) rideOdoM += Math.hypot(pos.x - rideOdoLast.x, pos.y - rideOdoLast.y) / ppm;
+  rideOdoLast = { x: pos.x, y: pos.y };
+  rideClockS += dt;
+  const rollRad = bankAngleDeg * Math.PI / 180;
+  const stance = foilStance(shownBoardLiftM, rollRad);
+  const foil = Math.min(1, shownBoardLiftM / BOARD_LIFT_M);
+  const speedMs = speed * speedConversion / 3.6;
+  stepTipWake(stance, ppm);
+  stepHullWake(foil, speedMs, ppm);
+  const cut = offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+  // The tip is only about 2.5 cm out (at the draw scale) at 55°, so spray
+  // starts at a third and is full from 2 cm out.
+  let tip = null;
+  if (stance.tipBreachM > 0) {
+    const at = offsetRight(pos.x, pos.y, heading, stance.tipSideM);
+    tip = {
+      x: at.x, y: at.y,
+      side: Math.sign(stance.tipSideM),
+      strength: Math.min(1, 0.35 + stance.tipBreachM / 0.02)
+    };
+  }
+  stepSpray(dt, {
+    x: cut.x, y: cut.y, heading, speedMs, foil, rollRad, ppm,
+    scale: CRAFT_DRAW_SCALE,
+    chordM: MAST_CHORD_M / 2,
+    tip
+  });
+}
+
+// Lay spray where the high wing tip is out of the water, and drop it once
+// the rider has gone TIP_WAKE_FADE_M past it.
+function stepTipWake(stance, ppm) {
+  if (stance.tipBreachM > 0) {
+    if (!tipWakeOn) tipWakeRun++;
+    tipWakeOn = true;
+    const tip = offsetRight(pos.x, pos.y, heading, stance.tipSideM);
+    const prev = tipWake[tipWake.length - 1];
+    if (!prev || prev.run !== tipWakeRun || Math.hypot(tip.x - prev.x, tip.y - prev.y) / ppm > 0.25) {
+      tipWake.push({ x: tip.x, y: tip.y, atM: rideOdoM, run: tipWakeRun });
+    }
+  } else {
+    tipWakeOn = false;
+  }
+  while (tipWake.length && rideOdoM - tipWake[0].atM > TIP_WAKE_FADE_M) tipWake.shift();
+}
+
+// Off the foil the board is a hull pushing water aside. Its wake is
+// strongest near hull speed and gone once the board is flying.
+function hullWakeFade(s) {
+  return 1 - (rideOdoM - s.atM + (rideClockS - s.t) * 0.8) / HULL_WAKE_FADE_M;
+}
+
+function stepHullWake(foil, speedMs, ppm) {
+  const power = (1 - foil) * Math.min(1, speedMs / 2.2);
+  const prev = hullWake[hullWake.length - 1];
+  if (power > 0.03 && (!prev || rideOdoM - prev.atM >= HULL_WAKE_STEP_M)) {
+    const bow = boardMiddle(pos.x, pos.y, heading);
+    hullWake.push({ x: bow.x, y: bow.y, h: heading, atM: rideOdoM, t: rideClockS, v: speedMs, power });
+  }
+  while (hullWake.length && hullWakeFade(hullWake[0]) <= 0) hullWake.shift();
+}
+
+function drawTipWake() {
+  for (let i = 1; i < tipWake.length; i++) {
+    const a = tipWake[i - 1];
+    const b = tipWake[i];
+    if (a.run !== b.run) continue;
+    const fade = 1 - (rideOdoM - b.atM) / TIP_WAKE_FADE_M;
+    if (fade <= 0) continue;
+    ctx.strokeStyle = `rgba(255,255,255,${(0.9 * fade).toFixed(2)})`;
+    strokeSlimWake(a.x, a.y, b.x, b.y);
+  }
+}
+
+// A Kelvin wake: the divergent waves ride out along two arms at 19.5° from
+// the track, as short feathered crests that spread sideways over time, and
+// transverse crests arc across between the arms one wavelength apart.
+const KELVIN_TAN = Math.tan(19.47 * Math.PI / 180);
+const CREST_TURN = 55 * Math.PI / 180;
+function drawHullWake() {
+  if (!hullWake.length) return;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const halfBeam = BOARD_BEAM_M / 2;
+  let lastCrossing = null;
+  for (const s of hullWake) {
+    const fade = hullWakeFade(s);
+    if (fade <= 0) continue;
+    const age = rideClockS - s.t;
+    const spread = halfBeam + KELVIN_TAN * Math.max(s.v, 0.6) * age;
+    const fx = Math.cos(s.h);
+    const fy = Math.sin(s.h);
+    const strength = Math.pow(fade, 1.4) * s.power;
+    const len = Math.min(1.8, 0.35 + 0.07 * (rideOdoM - s.atM)) * ppm;
+    for (const side of [-1, 1]) {
+      // Crests turn back and outward from the arm.
+      const cx = -fx * Math.cos(CREST_TURN) - fy * side * Math.sin(CREST_TURN);
+      const cy = -fy * Math.cos(CREST_TURN) + fx * side * Math.sin(CREST_TURN);
+      for (let band = 0; band < 3; band++) {
+        const off = spread * (1 - band * 0.2);
+        const p = offsetRight(s.x, s.y, s.h, off * side);
+        const a = strength * (0.6 - band * 0.17);
+        if (a < 0.02) continue;
+        ctx.strokeStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+        const l = len * (1 - band * 0.25);
+        strokeSlimWake(p.x - cx * l * 0.5, p.y - cy * l * 0.5, p.x + cx * l * 0.5, p.y + cy * l * 0.5, 1.6);
+      }
+    }
+    const wavelength = Math.max(1.2, 2 * Math.PI * s.v * s.v / 9.81);
+    const crossing = Math.floor(s.atM / wavelength);
+    if (lastCrossing !== null && crossing !== lastCrossing) {
+      ctx.strokeStyle = `rgba(255,255,255,${(strength * 0.4).toFixed(3)})`;
+      let prev = null;
+      for (let i = 0; i <= 8; i++) {
+        const u = -1 + i / 4;
+        const p = offsetRight(s.x, s.y, s.h, u * spread * 0.85, -u * u * spread * 0.3);
+        if (prev) strokeSlimWake(prev.x, prev.y, p.x, p.y, 1.4);
+        prev = p;
+      }
+    }
+    lastCrossing = crossing;
+  }
 }
 
 // The part of the mast above the water, from the waterline up to the deck.
@@ -4934,16 +5143,63 @@ function drawBoardOnWater(x, y, worldHeading, paint, liftM, rollRad, mastColor) 
   drawBoardOnGround(deck.x, deck.y, worldHeading, painter, stance.deckM, stance.rollRad, blend.lengthMul, blend.beamMul);
 }
 
-function drawRacer() {
-  if (!cameraIsFlat()) {
-    drawBoardOnWater(pos.x, pos.y, heading, fillRiderBoard, shownBoardLiftM, bankAngleDeg * Math.PI / 180, '#1a1d22');
+function paintGhostBoard() {
+  ctx.globalAlpha *= 0.25;
+  ctx.fillStyle = '#ff88ff';
+  ctx.fill();
+}
+
+// Chase view draws the scanned efoil. The flat marker, and a fading copy of
+// it while the camera is still tilting, stay so the rider does not pop.
+function drawCraft(x, y, heading, liftM, rollRad, ghost) {
+  if (cameraIsFlat()) {
+    withWorldMarker(x, y, () => {
+      ctx.rotate(displayHeading(heading, x, y) - Math.PI / 2);
+      traceBoard();
+      if (ghost) paintGhostBoard();
+      else fillRiderBoard();
+    });
     return;
   }
-  withWorldMarker(pos.x, pos.y, () => {
-    ctx.rotate(displayHeading(heading, pos.x, pos.y) - Math.PI / 2);
-    traceBoard();
-    fillRiderBoard();
-  });
+  const blend = boardViewBlend();
+  const stance = foilStance(liftM * blend.chase, rollRad * blend.chase);
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  let mesh = false;
+  if (blend.chase > 0.04) {
+    const cos = Math.cos(stance.rollRad);
+    const sin = Math.sin(stance.rollRad);
+    mesh = drawChaseBoards(ctx, viewCamera(), [{
+      x,
+      y,
+      heading,
+      roll: stance.rollRad,
+      wingSideM: stance.deckSideM - MAST_M * sin,
+      wingZM: stance.deckM - MAST_M * cos,
+      alpha: (ghost ? 0.72 : 1) * blend.chase,
+      ghost: !!ghost,
+      spray: !ghost
+    }], ppm);
+  }
+  if (mesh && blend.chase > 0.97) {
+    if (!ghost) {
+      const deck = offsetRight(x, y, heading, stance.deckSideM, boardAheadOfMastM());
+      drawBoardShadow(deck.x, deck.y, heading, stance.deckM, blend.lengthMul, blend.beamMul);
+    }
+    return;
+  }
+  ctx.save();
+  if (mesh) ctx.globalAlpha *= 1 - blend.chase;
+  drawBoardOnWater(
+    x, y, heading,
+    ghost ? paintGhostBoard : fillRiderBoard,
+    liftM, rollRad,
+    ghost ? 'rgba(255,136,255,0.25)' : '#1a1d22'
+  );
+  ctx.restore();
+}
+
+function drawRacer() {
+  drawCraft(pos.x, pos.y, heading, shownBoardLiftM, bankAngleDeg * Math.PI / 180, false);
 }
 
 // traceBoard's outline as points, for drawing it in true perspective.
@@ -4981,10 +5237,10 @@ const BOARD_OUTLINE = (() => {
 const BOARD_NOSE = 13;
 const BOARD_TAIL = -12.35;
 const BOARD_HALF_BEAM = 4.55;
-// Real board is 1.60 m × 0.60 m. Chase draws it at twice that, 3.20 m × 1.20 m,
-// so the shape stays true and the board is readable from the riding camera.
-const BOARD_LENGTH_M = 3.2;
-const BOARD_BEAM_M = 1.2;
+// The deck is 1.60 m × 0.60 m. Chase draws it at twice that, 3.20 m × 1.20 m,
+// so the shape stays true and the board is readable.
+const BOARD_LENGTH_M = 1.6 * CRAFT_DRAW_SCALE;
+const BOARD_BEAM_M = BOARD_HALF_BEAM_REAL_M * 2 * CRAFT_DRAW_SCALE;
 
 // Lay the outline on the water. Flat views keep the big marker so the rider
 // stays easy to find. `liftM` is height above the water, `rollRad` leans the
@@ -5372,7 +5628,8 @@ function gameLoop(timestamp) {
   if (rideIntroFrame) setRideHudOpacity(rideIntroFrame.hud);
 
   if (!settleReveal && !rideSimPaused) {
-    wakeTrail.push(wakeOrigin());
+    wakeTrail.push({ ...wakeOrigin(), foil: Math.min(1, shownBoardLiftM / BOARD_LIFT_M) });
+    stepWakes(dt);
     const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
@@ -5734,7 +5991,9 @@ async function importSessionTrackText(text, fileName, kind) {
   speed = 0;
   bankAngleDeg = 0;
   shownBoardLiftM = 0;
+  boardLiftT = 0;
   wakeTrail = [];
+  clearTipWake();
   lapActive = false;
 
   applyImportedGhost(
@@ -6327,7 +6586,9 @@ function resetTrack() {
     speed = 0;
     bankAngleDeg = 0;
     shownBoardLiftM = 0;
+    boardLiftT = 0;
     wakeTrail = [];
+    clearTipWake();
     
     pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
     pos.y = canvas.height - 150;
