@@ -1,11 +1,10 @@
 ////////////////////////////////////////////////////////////
-// chaseBoard3d.js — the scanned efoil, drawn in chase view.
+// chaseBoard3d.js — the Lift X efoil, drawn in chase view.
 //
-// assets/board/efoil.glb is hydrofoil eFoil by Sergo_CRAFTSMAN
-// (https://sketchfab.com/3d-models/hydrofoil-efoil-a45cea5293054be2a494a66ac5c4cfb2),
-// CC BY 4.0. The scan was simplified and baked so its origin is the wing
-// pivot, +Z is the nose, +Y is up, and 1 unit is 1 metre at the 2× chase
-// scale. The part below the water is clipped.
+// assets/board/efoil.glb is baked so its origin is the wing under the mast,
+// +Z is the nose, +Y is up, and 1 unit is 1 metre at the 2× chase scale:
+// a 1.60 × 0.60 m deck, 85 cm from its underside to the wing, and a 45 cm
+// front wing. The part below the water is clipped.
 ////////////////////////////////////////////////////////////
 
 import * as THREE from './lib/three/three.module.min.js';
