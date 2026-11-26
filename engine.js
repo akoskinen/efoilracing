@@ -1133,6 +1133,7 @@ function resetRideForNewTrack() {
   bankAngleDeg = 0;
   shownBoardLiftM = 0;
   wakeTrail = [];
+  clearTipWake();
   lapActive = false;
   validCrossing = false;
   idealLineData = null;
@@ -2958,6 +2959,19 @@ let rideSimPaused = false;
 let rideSimPauseAt = 0;
 let prevPos = { x: 0, y: 0 };
 let wakeTrail = [];
+// Spray from a wing tip breaking the surface: { x, y, atM, run }, where atM
+// is the rider's odometer when it was laid and run groups one breach.
+const TIP_WAKE_FADE_M = 25;
+let tipWake = [];
+let tipWakeOdoM = 0;
+let tipWakeLast = null;
+let tipWakeRun = 0;
+let tipWakeOn = false;
+function clearTipWake() {
+  tipWake = [];
+  tipWakeLast = null;
+  tipWakeOn = false;
+}
 let showIdealLine = false;
 let idealLineData = null;
 
@@ -3154,7 +3168,7 @@ function currentChasePose() {
     speed * speedConversion,
     pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M,
     chaseSettings,
-    shownBoardLiftM
+    shownBoardLiftM * CRAFT_DRAW_SCALE
   );
 }
 
@@ -4208,7 +4222,7 @@ function checkGateCrossing(oldPos, newPos) {
 
 // --- Collision Detection with Buoys ---
 // Turn buoys use the inflatable's real hull against the board and the mast,
-// in every camera view. The deck is the 3.30 m × 1.42 m chase board, sampled
+// in every camera view. The deck is the 3.20 m × 1.20 m chase board, sampled
 // on its outline and through the middle, at the height a lean gives it.
 const BOARD_HIT_ALONG = 7;
 const BOARD_HIT_ACROSS = 3;
@@ -4498,6 +4512,7 @@ function drawWake(){
   const origin = wakeOrigin();
   ctx.strokeStyle = 'rgba(255,255,255,1)';
   strokeSlimWake(last.x, last.y, origin.x, origin.y);
+  drawTipWake();
 
   // Draw ghost wake during active laps or free preview
   if ((lapActive || ghostPreviewStart) && ghostWakeTrail.length >= 2) {
@@ -4811,23 +4826,52 @@ function traceBoard() {
   ctx.closePath();
 }
 
-// The wing at the foot of the mast is the pivot and `pos` is where it runs.
-// Chase draws the scanned efoil at 2×, so this mast is the scan's own mast
-// at that scale: deck underside to the wing. Foiling, the wing holds the
-// depth it had at full lift, so a lean swings the deck to the inside of the
-// turn and lowers it, and the mast crosses the water between the wing and
-// the deck. Off the foil the board rolls flat on the water. Sideways offsets
-// are metres along the board's right.
-const MAST_M = 1.468;
+// The foil in real metres. Chase draws the whole craft at CRAFT_DRAW_SCALE,
+// so every stance length below comes out at that scale.
+const CRAFT_DRAW_SCALE = 2;
+const MAST_REAL_M = 0.85;               // deck underside to the wing
+const WING_HALF_SPAN_REAL_M = 0.225;
+const BOARD_HALF_BEAM_REAL_M = 0.30;
+const RAIL_CLEARANCE_REAL_M = 0.07;
+const MAST_M = MAST_REAL_M * CRAFT_DRAW_SCALE;
+
+function smoothMin(a, b, k) {
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.min(a, b) - h * h * k / 4;
+}
+
+// How deep the wing rides, in real metres, at a lean. Flying level the deck
+// is BOARD_LIFT_M above the water. Leaning tips the low rail towards the
+// water, so past about 43° the rider brings the board higher on the mast,
+// keeping the rail RAIL_CLEARANCE_REAL_M clear. The wing and the motor pod,
+// 10 cm above it, stay under; only at the full 55° does the high wing tip
+// just break the surface.
+function wingDepthRealM(rollRad) {
+  const a = Math.abs(rollRad);
+  const level = MAST_REAL_M - BOARD_LIFT_M;
+  const rail = MAST_REAL_M * Math.cos(a) - BOARD_HALF_BEAM_REAL_M * Math.sin(a) - RAIL_CLEARANCE_REAL_M;
+  return smoothMin(level, rail, 0.04);
+}
+
+// The wing is the pivot and `pos` is where it runs. A lean swings the deck to
+// the inside of the turn, and the mast crosses the water between the wing and
+// the deck. Off the foil the board rolls flat on the water. Lengths are at
+// the draw scale; sideways offsets are along the board's right, from the wing.
 function foilStance(liftM, rollRad) {
   const rise = Math.min(1, Math.max(0, liftM) / BOARD_LIFT_M);
-  const depth = MAST_M - BOARD_LIFT_M;
+  const k = CRAFT_DRAW_SCALE;
   const c = Math.cos(rollRad);
   const s = Math.sin(rollRad);
+  const deckReal = rise * Math.max(0, MAST_REAL_M * c - wingDepthRealM(rollRad));
+  const wingZ = (deckReal - MAST_REAL_M * c) * k;
+  // The high tip is on the outside of the turn.
+  const tipZ = wingZ + WING_HALF_SPAN_REAL_M * Math.abs(s) * k;
   return {
-    deckM: rise * Math.max(0, MAST_M * c - depth),
-    deckSideM: rise * MAST_M * s,
-    waterSideM: rise * depth * s / Math.max(0.2, c),
+    deckM: deckReal * k,
+    deckSideM: rise * MAST_REAL_M * s * k,
+    waterSideM: -wingZ * s / Math.max(0.2, c),
+    tipSideM: -Math.sign(s) * WING_HALF_SPAN_REAL_M * c * k,
+    tipBreachM: rise > 0.98 ? Math.max(0, tipZ) : 0,
     rollRad
   };
 }
@@ -4836,9 +4880,9 @@ function foilStance(liftM, rollRad) {
 // is still tilting. Chord and thickness are the 2× sizes.
 const MAST_CHORD_M = 0.24;
 const MAST_THICK_M = 0.04;
-// `pos` is the wing, so the board turns about it. The scanned deck's middle
-// sits this far ahead of that pivot at the 2× chase scale.
-const DECK_AHEAD_OF_MAST_M = 1.052;
+// `pos` is the wing, so the board turns about it. The deck's middle sits
+// this far ahead of that pivot at the draw scale.
+const DECK_AHEAD_OF_MAST_M = 0.888;
 function boardAheadOfMastM() {
   return DECK_AHEAD_OF_MAST_M;
 }
@@ -4858,6 +4902,39 @@ function wakeOrigin() {
   const chase = boardViewBlend().chase;
   const stance = foilStance(shownBoardLiftM * chase, bankAngleDeg * Math.PI / 180 * chase);
   return offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+}
+
+// Lay spray where the high wing tip is out of the water, and drop it once
+// the rider has gone TIP_WAKE_FADE_M past it.
+function stepTipWake() {
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  if (tipWakeLast) tipWakeOdoM += Math.hypot(pos.x - tipWakeLast.x, pos.y - tipWakeLast.y) / ppm;
+  tipWakeLast = { x: pos.x, y: pos.y };
+  const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
+  if (stance.tipBreachM > 0) {
+    if (!tipWakeOn) tipWakeRun++;
+    tipWakeOn = true;
+    const tip = offsetRight(pos.x, pos.y, heading, stance.tipSideM);
+    const prev = tipWake[tipWake.length - 1];
+    if (!prev || prev.run !== tipWakeRun || Math.hypot(tip.x - prev.x, tip.y - prev.y) / ppm > 0.25) {
+      tipWake.push({ x: tip.x, y: tip.y, atM: tipWakeOdoM, run: tipWakeRun });
+    }
+  } else {
+    tipWakeOn = false;
+  }
+  while (tipWake.length && tipWakeOdoM - tipWake[0].atM > TIP_WAKE_FADE_M) tipWake.shift();
+}
+
+function drawTipWake() {
+  for (let i = 1; i < tipWake.length; i++) {
+    const a = tipWake[i - 1];
+    const b = tipWake[i];
+    if (a.run !== b.run) continue;
+    const fade = 1 - (tipWakeOdoM - b.atM) / TIP_WAKE_FADE_M;
+    if (fade <= 0) continue;
+    ctx.strokeStyle = `rgba(255,255,255,${(0.9 * fade).toFixed(2)})`;
+    strokeSlimWake(a.x, a.y, b.x, b.y);
+  }
 }
 
 // The part of the mast above the water, from the waterline up to the deck.
@@ -5017,10 +5094,10 @@ const BOARD_OUTLINE = (() => {
 const BOARD_NOSE = 13;
 const BOARD_TAIL = -12.35;
 const BOARD_HALF_BEAM = 4.55;
-// The scanned deck is about 1.65 m × 0.71 m. Chase draws it at twice that,
-// 3.30 m × 1.42 m, so the shape stays true and the board is readable.
-const BOARD_LENGTH_M = 3.302;
-const BOARD_BEAM_M = 1.422;
+// The deck is 1.60 m × 0.60 m. Chase draws it at twice that, 3.20 m × 1.20 m,
+// so the shape stays true and the board is readable.
+const BOARD_LENGTH_M = 1.6 * CRAFT_DRAW_SCALE;
+const BOARD_BEAM_M = BOARD_HALF_BEAM_REAL_M * 2 * CRAFT_DRAW_SCALE;
 
 // Lay the outline on the water. Flat views keep the big marker so the rider
 // stays easy to find. `liftM` is height above the water, `rollRad` leans the
@@ -5409,6 +5486,7 @@ function gameLoop(timestamp) {
 
   if (!settleReveal && !rideSimPaused) {
     wakeTrail.push(wakeOrigin());
+    stepTipWake();
     const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
@@ -5771,6 +5849,7 @@ async function importSessionTrackText(text, fileName, kind) {
   bankAngleDeg = 0;
   shownBoardLiftM = 0;
   wakeTrail = [];
+  clearTipWake();
   lapActive = false;
 
   applyImportedGhost(
@@ -6364,6 +6443,7 @@ function resetTrack() {
     bankAngleDeg = 0;
     shownBoardLiftM = 0;
     wakeTrail = [];
+    clearTipWake();
     
     pos.x = (canvas.width / 2) - 4; // Shift 4px to the left
     pos.y = canvas.height - 150;
