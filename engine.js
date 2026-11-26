@@ -1133,6 +1133,7 @@ function resetRideForNewTrack() {
   speed = 0;
   bankAngleDeg = 0;
   shownBoardLiftM = 0;
+  boardLiftT = 0;
   wakeTrail = [];
   clearTipWake();
   lapActive = false;
@@ -2719,18 +2720,52 @@ function advancePositionBySpeed(speedKmh, dt) {
 
 const BANK_ANGLE_MAX = RIDER_BANK_MAX;
 let bankAngleDeg     = 0;
-// Foil height shown in chase. Eases to 50 cm once HUD speed is above 10 km/h.
+// Foil height shown in chase. Above 10 km/h HUD speed the board lifts to
+// 50 cm, easing in and out over BOARD_TAKEOFF_S; below it settles back onto
+// the water over BOARD_TOUCHDOWN_S.
 const BOARD_LIFT_M = 0.5;
 const BOARD_LIFT_KMH = 10;
+const BOARD_TAKEOFF_S = 1.8;
+const BOARD_TOUCHDOWN_S = 1.2;
 let shownBoardLiftM = 0;
+let boardLiftT = 0;
 
 function stepBoardLift(dt) {
-  const target = (speed * speedConversion) > BOARD_LIFT_KMH ? BOARD_LIFT_M : 0;
-  const a = 1 - Math.exp(-(dt > 0 ? dt : 0) / 0.45);
-  shownBoardLiftM += (target - shownBoardLiftM) * a;
-  if (Math.abs(shownBoardLiftM - target) < 0.002) shownBoardLiftM = target;
+  const up = (speed * speedConversion) > BOARD_LIFT_KMH;
+  const step = (dt > 0 ? dt : 0) / (up ? BOARD_TAKEOFF_S : BOARD_TOUCHDOWN_S);
+  boardLiftT = Math.max(0, Math.min(1, boardLiftT + (up ? step : -step)));
+  const t = boardLiftT;
+  shownBoardLiftM = BOARD_LIFT_M * t * t * t * (t * (t * 6 - 15) + 10);
 }
 const bankDecay      = 0.9;
+// Even a quick rail-to-rail switch takes about half a second to come back
+// up to flat from a full lean.
+const UNLEAN_MAX_DPS = BANK_ANGLE_MAX / 0.5;
+
+// Ease the lean back toward `target` (flat, or a smaller lean on the same
+// side) the way a released key does, no faster than UNLEAN_MAX_DPS.
+function unleanToward(dt, target) {
+  const decayPow = Math.pow(bankDecay, 60 * dt);
+  let next = target + (bankAngleDeg - target) * decayPow;
+  const maxStep = UNLEAN_MAX_DPS * dt;
+  if (Math.abs(next - bankAngleDeg) > maxStep) {
+    next = bankAngleDeg + Math.sign(next - bankAngleDeg) * maxStep;
+  }
+  bankAngleDeg = next;
+}
+
+// Leaning across to the other side: come up through flat at the unlean
+// rate, and only start the new lean once past it. Returns the time left
+// over after reaching flat, or -1 while still coming up.
+function swingThroughFlat(dt) {
+  const need = Math.abs(bankAngleDeg) / UNLEAN_MAX_DPS;
+  if (need > dt) {
+    bankAngleDeg -= Math.sign(bankAngleDeg) * UNLEAN_MAX_DPS * dt;
+    return -1;
+  }
+  bankAngleDeg = 0;
+  return dt - need;
+}
 
 // DualShock and other standard gamepads. Either stick's sideways axis sets
 // the lean, and either trigger is the throttle, so the pad works in either hand.
@@ -2841,7 +2876,8 @@ function pollPadButtons(dt) {
 function approachBank(dt, target) {
   const capped = Math.max(-BANK_ANGLE_MAX, Math.min(BANK_ANGLE_MAX, target));
   if (capped !== 0 && bankAngleDeg !== 0 && Math.sign(capped) !== Math.sign(bankAngleDeg)) {
-    bankAngleDeg = 0;
+    dt = swingThroughFlat(dt);
+    if (dt <= 0) return;
   }
   const gap = capped - bankAngleDeg;
   const increasing = Math.abs(capped) > Math.abs(bankAngleDeg) + 0.05;
@@ -2849,8 +2885,7 @@ function approachBank(dt, target) {
     const rate = Math.abs(bankAngleDeg) < 30 ? activeRider.lean0 : activeRider.lean30;
     bankAngleDeg += Math.sign(gap) * Math.min(Math.abs(gap), rate * dt);
   } else {
-    const decayPow = Math.pow(bankDecay, 60 * dt);
-    bankAngleDeg = capped + (bankAngleDeg - capped) * decayPow;
+    unleanToward(dt, capped);
     if (Math.abs(bankAngleDeg - capped) < 0.05) bankAngleDeg = capped;
   }
   if (Math.abs(bankAngleDeg) < 0.05 && Math.abs(capped) < 0.05) bankAngleDeg = 0;
@@ -2866,24 +2901,20 @@ function updateBankAngle(dt, stick) {
   if (keys['ArrowRight']) targetSign =  1;
   
   if (targetSign !== 0) {
-    let currentMag = Math.abs(bankAngleDeg);
-    let sign = Math.sign(bankAngleDeg);
-    if (sign === 0) sign = targetSign;
-    if (sign !== targetSign) {
-      currentMag = 0;
-      bankAngleDeg = 0;
-      sign = targetSign;
+    if (bankAngleDeg !== 0 && Math.sign(bankAngleDeg) !== targetSign) {
+      dt = swingThroughFlat(dt);
+      if (dt <= 0) return;
     }
+    let currentMag = Math.abs(bankAngleDeg);
     let rate = (currentMag < 30) ? activeRider.lean0 : activeRider.lean30;
     currentMag += rate * dt;
     if (currentMag > BANK_ANGLE_MAX) currentMag = BANK_ANGLE_MAX;
-    bankAngleDeg = sign * currentMag;
+    bankAngleDeg = targetSign * currentMag;
   } else {
     if (Math.abs(bankAngleDeg) < 0.5) {
       bankAngleDeg = 0;
     } else {
-      const decayPow = Math.pow(bankDecay, 60 * dt);
-      bankAngleDeg *= decayPow;
+      unleanToward(dt, 0);
       if (Math.abs(bankAngleDeg) < 0.05) bankAngleDeg = 0;
     }
   }
@@ -5960,6 +5991,7 @@ async function importSessionTrackText(text, fileName, kind) {
   speed = 0;
   bankAngleDeg = 0;
   shownBoardLiftM = 0;
+  boardLiftT = 0;
   wakeTrail = [];
   clearTipWake();
   lapActive = false;
@@ -6554,6 +6586,7 @@ function resetTrack() {
     speed = 0;
     bankAngleDeg = 0;
     shownBoardLiftM = 0;
+    boardLiftT = 0;
     wakeTrail = [];
     clearTipWake();
     
