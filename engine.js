@@ -18,6 +18,7 @@ import {
 } from "./chaseCam.js";
 import { drawChaseBuoys, chaseBuoysAvailable, chaseBuoyOccupies } from "./chaseBuoys3d.js";
 import { drawChaseBoards } from "./chaseBoard3d.js";
+import { stepSpray, clearSpray } from "./chaseSpray.js";
 import { mountCameraPanel } from "./cameraPanel.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
@@ -2959,18 +2960,27 @@ let rideSimPaused = false;
 let rideSimPauseAt = 0;
 let prevPos = { x: 0, y: 0 };
 let wakeTrail = [];
+// Distance ridden and time since load, so wakes can fade by either.
+let rideOdoM = 0;
+let rideClockS = 0;
+let rideOdoLast = null;
 // Spray from a wing tip breaking the surface: { x, y, atM, run }, where atM
-// is the rider's odometer when it was laid and run groups one breach.
+// is the odometer when it was laid and run groups one breach.
 const TIP_WAKE_FADE_M = 25;
 let tipWake = [];
-let tipWakeOdoM = 0;
-let tipWakeLast = null;
 let tipWakeRun = 0;
 let tipWakeOn = false;
+// The displacement wake off the water: { x, y, h, atM, t, v, power }, one
+// sample per stretch ridden, with the heading and speed it was laid at.
+const HULL_WAKE_FADE_M = 20;
+const HULL_WAKE_STEP_M = 0.35;
+let hullWake = [];
 function clearTipWake() {
   tipWake = [];
-  tipWakeLast = null;
   tipWakeOn = false;
+  hullWake = [];
+  rideOdoLast = null;
+  clearSpray();
 }
 let showIdealLine = false;
 let idealLineData = null;
@@ -4475,10 +4485,10 @@ function totalTrailDistance(trail){
   return d;
 }
 
-function strokeSlimWake(x1, y1, x2, y2) {
+function strokeSlimWake(x1, y1, x2, y2, px = 2) {
   // Screen pixels. The pitched view used to thicken this with the same
   // factor as the board, which turned the wake into a ribbon up close.
-  const width = 2 * (cameraIsFlat() ? worldMarkerScale() : 1);
+  const width = px * (cameraIsFlat() ? worldMarkerScale() : 1);
   ctx.lineWidth = width;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -4499,19 +4509,26 @@ function strokeSlimWake(x1, y1, x2, y2) {
 
 function drawWake(){
   // Draw player wake
+  drawHullWake();
   if (wakeTrail.length < 2) return;
+  // Flying, the mast leaves a slim line; down on the water the hull leaves
+  // a broader, softer wash.
+  const wash = (p, alpha) => {
+    const water = 1 - (p.foil ?? 1);
+    ctx.strokeStyle = `rgba(255,255,255,${(alpha * (1 - water * 0.6)).toFixed(2)})`;
+    return 2 + water * 5;
+  };
   for (let i = 1; i < wakeTrail.length; i++){
     const t = i / wakeTrail.length;
-    const alpha = t;
-    ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
-    strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y);
+    const width = wash(wakeTrail[i], t);
+    strokeSlimWake(wakeTrail[i - 1].x, wakeTrail[i - 1].y, wakeTrail[i].x, wakeTrail[i].y, width);
   }
   // The trail is sampled before the move, so join it to where the mast
   // meets the water now.
   const last = wakeTrail[wakeTrail.length - 1];
   const origin = wakeOrigin();
-  ctx.strokeStyle = 'rgba(255,255,255,1)';
-  strokeSlimWake(last.x, last.y, origin.x, origin.y);
+  const width = wash(last, 1);
+  strokeSlimWake(last.x, last.y, origin.x, origin.y, width);
   drawTipWake();
 
   // Draw ghost wake during active laps or free preview
@@ -4906,23 +4923,56 @@ function wakeOrigin() {
 
 // Lay spray where the high wing tip is out of the water, and drop it once
 // the rider has gone TIP_WAKE_FADE_M past it.
-function stepTipWake() {
+function stepWakes(dt) {
   const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
-  if (tipWakeLast) tipWakeOdoM += Math.hypot(pos.x - tipWakeLast.x, pos.y - tipWakeLast.y) / ppm;
-  tipWakeLast = { x: pos.x, y: pos.y };
-  const stance = foilStance(shownBoardLiftM, bankAngleDeg * Math.PI / 180);
+  if (rideOdoLast) rideOdoM += Math.hypot(pos.x - rideOdoLast.x, pos.y - rideOdoLast.y) / ppm;
+  rideOdoLast = { x: pos.x, y: pos.y };
+  rideClockS += dt;
+  const rollRad = bankAngleDeg * Math.PI / 180;
+  const stance = foilStance(shownBoardLiftM, rollRad);
+  const foil = Math.min(1, shownBoardLiftM / BOARD_LIFT_M);
+  const speedMs = speed * speedConversion / 3.6;
+  stepTipWake(stance, ppm);
+  stepHullWake(foil, speedMs, ppm);
+  const cut = offsetRight(pos.x, pos.y, heading, stance.waterSideM);
+  stepSpray(dt, {
+    x: cut.x, y: cut.y, heading, speedMs, foil, rollRad, ppm,
+    scale: CRAFT_DRAW_SCALE,
+    chordM: MAST_CHORD_M / 2
+  });
+}
+
+// Lay spray where the high wing tip is out of the water, and drop it once
+// the rider has gone TIP_WAKE_FADE_M past it.
+function stepTipWake(stance, ppm) {
   if (stance.tipBreachM > 0) {
     if (!tipWakeOn) tipWakeRun++;
     tipWakeOn = true;
     const tip = offsetRight(pos.x, pos.y, heading, stance.tipSideM);
     const prev = tipWake[tipWake.length - 1];
     if (!prev || prev.run !== tipWakeRun || Math.hypot(tip.x - prev.x, tip.y - prev.y) / ppm > 0.25) {
-      tipWake.push({ x: tip.x, y: tip.y, atM: tipWakeOdoM, run: tipWakeRun });
+      tipWake.push({ x: tip.x, y: tip.y, atM: rideOdoM, run: tipWakeRun });
     }
   } else {
     tipWakeOn = false;
   }
-  while (tipWake.length && tipWakeOdoM - tipWake[0].atM > TIP_WAKE_FADE_M) tipWake.shift();
+  while (tipWake.length && rideOdoM - tipWake[0].atM > TIP_WAKE_FADE_M) tipWake.shift();
+}
+
+// Off the foil the board is a hull pushing water aside. Its wake is
+// strongest near hull speed and gone once the board is flying.
+function hullWakeFade(s) {
+  return 1 - (rideOdoM - s.atM + (rideClockS - s.t) * 0.8) / HULL_WAKE_FADE_M;
+}
+
+function stepHullWake(foil, speedMs, ppm) {
+  const power = (1 - foil) * Math.min(1, speedMs / 2.2);
+  const prev = hullWake[hullWake.length - 1];
+  if (power > 0.03 && (!prev || rideOdoM - prev.atM >= HULL_WAKE_STEP_M)) {
+    const bow = boardMiddle(pos.x, pos.y, heading);
+    hullWake.push({ x: bow.x, y: bow.y, h: heading, atM: rideOdoM, t: rideClockS, v: speedMs, power });
+  }
+  while (hullWake.length && hullWakeFade(hullWake[0]) <= 0) hullWake.shift();
 }
 
 function drawTipWake() {
@@ -4930,10 +4980,59 @@ function drawTipWake() {
     const a = tipWake[i - 1];
     const b = tipWake[i];
     if (a.run !== b.run) continue;
-    const fade = 1 - (tipWakeOdoM - b.atM) / TIP_WAKE_FADE_M;
+    const fade = 1 - (rideOdoM - b.atM) / TIP_WAKE_FADE_M;
     if (fade <= 0) continue;
     ctx.strokeStyle = `rgba(255,255,255,${(0.9 * fade).toFixed(2)})`;
     strokeSlimWake(a.x, a.y, b.x, b.y);
+  }
+}
+
+// A Kelvin wake: the divergent waves ride out along two arms at 19.5° from
+// the track, as short feathered crests that spread sideways over time, and
+// transverse crests arc across between the arms one wavelength apart.
+const KELVIN_TAN = Math.tan(19.47 * Math.PI / 180);
+const CREST_TURN = 55 * Math.PI / 180;
+function drawHullWake() {
+  if (!hullWake.length) return;
+  const ppm = pixelsPerMeter() || SPEED_CALIBRATION_PX_PER_M;
+  const halfBeam = BOARD_BEAM_M / 2;
+  let lastCrossing = null;
+  for (const s of hullWake) {
+    const fade = hullWakeFade(s);
+    if (fade <= 0) continue;
+    const age = rideClockS - s.t;
+    const spread = halfBeam + KELVIN_TAN * Math.max(s.v, 0.6) * age;
+    const fx = Math.cos(s.h);
+    const fy = Math.sin(s.h);
+    const strength = Math.pow(fade, 1.4) * s.power;
+    const len = Math.min(1.8, 0.35 + 0.07 * (rideOdoM - s.atM)) * ppm;
+    for (const side of [-1, 1]) {
+      // Crests turn back and outward from the arm.
+      const cx = -fx * Math.cos(CREST_TURN) - fy * side * Math.sin(CREST_TURN);
+      const cy = -fy * Math.cos(CREST_TURN) + fx * side * Math.sin(CREST_TURN);
+      for (let band = 0; band < 3; band++) {
+        const off = spread * (1 - band * 0.2);
+        const p = offsetRight(s.x, s.y, s.h, off * side);
+        const a = strength * (0.6 - band * 0.17);
+        if (a < 0.02) continue;
+        ctx.strokeStyle = `rgba(255,255,255,${a.toFixed(3)})`;
+        const l = len * (1 - band * 0.25);
+        strokeSlimWake(p.x - cx * l * 0.5, p.y - cy * l * 0.5, p.x + cx * l * 0.5, p.y + cy * l * 0.5, 1.6);
+      }
+    }
+    const wavelength = Math.max(1.2, 2 * Math.PI * s.v * s.v / 9.81);
+    const crossing = Math.floor(s.atM / wavelength);
+    if (lastCrossing !== null && crossing !== lastCrossing) {
+      ctx.strokeStyle = `rgba(255,255,255,${(strength * 0.4).toFixed(3)})`;
+      let prev = null;
+      for (let i = 0; i <= 8; i++) {
+        const u = -1 + i / 4;
+        const p = offsetRight(s.x, s.y, s.h, u * spread * 0.85, -u * u * spread * 0.3);
+        if (prev) strokeSlimWake(prev.x, prev.y, p.x, p.y, 1.4);
+        prev = p;
+      }
+    }
+    lastCrossing = crossing;
   }
 }
 
@@ -5034,7 +5133,8 @@ function drawCraft(x, y, heading, liftM, rollRad, ghost) {
       wingSideM: stance.deckSideM - MAST_M * sin,
       wingZM: stance.deckM - MAST_M * cos,
       alpha: (ghost ? 0.72 : 1) * blend.chase,
-      ghost: !!ghost
+      ghost: !!ghost,
+      spray: !ghost
     }], ppm);
   }
   if (mesh && blend.chase > 0.97) {
@@ -5485,8 +5585,8 @@ function gameLoop(timestamp) {
   if (rideIntroFrame) setRideHudOpacity(rideIntroFrame.hud);
 
   if (!settleReveal && !rideSimPaused) {
-    wakeTrail.push(wakeOrigin());
-    stepTipWake();
+    wakeTrail.push({ ...wakeOrigin(), foil: Math.min(1, shownBoardLiftM / BOARD_LIFT_M) });
+    stepWakes(dt);
     const targetWakeLength = (speed / activeRider.maxSpeed) * 200;
     while (wakeTrail.length > 1 && totalTrailDistance(wakeTrail) > targetWakeLength) {
       wakeTrail.shift();
