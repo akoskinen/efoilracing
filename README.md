@@ -32,6 +32,7 @@ Then open http://127.0.0.1:8081/ and http://127.0.0.1:8081/designer.html
 | **T** | World atlas (Esc or T again returns). Top-right **T World Map**. **C** and **N** still work while the map is open |
 | **F** | Fullscreen. Top-right **F Fullscreen** |
 | **N** | Show or hide the ghost's rider name. Top-right **N Ghost name**, in the same group as the other blue links |
+| **B** | Leaderboard for the course you're on. It fills the screen. Filter on-water laps and simulator laps, the period (today, this week from Monday, this calendar year, all time), and the board brand. Each entry shows the brand and board. Esc closes it |
 | **C** | **C Custom boards**, including from the world map. The board fills the view: Standard, KOSKINEN, MAKA, VARKEVISSER, and ARPA. Swipe it or use the blue arrows beside the board. On a desktop the sliders sit beside the board, and Shift+Left / Shift+Right move between boards. On a phone, tap the board to flip to the sliders. Up and Down move between the settings, Left and Right change the value, Enter saves, Esc eases the sliders back to the last save and closes. **Reset** restores that board's stock setup |
 
 The top-right group is **C Custom boards** • **N Ghost name**, then **T World Map** • **F Fullscreen**, then **P Hide Path** when the course has a line. Top-left stays **Design a track**, with **Edit current track** under it. That opens the designer on the course you are riding.
@@ -63,10 +64,41 @@ The top-left stack is **Design a track** and **Edit current track**. **Edit curr
 |---|---|
 | `trackSchema.js` | Shared track JSON, geo math, Official Speedtrack, session CSV → ghost, saved-track library |
 | `engine.js` | Physics, follow camera, streamed tiles, world atlas, ghosts, lap timing |
+| `highscores.js` | Full-screen leaderboard. On-water and simulator laps, period and brand |
+| `cloud.js` | Cloudflare board client. Laps and tracks. Empty URL keeps laps on this device |
+| `cloudflare/` | Worker and D1 schema for the laps and the tracks |
 | `designer.js` / `designer.html` | Visual editor on Leaflet + Esri tiles |
 | `trackConfigs.js` | Built-in arcade tracks |
 
 Motion is integrated in **track meters** (`km/h / 3.6`), then projected to pixels. That keeps HUD speed honest when a large geo course is fit-scaled onto the canvas.
+
+## Cloud board
+
+Laps and courses can live on Cloudflare. The worker in `cloudflare/` stores both in one D1 database. Reads are public. A lap save and a track upload send `Authorization: Bearer <token>`.
+
+```bash
+cd cloudflare
+npx wrangler d1 create efoil-racing
+```
+
+Paste the database id into `wrangler.toml`, then:
+
+```bash
+npx wrangler d1 execute efoil-racing --file=schema.sql
+npx wrangler secret put WRITE_TOKEN
+npx wrangler deploy
+```
+
+In the browser that runs the sim, point it at the worker. The laps you save after that are posted as simulator laps on a Lift Foils Lift X, and the leaderboard merges them with everyone else's.
+
+```js
+localStorage.setItem('efoil_cloud_url', 'https://efoil-racing.<account>.workers.dev')
+localStorage.setItem('efoil_cloud_token', '<the WRITE_TOKEN>')
+```
+
+On-water laps are the same record with `kind: "real"` and the board that was ridden. Week starts on Monday, and Season is the calendar year, both in the rider's local time. With no cloud URL the board shows the laps saved on this device.
+
+`putTrack(key, track)` and `fetchTrack(key)` in `cloud.js` are the course side of the same worker. The designer still keeps courses locally until a save is wired through.
 
 ## Milestones
 

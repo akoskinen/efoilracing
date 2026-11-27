@@ -22,6 +22,7 @@ import { stepSpray, clearSpray } from "./chaseSpray.js";
 import { mountCameraPanel } from "./cameraPanel.js";
 import { createGroundRenderer, groundQuads } from "./chaseGround.js";
 import { HighScoreManager } from './highscores.js';
+import { SIM_BRAND, SIM_BOARD } from './cloud.js';
 import {
   normalizeTrack, decodeTrackFromParam, DRAFT_STORAGE_KEY, LINE_CAPTURE_KEY,
   saveDraft,
@@ -4068,7 +4069,12 @@ function completeLap() {
 
         // After recording ghost data, show input form if it's a good time
         setTimeout(() => {
-            highScoreManager.showInputForm(currentLapTime, recordedGhost);
+            highScoreManager.showInputForm(currentLapTime, recordedGhost, {
+              kind: 'sim',
+              brand: SIM_BRAND,
+              board: SIM_BOARD,
+              riderName: activeRider && activeRider.meta ? activeRider.meta.name : ''
+            });
         }, 500);
         
         // Always enable ghost racing for the next lap with a valid ghost
