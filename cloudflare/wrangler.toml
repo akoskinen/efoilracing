@@ -1,0 +1,13 @@
+name = "efoil-racing"
+main = "worker.js"
+compatibility_date = "2026-11-26"
+
+# Create the database, then paste its id here:
+#   npx wrangler d1 create efoil-racing
+[[d1_databases]]
+binding = "DB"
+database_name = "efoil-racing"
+database_id = "fe74c5c9-fe75-41f8-88ac-3f00e38e3799"
+
+# Course uploads require this secret. Lap saves and reads stay public.
+#   npx wrangler secret put WRITE_TOKEN

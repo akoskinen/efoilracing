@@ -15,7 +15,8 @@ import {
   LINE_CAPTURE_KEY, LINE_RECORD_META_KEY,
   RACING_LINE_COLORS, newRacingLineId, defaultRacingLineName,
   buildRacingLineFromGhost,
-  BUILTIN_TRACK_PRESETS, loadUserTrackPresets, saveUserTrackPreset,
+  BUILTIN_TRACK_PRESETS, loadUserTrackPresets, globalTrackPresets, loadGlobalTrackLibrary,
+  saveUserTrackPreset,
   deleteUserTrackPreset, getTrackPresetById,
   flipTrackLayout, patchUserTrackPreset, replaceUserTrackPreset, countryFlagEmoji,
   geoFromSavedEntry, placeFromTrack, migrateTrackSchema,
@@ -2717,6 +2718,20 @@ function collectPresetMenuItems() {
       canDelete: false
     });
   });
+  const userIds = new Set(loadUserTrackPresets().map(p => p.id));
+  globalTrackPresets().forEach(p => {
+    if (userIds.has(p.id)) return;
+    items.push({
+      id: p.id,
+      name: p.name || 'Untitled',
+      builtin: false,
+      global: true,
+      kind: 'track',
+      meta: '',
+      place: p.place || placeFromTrack(p.track),
+      canDelete: false
+    });
+  });
   loadUserTrackPresets().forEach(p => {
     items.push({
       id: p.id,
@@ -2797,7 +2812,7 @@ function renderPresetsMenu(items) {
   const presets = items.filter(i => i.kind === 'preset');
   const parts = [];
 
-  parts.push('<div class="menu-label">Saved tracks</div>');
+  parts.push('<div class="menu-label">Tracks</div>');
   if (!saved.length) {
     parts.push('<button type="button" class="menu-item" disabled><span style="color:var(--muted)">None yet — save a track to reopen it here</span></button>');
   } else {
@@ -2819,7 +2834,7 @@ function renderPresetsMenu(items) {
 async function resolvePresetCountries(items) {
   let changed = false;
   for (const item of items) {
-    if (item.kind === 'preset') continue;
+    if (item.kind === 'preset' || item.global) continue;
     if (item.place?.countryCode && Number.isFinite(item.place.lat)) continue;
     const found = await lookupCountry(item.place, item.name);
     if (!found) continue;
@@ -2869,6 +2884,10 @@ function refreshPresetsMenu() {
     }
   });
 }
+
+loadGlobalTrackLibrary().then(() => {
+  if (presetsMenuWrap.classList.contains('open')) refreshPresetsMenu();
+});
 
 btnPresets.addEventListener('click', e => {
   e.stopPropagation();
@@ -2972,7 +2991,8 @@ presetsMenu.addEventListener('click', async e => {
         anchorTrackAt(geo.origin.lat, geo.origin.lng);
         commit();
       }
-      setActiveSavedTrack(id, track);
+      if (entry.global) clearActiveSavedTrack();
+      else setActiveSavedTrack(id, track);
     }
     closePresetsMenu();
     return;

@@ -566,8 +566,10 @@ export function getTrackPresetById(id) {
     };
   }
   const saved = loadUserTrackPresets().find(p => p.id === id);
-  if (!saved) return null;
-  return { ...saved, builtin: false, kind: saved.kind || 'track' };
+  if (saved) return { ...saved, builtin: false, kind: saved.kind || 'track' };
+  const shipped = globalTrackList.find(p => p.id === id);
+  if (!shipped) return null;
+  return { ...shipped, builtin: false, kind: 'track' };
 }
 
 export const TRACK_LIBRARY_KIND = 'efoil-track-library';
@@ -792,6 +794,57 @@ export function validateTrack(track) {
   }
 
   return { errors, warnings };
+}
+
+let globalTrackList = [];
+let globalTrackLoad = null;
+
+function asGlobalPreset(entry) {
+  const src = entry.track;
+  const { errors } = validateTrack(src);
+  if (errors.length) return null;
+  const name = (entry.name && String(entry.name).trim()) || src.name || 'Track';
+  const preset = {
+    id: entry.id || newPresetId(),
+    name,
+    savedAt: entry.savedAt || null,
+    kind: 'track',
+    global: true,
+    track: trackAsSavedTrack(src, name)
+  };
+  if (entry.place) preset.place = entry.place;
+  else {
+    const place = placeFromTrack(preset.track);
+    if (place) preset.place = place;
+  }
+  return preset;
+}
+
+/** Courses shipped with the sim. Empty until loadGlobalTrackLibrary resolves. */
+export function globalTrackPresets() {
+  return globalTrackList;
+}
+
+/** Fetch efoil-tracks-2026.json once and keep the courses for the atlas and the designer. */
+export function loadGlobalTrackLibrary() {
+  if (globalTrackLoad) return globalTrackLoad;
+  const url = new URL('./efoil-tracks-2026.json', import.meta.url);
+  globalTrackLoad = fetch(url)
+    .then(res => {
+      if (!res.ok) throw new Error('track library ' + res.status);
+      return res.json();
+    })
+    .then(parsed => {
+      const imported = parseTrackImport(parsed);
+      globalTrackList = (imported.entries || []).map(asGlobalPreset).filter(Boolean);
+      return globalTrackList;
+    })
+    .catch(err => {
+      console.error('Global tracks did not load', err);
+      globalTrackLoad = null;
+      return [];
+    });
+  return globalTrackLoad;
 }
 
 function closestPointOnSeg(px, py, seg) {
