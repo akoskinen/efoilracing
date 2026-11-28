@@ -30,7 +30,8 @@ import {
   haversineMeters, buildRacingLineFromGhost, chaseRacingLine, ghostFromRacingLine,
   RACING_LINE_COLORS, trackFromSessionCsv, trackFromSessionGpx, sessionCsvToGhost, sessionGpxToGhost,
   applySparseGhostSmoothing,
-  createOfficialSpeedtrack, loadUserTrackPresets, countryFlagEmoji,
+  createOfficialSpeedtrack, loadUserTrackPresets, globalTrackPresets, loadGlobalTrackLibrary,
+  countryFlagEmoji,
   buoyColorSide, turnBuoyPaint, MARKER_BUOY_FILL,
   countryGroupForPlace, presetGeoLatLng, LAST_RIDE_STORAGE_KEY, geoFromSavedEntry
 } from './trackSchema.js';
@@ -1346,8 +1347,14 @@ function cameraLatLngZoom() {
   return { ...ATLAS_WORLD };
 }
 
+function listedTrackPresets() {
+  const user = loadUserTrackPresets();
+  const userIds = new Set(user.map(p => p.id));
+  return [...globalTrackPresets().filter(p => !userIds.has(p.id)), ...user];
+}
+
 function buildAtlasPins() {
-  const presets = loadUserTrackPresets();
+  const presets = listedTrackPresets();
   const byKey = new Map();
   const layouts = [];
   for (const p of presets) {
@@ -2332,13 +2339,13 @@ if (atlasEls.layoutsBtn) {
 if (atlasEls.card) {
   atlasEls.card.addEventListener('click', e => {
     const btn = e.target.closest('[data-track-id]');
-    if (btn) diveToPreset(loadUserTrackPresets().find(p => p.id === btn.getAttribute('data-track-id')));
+    if (btn) diveToPreset(listedTrackPresets().find(p => p.id === btn.getAttribute('data-track-id')));
   });
 }
 if (atlasEls.layouts) {
   atlasEls.layouts.addEventListener('click', e => {
     const btn = e.target.closest('[data-track-id]');
-    if (btn) diveToPreset(loadUserTrackPresets().find(p => p.id === btn.getAttribute('data-track-id')));
+    if (btn) diveToPreset(listedTrackPresets().find(p => p.id === btn.getAttribute('data-track-id')));
   });
 }
 document.getElementById('atlasConfirmYes')?.addEventListener('click', () => {
@@ -6165,9 +6172,36 @@ placePlayerAtStart();
 updateGhostStats();
 
 const bootParams = new URLSearchParams(window.location.search);
-if (!loadUserTrackPresets().length && !bootParams.has('data') && bootParams.get('track') !== 'draft') {
+if (!loadUserTrackPresets().length && !bootParams.has('data') && !bootParams.has('track')) {
   openAtlas({ immediate: true });
 }
+
+loadGlobalTrackLibrary().then(() => {
+  globalTrackPresets().forEach(p => {
+    const key = savedTrackKey(p.id);
+    if (!trackConfigs[key]) registerCustomTrack(key, trackFromPreset(p));
+  });
+  const urlTrack = bootParams.get('track');
+  let restored = false;
+  if (!bootParams.has('data') && urlTrack && urlTrack !== 'draft') {
+    const key = trackConfigs[urlTrack] ? urlTrack : savedTrackKey(urlTrack);
+    if (trackConfigs[key] && currentTrackKey !== key) {
+      selectTrack(key);
+      restored = true;
+    }
+  } else if (!bootParams.has('data') && !urlTrack && currentTrackKey === 'official') {
+    const last = localStorage.getItem(LAST_RIDE_STORAGE_KEY);
+    if (last && trackConfigs[savedTrackKey(last)]) {
+      selectTrack(savedTrackKey(last));
+      restored = true;
+    }
+  }
+  if (restored && atlas.open) setAtlasOpen(false);
+  else if (atlas.open) refreshAtlasChrome();
+  else if (!bootParams.has('data') && !bootParams.has('track') && currentTrackKey === 'official' && !loadUserTrackPresets().length) {
+    openAtlas({ immediate: true });
+  }
+});
 
 // Add drag and drop event handlers
 const ghostControlsDiv = document.getElementById('ghostCustomize');
