@@ -6,7 +6,7 @@
 // PUT  /tracks/:key          Authorization: Bearer $WRITE_TOKEN
 // GET  /laps?track=&kind=&brand=&from=
 // GET  /laps/:id             includes the ghost, when one was stored
-// POST /laps                 Authorization: Bearer $WRITE_TOKEN
+// POST /laps                 public. A repeat of the same id is ignored.
 ////////////////////////////////////////////////////////////
 
 const CORS = {
@@ -135,7 +135,6 @@ async function getLap(id, env) {
 }
 
 async function postLap(request, env) {
-  if (!canWrite(request, env)) return json({ error: 'unauthorized' }, 401);
   let body;
   try { body = await request.json(); } catch { return json({ error: 'bad json' }, 400); }
   const cleaned = cleanLap(body || {});
@@ -144,16 +143,7 @@ async function postLap(request, env) {
   await env.DB.prepare(
     `INSERT INTO laps (id, track_key, nickname, time_s, distance_m, ridden_at, kind, brand, board, rider_name, ghost_json)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       nickname = excluded.nickname,
-       time_s = excluded.time_s,
-       distance_m = excluded.distance_m,
-       ridden_at = excluded.ridden_at,
-       kind = excluded.kind,
-       brand = excluded.brand,
-       board = excluded.board,
-       rider_name = excluded.rider_name,
-       ghost_json = excluded.ghost_json`
+     ON CONFLICT(id) DO NOTHING`
   ).bind(
     lap.id, lap.trackKey, lap.nickname, lap.time, lap.distance, lap.date,
     lap.kind, lap.brand, lap.board, lap.riderName, lap.ghost

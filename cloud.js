@@ -1,12 +1,12 @@
 ////////////////////////////////////////////////////////////
 // cloud.js — the leaderboard and track board on Cloudflare.
 //
-// Reads are public. Writes send the token from localStorage
-// `efoil_cloud_token` when `efoil_cloud_url` (or CLOUD_URL) is set.
-// With no URL the sim keeps its own laps on this device.
+// Reads are public, and so is saving a lap. Uploading a course sends
+// the token from localStorage `efoil_cloud_token`. `efoil_cloud_url`
+// overrides CLOUD_URL. With no URL the sim keeps its own laps on this device.
 ////////////////////////////////////////////////////////////
 
-export const CLOUD_URL = '';
+export const CLOUD_URL = 'https://efoil-racing.efoil-riders-workspace.workers.dev';
 export const SIM_BRAND = 'Lift Foils';
 export const SIM_BOARD = 'Lift X';
 

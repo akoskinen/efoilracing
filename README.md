@@ -74,29 +74,19 @@ Motion is integrated in **track meters** (`km/h / 3.6`), then projected to pixel
 
 ## Cloud board
 
-Laps and courses can live on Cloudflare. The worker in `cloudflare/` stores both in one D1 database. Reads are public. A lap save and a track upload send `Authorization: Bearer <token>`.
+The leaderboard and the courses live on Cloudflare. The worker in `cloudflare/` stores both in one D1 database. The sim ships with that worker's address (`CLOUD_URL` in `cloud.js`), so every visitor loads the same laps. Saving a lap is public. Uploading a course still needs `Authorization: Bearer <WRITE_TOKEN>`.
+
+The database id is already in `wrangler.toml`. After a change to the worker, publish it again:
 
 ```bash
 cd cloudflare
-npx wrangler d1 create efoil-racing
-```
-
-Paste the database id into `wrangler.toml`, then:
-
-```bash
-npx wrangler d1 execute efoil-racing --file=schema.sql
-npx wrangler secret put WRITE_TOKEN
+npx wrangler d1 execute efoil-racing --remote --file=schema.sql
 npx wrangler deploy
 ```
 
-In the browser that runs the sim, point it at the worker. The laps you save after that are posted as simulator laps on a Lift Foils Lift X, and the leaderboard merges them with everyone else's.
+A lap recorded in the sim is posted as a simulator lap on a Lift Foils Lift X. On-water laps are the same record with `kind: "real"` and the board that was ridden. Week starts on Monday, and Season is the calendar year, both in the rider's local time. If the cloud cannot be reached, the board shows the laps saved on this device.
 
-```js
-localStorage.setItem('efoil_cloud_url', 'https://efoil-racing.<account>.workers.dev')
-localStorage.setItem('efoil_cloud_token', '<the WRITE_TOKEN>')
-```
-
-On-water laps are the same record with `kind: "real"` and the board that was ridden. Week starts on Monday, and Season is the calendar year, both in the rider's local time. With no cloud URL the board shows the laps saved on this device.
+A browser can point at a different worker with `localStorage.setItem('efoil_cloud_url', 'https://...')`. The write token stays out of the site. A browser that should be allowed to upload a course sets `localStorage.setItem('efoil_cloud_token', '<the WRITE_TOKEN>')`.
 
 `putTrack(key, track)` and `fetchTrack(key)` in `cloud.js` are the course side of the same worker. The designer still keeps courses locally until a save is wired through.
 
