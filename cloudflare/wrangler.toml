@@ -7,7 +7,7 @@ compatibility_date = "2026-11-26"
 [[d1_databases]]
 binding = "DB"
 database_name = "efoil-racing"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "fe74c5c9-fe75-41f8-88ac-3f00e38e3799"
 
 # Writes require this secret. Reads stay public.
 #   npx wrangler secret put WRITE_TOKEN
